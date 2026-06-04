@@ -1,0 +1,66 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 20px;
+  height: 56px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand {
+  font-weight: 600;
+  font-size: 15px;
+  white-space: nowrap;
+}
+.logo {
+  margin-right: 4px;
+}
+
+.nav {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+}
+
+.navLink {
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.navLink:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.active {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.userbox {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.username {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.content {
+  flex: 1;
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px 20px 64px;
+}
