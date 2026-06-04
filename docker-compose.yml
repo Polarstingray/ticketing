@@ -1,0 +1,50 @@
+services:
+  backend:
+    build: ./backend
+    container_name: stingray-backend
+    restart: unless-stopped
+    environment:
+      # Initial admin (created only on first run when the DB is empty).
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      # Secret used to sign session cookies. CHANGE THIS in production.
+      SESSION_SECRET: ${SESSION_SECRET:-please-change-me}
+      # Set to "true" when served over HTTPS (Traefik) so the cookie is Secure.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      DATABASE_PATH: /data/stingray.db
+      # Allowed browser origins for CORS (dev convenience; same-origin in prod).
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    volumes:
+      - stingray-data:/data
+    networks:
+      - internal
+    # No published port by default — the frontend proxies to it over the
+    # internal network. Uncomment to expose the API directly:
+    # ports:
+    #   - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    container_name: stingray-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - internal
+      # - web        # <- external Traefik network; see traefik-labels.md
+    ports:
+      - "3000:3000"
+    # Traefik labels go here when wiring into your reverse proxy.
+    # See traefik-labels.md for a ready-to-paste block.
+    # labels:
+    #   - "traefik.enable=true"
+
+networks:
+  internal:
+    driver: bridge
+  # web:
+  #   external: true
+
+volumes:
+  stingray-data:

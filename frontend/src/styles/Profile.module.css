@@ -1,0 +1,46 @@
+.wrap {
+  max-width: 620px;
+}
+.wrap h1 {
+  font-size: 20px;
+  margin: 0 0 18px;
+}
+.h2 {
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.info {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 8px 16px;
+  margin: 0;
+}
+.info dt {
+  color: var(--text-dim);
+}
+.info dd {
+  margin: 0;
+}
+
+.keyRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.keyRow button {
+  width: auto;
+}
+.key {
+  flex: 1;
+  min-width: 220px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  overflow-x: auto;
+  white-space: nowrap;
+}

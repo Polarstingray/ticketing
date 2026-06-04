@@ -1,0 +1,93 @@
+.head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 18px;
+}
+.head h1 {
+  font-size: 20px;
+  margin: 0;
+}
+.head button {
+  width: auto;
+}
+
+.form {
+  margin-bottom: 20px;
+}
+.formGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.keyNotice {
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  border-color: var(--accent);
+}
+.keyNotice button {
+  width: auto;
+}
+
+.key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.table th,
+.table td {
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.table th {
+  background: var(--surface-2);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+.table td {
+  background: var(--surface);
+}
+.dim {
+  color: var(--text-dim);
+}
+.roleSelect {
+  width: auto;
+  min-width: 100px;
+  padding: 4px 8px;
+}
+.table button {
+  width: auto;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+@media (max-width: 600px) {
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+}

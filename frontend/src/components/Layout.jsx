@@ -1,0 +1,49 @@
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useAuth } from "../auth/AuthContext";
+import styles from "../styles/Layout.module.css";
+
+export default function Layout() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  async function handleLogout() {
+    await logout();
+    navigate("/login");
+  }
+
+  const linkClass = ({ isActive }) =>
+    isActive ? `${styles.navLink} ${styles.active}` : styles.navLink;
+
+  return (
+    <div className={styles.shell}>
+      <header className={styles.topbar}>
+        <div className={styles.brand}>
+          <span className={styles.logo}>🐟</span> Stingray Tickets
+        </div>
+        <nav className={styles.nav}>
+          <NavLink to="/tickets" className={linkClass}>
+            Tickets
+          </NavLink>
+          <NavLink to="/tickets/new" className={linkClass}>
+            New
+          </NavLink>
+          {user?.role === "admin" && (
+            <NavLink to="/admin/users" className={linkClass}>
+              Users
+            </NavLink>
+          )}
+          <NavLink to="/profile" className={linkClass}>
+            Profile
+          </NavLink>
+        </nav>
+        <div className={styles.userbox}>
+          <span className={styles.username}>{user?.display_name}</span>
+          <button onClick={handleLogout}>Log out</button>
+        </div>
+      </header>
+      <main className={styles.content}>
+        <Outlet />
+      </main>
+    </div>
+  );
+}
