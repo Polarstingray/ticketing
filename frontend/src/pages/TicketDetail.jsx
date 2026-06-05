@@ -9,6 +9,7 @@ import {
   PRIORITY_LABELS,
   STATUSES,
   STATUS_LABELS,
+  describeActivity,
   formatDate,
 } from "../constants";
 import styles from "../styles/TicketDetail.module.css";
@@ -21,6 +22,7 @@ export default function TicketDetail() {
   const [ticket, setTicket] = useState(null);
   const [users, setUsers] = useState([]);
   const [comments, setComments] = useState([]);
+  const [activity, setActivity] = useState([]);
   const [commentBody, setCommentBody] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -33,13 +35,26 @@ export default function TicketDetail() {
   async function load() {
     setLoading(true);
     try {
-      const [t, c] = await Promise.all([api.getTicket(id), api.listComments(id)]);
+      const [t, c, a] = await Promise.all([
+        api.getTicket(id),
+        api.listComments(id),
+        api.listActivity(id),
+      ]);
       setTicket(t);
       setComments(c);
+      setActivity(a);
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function reloadActivity() {
+    try {
+      setActivity(await api.listActivity(id));
+    } catch {
+      /* non-critical */
     }
   }
 
@@ -68,6 +83,7 @@ export default function TicketDetail() {
     try {
       const updated = await api.updateTicket(id, changes);
       setTicket(updated);
+      reloadActivity();
     } catch (e) {
       setError(e.message);
     }
@@ -80,6 +96,7 @@ export default function TicketDetail() {
       const c = await api.addComment(id, commentBody.trim());
       setComments((prev) => [...prev, c]);
       setCommentBody("");
+      reloadActivity();
     } catch (e) {
       setError(e.message);
     }
@@ -156,6 +173,25 @@ export default function TicketDetail() {
               </button>
             </div>
           </form>
+        </div>
+
+        <div className={styles.section}>
+          <h2>Activity</h2>
+          {activity.length === 0 ? (
+            <div className="muted">No activity yet.</div>
+          ) : (
+            <ul className={styles.activity}>
+              {activity.map((a) => (
+                <li key={a.id} className={styles.activityItem}>
+                  <span className={styles.activityDot} />
+                  <span className={styles.activityText}>
+                    <strong>{userName(a.actor)}</strong> {describeActivity(a)}
+                  </span>
+                  <span className={styles.activityDate}>{formatDate(a.created_at)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
         {error && <div className="error">{error}</div>}
       </div>
