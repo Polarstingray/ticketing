@@ -248,6 +248,10 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None) -> str:
 def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             revise_notes: str | None) -> None:
     set_state(client, ticket, [TAG_PLANNING])
+    client.add_comment(ticket["id"], "🔧 Claude is " +
+        ("revising the plan" if revise_notes else "planning this ticket") +
+        " — read-only, this can take a few minutes. I'll post the plan and "
+        "reassign it back to you when done.")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{ts}.log"
     ok, result = run_claude(cfg, plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
@@ -268,6 +272,9 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
 def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                  plan: str | None) -> None:
     set_state(client, ticket, [TAG_IMPLEMENTING])
+    client.add_comment(ticket["id"], "🔧 Claude is implementing this — working on a "
+        "branch, this can take a few minutes. I'll post a summary and reassign it "
+        "back to you when done.")
     if has_origin(repo):
         run(["git", "-C", str(repo), "fetch", "origin"])
     base_ref, base_branch = resolve_base(repo)
