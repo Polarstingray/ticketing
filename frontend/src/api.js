@@ -47,6 +47,7 @@ export const api = {
   logout: () => request("POST", "/auth/logout"),
   me: () => request("GET", "/auth/me"),
 
+  // Returns a paginated envelope: { items, total, limit, offset }.
   listTickets: (params = {}) => {
     const q = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
@@ -59,6 +60,7 @@ export const api = {
   createTicket: (body) => request("POST", "/tickets", body),
   updateTicket: (id, body) => request("PATCH", `/tickets/${id}`, body),
   deleteTicket: (id) => request("DELETE", `/tickets/${id}`),
+  listActivity: (id) => request("GET", `/tickets/${id}/activity`),
 
   listComments: (id) => request("GET", `/tickets/${id}/comments`),
   addComment: (id, body) => request("POST", `/tickets/${id}/comments`, { body }),
@@ -67,5 +69,10 @@ export const api = {
   createUser: (body) => request("POST", "/users", body),
   updateUser: (id, body) => request("PATCH", `/users/${id}`, body),
   deleteUser: (id) => request("DELETE", `/users/${id}`),
-  regenerateApiKey: (id) => request("POST", `/users/${id}/regenerate-api-key`),
+
+  // API keys (multiple per user; plaintext returned only by createApiKey).
+  listApiKeys: (userId) => request("GET", `/users/${userId}/api-keys`),
+  createApiKey: (userId, body) => request("POST", `/users/${userId}/api-keys`, body),
+  revokeApiKey: (userId, keyId) =>
+    request("POST", `/users/${userId}/api-keys/${keyId}/revoke`),
 };

@@ -3,8 +3,8 @@ import os
 
 from sqlalchemy.orm import Session
 
-from auth import generate_api_key, hash_password
-from models import User, UserRole
+from auth import generate_api_key, hash_api_key, hash_password
+from models import ApiKey, User, UserRole
 
 
 def seed_admin(db: Session) -> None:
@@ -22,8 +22,21 @@ def seed_admin(db: Session) -> None:
         email=email,
         role=UserRole.admin.value,
         hashed_password=hash_password(password),
-        api_key=generate_api_key(),
     )
     db.add(admin)
+    db.flush()  # assign admin.id
+
+    raw_key = generate_api_key()
+    db.add(
+        ApiKey(
+            user_id=admin.id,
+            name="default",
+            key_prefix=raw_key[:11],
+            key_hash=hash_api_key(raw_key),
+        )
+    )
     db.commit()
-    print(f"[seed] Created initial admin user '{username}' with API key {admin.api_key}")
+    print(
+        f"[seed] Created initial admin user '{username}' with API key {raw_key}\n"
+        f"[seed] This key is shown only once — store it now."
+    )

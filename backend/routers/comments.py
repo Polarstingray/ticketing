@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from activity import record_activity
 from auth import get_current_user
 from database import get_db
 from models import Comment, Ticket, User
@@ -42,6 +43,8 @@ def create_comment(
     _ensure_ticket(ticket_id, db)
     comment = Comment(ticket_id=ticket_id, author=user.id, body=payload.body)
     db.add(comment)
+    db.flush()  # assign comment.id
+    record_activity(db, ticket_id, user.id, "commented", {"comment_id": comment.id})
     db.commit()
     db.refresh(comment)
     return comment

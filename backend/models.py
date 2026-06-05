@@ -3,6 +3,7 @@ import enum
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -58,8 +59,32 @@ class User(Base):
     email = Column(String, nullable=False)
     role = Column(String, nullable=False, default=UserRole.member.value)
     hashed_password = Column(String, nullable=False)
-    api_key = Column(String, unique=True, nullable=True, index=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    api_keys = relationship(
+        "ApiKey", back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class ApiKey(Base):
+    """A named, hashed API key. Multiple per user; supports expiry + revocation.
+
+    Only a sha256 hash of the key is stored — the plaintext is shown exactly once,
+    at creation time. `key_prefix` keeps a short, non-secret label for display.
+    """
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    key_prefix = Column(String, nullable=False)
+    key_hash = Column(String, unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    last_used_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    revoked = Column(Boolean, nullable=False, default=False)
+
+    user = relationship("User", back_populates="api_keys")
 
 
 class Ticket(Base):
@@ -88,6 +113,9 @@ class Ticket(Base):
     comments = relationship(
         "Comment", back_populates="ticket", cascade="all, delete-orphan"
     )
+    activities = relationship(
+        "Activity", cascade="all, delete-orphan"
+    )
 
 
 class Comment(Base):
@@ -101,3 +129,21 @@ class Comment(Base):
 
     ticket = relationship("Ticket", back_populates="comments")
     author_user = relationship("User", foreign_keys=[author])
+
+
+class Activity(Base):
+    """An immutable audit entry describing something that happened to a ticket.
+
+    `action` is a short verb (e.g. "created", "status_changed"); `detail` is an
+    optional JSON blob with the specifics (e.g. {"from": "open", "to": "resolved"}).
+    """
+    __tablename__ = "activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False, index=True)
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    action = Column(String, nullable=False)
+    detail = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    actor = relationship("User", foreign_keys=[actor_id])
