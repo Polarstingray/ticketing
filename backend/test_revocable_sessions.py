@@ -112,7 +112,7 @@ def test_password_change_logs_out_all_devices():
             "username": "bob",
             "display_name": "Bob",
             "email": "bob@example.com",
-            "password": "pw1",
+            "password": "pw1pw1",
             "role": "member",
         },
     )
@@ -121,21 +121,21 @@ def test_password_change_logs_out_all_devices():
 
     # Bob logs in on two "devices".
     dev_a = _client()
-    _login(dev_a, "bob", "pw1")
+    _login(dev_a, "bob", "pw1pw1")
     dev_b = _client()
-    _login(dev_b, "bob", "pw1")
+    _login(dev_b, "bob", "pw1pw1")
     assert dev_a.get("/auth/me").status_code == 200
     assert dev_b.get("/auth/me").status_code == 200
 
     # Admin resets bob's password.
-    admin.patch(f"/users/{bob_id}", headers={"X-API-Key": key}, json={"password": "pw2"})
+    admin.patch(f"/users/{bob_id}", headers={"X-API-Key": key}, json={"password": "pw2pw2"})
 
     assert dev_a.get("/auth/me").status_code == 401
     assert dev_b.get("/auth/me").status_code == 401
 
     # Fresh login with the new password works.
     dev_c = _client()
-    _login(dev_c, "bob", "pw2")
+    _login(dev_c, "bob", "pw2pw2")
     assert dev_c.get("/auth/me").status_code == 200
 
 
@@ -149,7 +149,7 @@ def test_role_change_invalidates_session():
             "username": "carol",
             "display_name": "Carol",
             "email": "carol@example.com",
-            "password": "pw1",
+            "password": "pw1pw1",
             "role": "member",
         },
     )
@@ -157,7 +157,7 @@ def test_role_change_invalidates_session():
     carol_id = r.json()["id"]
 
     dev = _client()
-    _login(dev, "carol", "pw1")
+    _login(dev, "carol", "pw1pw1")
     assert dev.get("/auth/me").status_code == 200
 
     admin.patch(f"/users/{carol_id}", headers={"X-API-Key": key}, json={"role": "admin"})
