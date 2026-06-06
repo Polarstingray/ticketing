@@ -40,6 +40,16 @@ def email_enabled() -> bool:
 
 # --- Low-level send ----------------------------------------------------------
 
+def _sanitize_header(value: str) -> str:
+    """Strip CR/LF (and other control chars) so attacker-controlled text placed in a
+    header (e.g. ticket.title in Subject) can't inject additional headers (Bcc, etc.).
+
+    Keeps tab and any character at or above the space; drops C0 control chars
+    including CR and LF, then trims surrounding whitespace.
+    """
+    return "".join(ch for ch in value if ch == "\t" or ch >= " ").strip()
+
+
 def send_email(to: List[str], subject: str, body: str) -> None:
     """Send a plain-text email. Swallows all errors (logs them)."""
     recipients = [addr for addr in to if addr]
@@ -52,7 +62,7 @@ def send_email(to: List[str], subject: str, body: str) -> None:
     msg = EmailMessage()
     msg["From"] = SMTP_FROM
     msg["To"] = ", ".join(recipients)
-    msg["Subject"] = subject
+    msg["Subject"] = _sanitize_header(subject)
     msg.set_content(body)
 
     try:

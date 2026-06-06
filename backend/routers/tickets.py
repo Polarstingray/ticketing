@@ -69,7 +69,11 @@ def list_tickets(
         # quoted token in SQL so the filter composes with LIMIT/OFFSET. This is a
         # substring match, so a tag that is a substring of another could over-match —
         # acceptable for our exact-token usage.
-        q = q.filter(Ticket.tags.like(f'%"{tag}"%'))
+        # Escape LIKE metacharacters so '%'/'_' in the tag are matched literally and
+        # can't act as wildcards to over-match the filter. Escape the backslash first,
+        # then '%'/'_'; register backslash as the LIKE escape char (SQLite-supported).
+        escaped = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        q = q.filter(Ticket.tags.like(f'%"{escaped}"%', escape="\\"))
 
     total = q.count()
     items = (
