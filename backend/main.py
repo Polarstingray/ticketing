@@ -33,11 +33,28 @@ def _migrate_session_version():
             )
 
 
+def _migrate_archived():
+    """Add the `tickets.archived` column to pre-existing databases.
+
+    `create_all` only creates missing tables; it won't alter an existing
+    `tickets` table, and there's no Alembic in this project. This is a small,
+    idempotent migration that adds the column when it's absent.
+    """
+    with engine.begin() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(tickets)"))]
+        # `cols` is empty if the table doesn't exist yet (create_all handles that).
+        if cols and "archived" not in cols:
+            conn.execute(
+                text("ALTER TABLE tickets ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0")
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create tables and seed the first admin on startup.
     Base.metadata.create_all(bind=engine)
     _migrate_session_version()
+    _migrate_archived()
     db = SessionLocal()
     try:
         seed_admin(db)

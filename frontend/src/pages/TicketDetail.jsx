@@ -112,6 +112,26 @@ export default function TicketDetail() {
     }
   }
 
+  async function handleArchive() {
+    setError("");
+    try {
+      const updated = await api.archiveTicket(id);
+      setTicket(updated);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function handleUnarchive() {
+    setError("");
+    try {
+      const updated = await api.unarchiveTicket(id);
+      setTicket(updated);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
   if (loading) return <div className="muted">Loading…</div>;
   if (!ticket) return <div className="error">{error || "Ticket not found"}</div>;
 
@@ -127,6 +147,7 @@ export default function TicketDetail() {
           <TypeBadge type={ticket.type} />
           <StatusBadge status={ticket.status} />
           <PriorityBadge priority={ticket.priority} />
+          {ticket.archived && <span className={styles.tag}>Archived</span>}
           {ticket.tags?.map((t) => (
             <span key={t} className={styles.tag}>
               {t}
@@ -261,6 +282,16 @@ export default function TicketDetail() {
             <div className="muted" style={{ fontSize: 12 }}>
               You can comment but not edit this ticket.
             </div>
+          )}
+          {canModify && ticket.status === "closed" && !ticket.archived && (
+            <button style={{ width: "100%", marginTop: 12 }} onClick={handleArchive}>
+              Archive ticket
+            </button>
+          )}
+          {canModify && ticket.archived && (
+            <button style={{ width: "100%", marginTop: 12 }} onClick={handleUnarchive}>
+              Unarchive ticket
+            </button>
           )}
           {canDelete && (
             <button className="danger" style={{ width: "100%", marginTop: 12 }} onClick={handleDelete}>

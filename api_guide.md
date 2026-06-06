@@ -150,6 +150,7 @@ List tickets, newest first, **paginated**. All filters are optional query params
 | `created_by`  | user id (int) |
 | `priority`    | `low` `medium` `high` `critical` |
 | `tag`         | a single tag string; matches tickets containing that exact tag |
+| `archived`    | `true` `false`; omitted by default, which **hides** archived tickets. Pass `true` for the archive view, `false` to list only non-archived. |
 | `limit`       | page size, 1–200 (default `50`) |
 | `offset`      | number to skip (default `0`) |
 
@@ -208,8 +209,31 @@ curl -s -X PATCH "$BASE/tickets/1" -H "X-API-Key: $KEY" \
 ```
 Response `200`: the updated [ticket object](#ticket-object).
 
+#### `POST /tickets/{id}/archive`
+Archive a ticket so it disappears from the default list without deleting it. The ticket
+**must be `closed`** (otherwise `400`). Bumps `updated_at`.
+
+**Permission:** admins may archive any ticket; members may archive only tickets they created
+or are assigned to (otherwise `403`).
+
+```bash
+curl -s -X POST "$BASE/tickets/1/archive" -H "X-API-Key: $KEY"
+```
+Response `200`: the updated [ticket object](#ticket-object) with `"archived": true`.
+`400` if the ticket is not closed, `404` if not found.
+
+#### `POST /tickets/{id}/unarchive`
+Restore an archived ticket to the default list (sets `archived` back to `false`). No status
+restriction. Same permission model as archive.
+
+```bash
+curl -s -X POST "$BASE/tickets/1/unarchive" -H "X-API-Key: $KEY"
+```
+Response `200`: the updated [ticket object](#ticket-object) with `"archived": false`.
+
 #### `DELETE /tickets/{id}`
-**Admin only.**
+**Admin only.** Permanently deletes the ticket. To merely hide a closed ticket, prefer
+`POST /tickets/{id}/archive`.
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$BASE/tickets/1" -H "X-API-Key: $ADMIN_KEY"
 ```
@@ -376,6 +400,7 @@ sending mail.
   "description": "Switched to stateless signed-cookie sessions.",
   "status": "open",
   "priority": "high",
+  "archived": false,
   "created_by": 1,
   "assigned_to": null,
   "created_at": "2026-06-04T19:08:59.376527",

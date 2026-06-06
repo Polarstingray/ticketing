@@ -95,6 +95,7 @@ class TicketOut(BaseModel):
     description: str
     status: TicketStatus
     priority: TicketPriority
+    archived: bool
     created_by: int
     assigned_to: Optional[int]
     created_at: datetime

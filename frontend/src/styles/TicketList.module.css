@@ -36,6 +36,18 @@
 .filters button {
   width: auto;
 }
+.archivedToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.archivedToggle input {
+  width: auto;
+  margin: 0;
+}
 
 .list {
   display: flex;
