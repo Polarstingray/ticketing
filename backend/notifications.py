@@ -4,9 +4,11 @@ Best-effort and fully optional: if SMTP isn't configured the helpers no-op (with
 log line) and never raise into the request path. Sends are dispatched through
 FastAPI's BackgroundTasks so the HTTP response isn't blocked on the mail server.
 """
+import functools
 import logging
 import os
 import smtplib
+import ssl
 from email.message import EmailMessage
 from typing import Iterable, List
 
@@ -23,8 +25,23 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+def _env_int(name: str, default: int) -> int:
+    """Parse an int env var, falling back to `default` on missing/bad input.
+
+    Defensive so a misconfigured value can't raise at import and crash startup.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("invalid %s=%r; falling back to %d", name, raw, default)
+        return default
+
+
 SMTP_HOST = _env("SMTP_HOST")
-SMTP_PORT = int(_env("SMTP_PORT", "587"))
+SMTP_PORT = _env_int("SMTP_PORT", 587)
 SMTP_USERNAME = _env("SMTP_USERNAME")
 SMTP_PASSWORD = _env("SMTP_PASSWORD")
 SMTP_FROM = _env("SMTP_FROM", "stingray@localhost")
@@ -40,6 +57,15 @@ def email_enabled() -> bool:
 
 # --- Low-level send ----------------------------------------------------------
 
+def _sanitize_header(value: str) -> str:
+    """Strip CR/LF (and surrounding whitespace) to prevent header injection.
+
+    `subject` embeds user-controlled text (e.g. ticket title); a newline in a
+    header value could otherwise smuggle additional headers.
+    """
+    return " ".join(value.splitlines()).strip()
+
+
 def send_email(to: List[str], subject: str, body: str) -> None:
     """Send a plain-text email. Swallows all errors (logs them)."""
     recipients = [addr for addr in to if addr]
@@ -49,21 +75,24 @@ def send_email(to: List[str], subject: str, body: str) -> None:
         log.info("email disabled (SMTP_HOST unset); would have emailed %s: %s", recipients, subject)
         return
 
-    msg = EmailMessage()
-    msg["From"] = SMTP_FROM
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = subject
-    msg.set_content(body)
-
     try:
+        msg = EmailMessage()
+        msg["From"] = SMTP_FROM
+        msg["To"] = ", ".join(recipients)
+        msg["Subject"] = _sanitize_header(subject)
+        msg.set_content(body)
+
+        # Verify the server's certificate/hostname so transport is authenticated
+        # (smtplib's default context for SSL_SSL/starttls does not verify).
+        ctx = ssl.create_default_context()
         if SMTP_SSL:
-            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=10)
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=10, context=ctx)
         else:
             server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
         with server:
             if SMTP_STARTTLS and not SMTP_SSL:
-                server.starttls()
-            if SMTP_USERNAME:
+                server.starttls(context=ctx)
+            if SMTP_USERNAME and SMTP_PASSWORD:
                 server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.send_message(msg)
         log.info("sent email to %s: %s", recipients, subject)
@@ -79,6 +108,23 @@ def _ticket_link(ticket: Ticket) -> str:
 
 # --- High-level notifications ------------------------------------------------
 
+def _safe(fn):
+    """Ensure a notification helper never raises into the request path.
+
+    These helpers run synchronously (DB queries, attribute access) before the
+    background send is queued, so any error here would otherwise turn an
+    already-committed create/update into a 500.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:  # noqa: BLE001 — notifications must never break a request
+            log.exception("notification %s failed", fn.__name__)
+    return wrapper
+
+
+@_safe
 def notify_assignment(background, ticket: Ticket, assignee: User, actor: User) -> None:
     """Email the assignee that a ticket was assigned to them."""
     if assignee is None or actor is not None and assignee.id == actor.id:
@@ -95,6 +141,7 @@ def notify_assignment(background, ticket: Ticket, assignee: User, actor: User) -
     background.add_task(send_email, [assignee.email], subject, body)
 
 
+@_safe
 def notify_new_ticket_admins(background, db: Session, ticket: Ticket, actor: User) -> None:
     """Email all admins (except the actor) that a new ticket was filed."""
     admins: Iterable[User] = (
