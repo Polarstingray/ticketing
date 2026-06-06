@@ -2,10 +2,11 @@
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from activity import record_activity
-from auth import can_modify_ticket, get_current_user, is_admin
+from auth import can_modify_ticket, can_view_ticket, get_current_user, is_admin
 from database import get_db
 from models import (
     Activity,
@@ -38,7 +39,7 @@ def _get_ticket_or_404(ticket_id: int, db: Session) -> Ticket:
 @router.get("", response_model=PaginatedTickets)
 def list_tickets(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     status: Optional[TicketStatus] = Query(default=None),
     type: Optional[TicketType] = Query(default=None),
     assigned_to: Optional[int] = Query(default=None),
@@ -49,6 +50,10 @@ def list_tickets(
     offset: int = Query(default=0, ge=0),
 ):
     q = db.query(Ticket)
+    # Non-admins may only see tickets they created or are assigned to;
+    # code_review tickets embed private source in code_blocks.
+    if not is_admin(user):
+        q = q.filter(or_(Ticket.created_by == user.id, Ticket.assigned_to == user.id))
     if status is not None:
         q = q.filter(Ticket.status == status.value)
     if type is not None:
@@ -128,9 +133,13 @@ def create_ticket(
 def get_ticket(
     ticket_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    return _get_ticket_or_404(ticket_id, db)
+    ticket = _get_ticket_or_404(ticket_id, db)
+    # Return 404 (not 403) so non-members can't confirm a ticket ID exists.
+    if not can_view_ticket(user, ticket):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
+    return ticket
 
 
 @router.patch("/{ticket_id}", response_model=TicketOut)

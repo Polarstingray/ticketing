@@ -175,3 +175,12 @@ def can_modify_ticket(user: User, ticket: Ticket) -> bool:
     if is_admin(user):
         return True
     return user.id in (ticket.created_by, ticket.assigned_to)
+
+
+def can_view_ticket(user: User, ticket: Ticket) -> bool:
+    """Admins may view any ticket; members may view tickets they created or are
+    assigned to. Read access is intentionally as narrow as modify access because
+    code_review tickets embed private source in code_blocks."""
+    if is_admin(user):
+        return True
+    return user.id in (ticket.created_by, ticket.assigned_to)
