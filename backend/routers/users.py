@@ -71,13 +71,22 @@ def update_user(
         user.display_name = data["display_name"]
     if "email" in data and data["email"] is not None:
         user.email = data["email"]
+    credentials_changed = False
     if "password" in data and data["password"] is not None:
         user.hashed_password = hash_password(data["password"])
+        credentials_changed = True
     if "role" in data and data["role"] is not None:
         # Only admins may change roles.
         if not is_admin(current):
             raise HTTPException(status_code=403, detail="Only admins may change roles")
+        if user.role != data["role"].value:
+            credentials_changed = True
         user.role = data["role"].value
+
+    # A password or role change must invalidate the target user's existing
+    # sessions so a reset/leaked cookie can't keep being used.
+    if credentials_changed:
+        user.session_version += 1
 
     db.commit()
     db.refresh(user)

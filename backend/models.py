@@ -58,6 +58,10 @@ class User(Base):
     email = Column(String, nullable=False)
     role = Column(String, nullable=False, default=UserRole.member.value)
     hashed_password = Column(String, nullable=False)
+    # Bumped whenever existing sessions must be invalidated (logout, password
+    # change, role change). Embedded in the session token and checked on every
+    # request, so a stale/leaked cookie stops working once this changes.
+    session_version = Column(Integer, nullable=False, default=0)
     api_key = Column(String, unique=True, nullable=True, index=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
