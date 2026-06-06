@@ -1,28 +1,50 @@
 """Authentication routes: login, logout, current-user."""
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from auth import (
     clear_session_cookie,
     get_current_user,
     set_session_cookie,
-    verify_password,
+    verify_password_or_dummy,
 )
 from database import get_db
+from login_throttle import account_lockout
 from models import User
+from ratelimit import limiter
 from schemas import LoginRequest, UserSelf
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=UserSelf)
-def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
+# Per-IP limit (slowapi). Stops offline-speed network brute force from a single
+# source while leaving headroom for fat-fingered passwords. slowapi requires the
+# endpoint to have a parameter named exactly ``request``.
+@limiter.limit("5/minute;30/hour")
+def login(request: Request, payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
+    # Per-account lockout (covers distributed / credential-stuffing attacks that
+    # spread across IPs and so slip past the per-IP limit above).
+    retry_after = account_lockout.retry_after(payload.username)
+    if retry_after:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Account temporarily locked due to too many failed attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = db.query(User).filter(User.username == payload.username).first()
-    if not user or not verify_password(payload.password, user.hashed_password):
+    # Always run exactly one bcrypt verify (dummy hash when the user is missing)
+    # so response timing can't reveal whether the username exists.
+    ok = verify_password_or_dummy(payload.password, user.hashed_password if user else None)
+    if not user or not ok:
+        account_lockout.register_failure(payload.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
+
+    account_lockout.register_success(payload.username)
     set_session_cookie(response, user.id)
     return user
 

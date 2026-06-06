@@ -4,8 +4,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from database import Base, SessionLocal, engine
+from ratelimit import limiter
 from routers import auth as auth_router
 from routers import comments as comments_router
 from routers import tickets as tickets_router
@@ -26,6 +29,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Stingray Tickets", version="1.0.0", lifespan=lifespan)
+
+# Rate limiting (slowapi). Routers reach the limiter via app.state.limiter / the
+# shared ratelimit module; RateLimitExceeded is rendered as HTTP 429 with a
+# Retry-After header by slowapi's built-in handler.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS — in dev the Vite server runs on a different origin; in prod nginx serves
 # the SPA same-origin and proxies /api, so this mainly matters for development.
