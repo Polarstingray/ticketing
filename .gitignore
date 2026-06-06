@@ -1,8 +1,12 @@
 # Python
 __pycache__/
 *.pyc
+.venv/
 backend/.venv/
 backend/data/
+
+# Local agent state (plans, memory, settings)
+.claude/
 
 # Node
 node_modules/

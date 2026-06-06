@@ -61,7 +61,17 @@ class Config:
     claude_model: str
     implement_tools: str
     claude_timeout: int
+    claude_implement_timeout: int
     patch_fallback: bool
+    # --- reliability / hygiene tunables ---
+    stingray_max_retries: int
+    max_attempts: int
+    max_tickets_per_sweep: int
+    git_net_timeout: int
+    log_retention_days: int
+    git_author_name: str
+    git_author_email: str
+    audit_output_tail_bytes: int
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
@@ -84,7 +94,38 @@ class Config:
                 "Edit Write Read Glob Grep Bash",
             ).strip(),
             claude_timeout=int(os.environ.get("CLAUDE_TIMEOUT", "1800")),
+            # The implement phase does strictly more than plan (edit + verify),
+            # so give it a larger default budget than the (read-only) plan phase.
+            claude_implement_timeout=int(
+                os.environ.get("CLAUDE_IMPLEMENT_TIMEOUT", "2400")
+            ),
             patch_fallback=os.environ.get("PATCH_FALLBACK", "0").strip() in ("1", "true", "yes"),
+            # Retry transient Stingray API failures (connection/5xx/429) this many
+            # times before giving up, so a network blip mid-sweep doesn't strand a
+            # ticket in a claude:* in-flight state.
+            stingray_max_retries=int(os.environ.get("STINGRAY_MAX_RETRIES", "3")),
+            # Stop auto-retrying a ticket after this many failed plan/implement
+            # attempts and hand it to a human, so a broken ticket can't burn tokens
+            # on every cron tick forever. 0 disables the cap.
+            max_attempts=int(os.environ.get("MAX_ATTEMPTS", "3")),
+            # Cap how many tickets one sweep processes (0 = unlimited) so a backlog
+            # doesn't serialize for hours under the flock; the next tick continues.
+            max_tickets_per_sweep=int(os.environ.get("MAX_TICKETS_PER_SWEEP", "0")),
+            # Longer timeout for network git/gh commands (push/fetch/pr create) so a
+            # slow transfer isn't SIGKILLed mid-flight by the default run() budget.
+            git_net_timeout=int(os.environ.get("GIT_NET_TIMEOUT", "300")),
+            # Prune sweep/audit/ticket logs older than this many days at sweep start.
+            log_retention_days=int(os.environ.get("LOG_RETENTION_DAYS", "14")),
+            # Identity stamped on the resolver's commits, so the commit doesn't fail
+            # on a host with no global git identity (which gets misreported as
+            # "Claude produced no code changes").
+            git_author_name=os.environ.get("GIT_AUTHOR_NAME", "Stingray Resolver").strip()
+            or "Stingray Resolver",
+            git_author_email=os.environ.get("GIT_AUTHOR_EMAIL", "resolver@stingray.local").strip()
+            or "resolver@stingray.local",
+            # Per-event cap on how much command/Claude output is copied into the
+            # structured audit log (the full text still goes to per-ticket logs).
+            audit_output_tail_bytes=int(os.environ.get("AUDIT_OUTPUT_TAIL_BYTES", "4096")),
         )
         cfg.logs_dir.mkdir(exist_ok=True)
         if not cfg.projects_root.is_dir():

@@ -108,6 +108,62 @@ Cron (under `flock` so sweeps never overlap):
   >> /home/penguin/projects/ticketing/resolver/logs/cron.log 2>&1
 ```
 
+Bound a busy sweep with `--max-tickets N` (or `MAX_TICKETS_PER_SWEEP`) so one
+tick does a fixed amount of work under the lock and the next tick continues.
+
+## Logging & audit trail
+
+Every sweep writes three kinds of log under `logs/` (everything is scrubbed of
+the API key and token-shaped strings first):
+
+| File | Contents |
+|------|----------|
+| `cron.log` | the INFO summary (sweep start/done, per-ticket phase transitions) |
+| `sweep-<ts>.log` | the full human-readable trace at DEBUG — every `git`/`gh`/`bash` command, every API call, every Claude tool use |
+| `audit-<ts>.jsonl` | one structured JSON object per event (`subprocess` / `api` / `claude_tool` / `phase`) for grep/analysis |
+| `ticket-<id>-<phase>-<ts>.log` | the raw Claude stream-json transcript for that run |
+
+Because the implement phase runs Claude with `--output-format stream-json`, the
+audit log records **each file the bot reads/writes/edits and each shell command
+it runs**, e.g.:
+
+```bash
+# what did the bot touch on ticket 42?
+grep '"kind": "claude_tool"' logs/audit-*.jsonl | grep '"ticket": "42"'
+# every non-zero subprocess in the last sweep
+jq 'select(.kind=="subprocess" and .rc!=0)' logs/audit-*.jsonl
+```
+
+Logs older than `LOG_RETENTION_DAYS` (default 14) are pruned at the start of each
+sweep. `cron.log` is append-only and not pruned — rotate it with logrotate:
+
+```
+/home/penguin/projects/ticketing/resolver/logs/cron.log {
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+## Reliability
+
+- **API retries:** transient Stingray failures (connection reset, timeout, HTTP
+  429/500/502/503/504) are retried with exponential backoff (`STINGRAY_MAX_RETRIES`,
+  honoring `Retry-After`), so a network blip mid-sweep can't strand a ticket in a
+  `claude:*` in-flight state.
+- **No false successes:** `git push` / `gh pr create` exit codes are checked — a
+  failed push hands the ticket back re-implementable with the error instead of
+  posting an "Implemented" comment with no PR link.
+- **Attempt cap:** a ticket that keeps failing the same phase is auto-retried at
+  most `MAX_ATTEMPTS` times (default 3), then reopened and handed to a human so it
+  stops burning tokens every tick. The streak resets once the resolver makes
+  progress (posts a plan or a PR).
+- **Reviewer feedback:** when a PR gets `changes_requested`, the reviewer's note
+  is threaded into the rework prompt so the bot isn't re-implementing blind.
+
 ## Output modes (auto-detected per repo)
 
 | Condition | Result |

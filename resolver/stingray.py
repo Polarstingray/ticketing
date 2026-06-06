@@ -5,15 +5,30 @@ header for the claude-bot user. Only the calls the resolver needs are wrapped.
 """
 from __future__ import annotations
 
+import logging
+import random
+import time
 from typing import Any, Iterator
 
 import requests
 
+from audit import audit_event
+
+# Transient HTTP statuses worth retrying. Other 4xx are deterministic client
+# errors (bad request, not found, unauthorized) and must not be retried.
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
 
 class StingrayClient:
-    def __init__(self, base_url: str, api_key: str, timeout: int = 30):
+    def __init__(self, base_url: str, api_key: str, timeout: int = 30,
+                 max_retries: int = 3, logger: logging.Logger | None = None,
+                 backoff_base: float = 0.5, backoff_cap: float = 20.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_retries = max(1, max_retries)
+        self._logger = logger
+        self._backoff_base = backoff_base
+        self._backoff_cap = backoff_cap
         self.session = requests.Session()
         self.session.headers.update(
             {"X-API-Key": api_key, "Content-Type": "application/json"}
@@ -22,10 +37,72 @@ class StingrayClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
+    def _backoff(self, attempt: int, resp: requests.Response | None) -> None:
+        """Sleep before the next retry: exponential backoff + jitter, honoring a
+        429's Retry-After when the server provides one."""
+        delay = min(self._backoff_base * (2 ** (attempt - 1)), self._backoff_cap)
+        if resp is not None and resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    delay = max(delay, float(retry_after))
+                except ValueError:
+                    pass
+        delay += random.uniform(0, self._backoff_base)
+        if delay > 0:
+            time.sleep(delay)
+
+    def _audit(self, method: str, path: str, kwargs: dict, *, status: int | None,
+               attempt: int, start: float, **extra: Any) -> None:
+        if self._logger is None:
+            return
+        fields: dict[str, Any] = {
+            "method": method,
+            "path": path,
+            "status": status,
+            "attempt": attempt,
+            "duration_ms": round((time.monotonic() - start) * 1000),
+        }
+        params = kwargs.get("params")
+        if params:
+            fields["params"] = dict(params)
+        body = kwargs.get("json")
+        if isinstance(body, dict):
+            fields["body_keys"] = sorted(body.keys())
+            if "body" in body:  # comment text — record length, never content
+                fields["body_len"] = len(str(body.get("body") or ""))
+        fields.update(extra)
+        level = logging.WARNING if (extra.get("error") or extra.get("retrying")) else logging.DEBUG
+        audit_event(self._logger, "api",
+                    f"api {method} {path} -> {status} (attempt {attempt})",
+                    level=level, **fields)
+
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
-        resp = self.session.request(method, self._url(path), timeout=self.timeout, **kwargs)
-        resp.raise_for_status()
-        return resp
+        """Issue a request with bounded retries on transient failures. A network
+        wobble or 5xx mid-sweep is retried with backoff instead of throwing —
+        which previously left tickets stranded in a claude:* in-flight state."""
+        url = self._url(path)
+        for attempt in range(1, self.max_retries + 1):
+            start = time.monotonic()
+            try:
+                resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                self._audit(method, path, kwargs, status=None, attempt=attempt,
+                            start=start, error=type(exc).__name__)
+                if attempt >= self.max_retries:
+                    raise
+                self._backoff(attempt, None)
+                continue
+
+            retryable = resp.status_code in _RETRY_STATUS and attempt < self.max_retries
+            self._audit(method, path, kwargs, status=resp.status_code,
+                        attempt=attempt, start=start, retrying=retryable or None)
+            if retryable:
+                self._backoff(attempt, resp)
+                continue
+            resp.raise_for_status()
+            return resp
+        raise RuntimeError("unreachable: retry loop exited without returning")  # pragma: no cover
 
     # --- tickets ---------------------------------------------------------
     def iter_tickets(self, **filters: Any) -> Iterator[dict]:
