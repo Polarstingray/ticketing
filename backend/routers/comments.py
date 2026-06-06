@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from auth import get_current_user
+from auth import can_view_ticket, get_current_user
 from database import get_db
 from models import Comment, Ticket, User
 from schemas import CommentCreate, CommentOut
@@ -21,9 +21,12 @@ def _ensure_ticket(ticket_id: int, db: Session) -> Ticket:
 def list_comments(
     ticket_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    _ensure_ticket(ticket_id, db)
+    ticket = _ensure_ticket(ticket_id, db)
+    # 404 (not 403) so non-members can't probe ticket existence.
+    if not can_view_ticket(user, ticket):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
     return (
         db.query(Comment)
         .filter(Comment.ticket_id == ticket_id)
@@ -39,7 +42,10 @@ def create_comment(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    _ensure_ticket(ticket_id, db)
+    ticket = _ensure_ticket(ticket_id, db)
+    # You shouldn't be able to comment on (or probe) a ticket you can't see.
+    if not can_view_ticket(user, ticket):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
     comment = Comment(ticket_id=ticket_id, author=user.id, body=payload.body)
     db.add(comment)
     db.commit()
