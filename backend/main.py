@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 
 from database import Base, SessionLocal, engine
 from routers import auth as auth_router
@@ -13,10 +14,27 @@ from routers import users as users_router
 from seed import seed_admin
 
 
+def _migrate_session_version():
+    """Add the users.session_version column to pre-existing databases.
+
+    ``create_all`` never alters tables that already exist, and there's no
+    Alembic in this project, so an older ``stingray.db`` would be missing the
+    column. This idempotent guard adds it when absent.
+    """
+    inspector = inspect(engine)
+    columns = {col["name"] for col in inspector.get_columns("users")}
+    if "session_version" not in columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create tables and seed the first admin on startup.
     Base.metadata.create_all(bind=engine)
+    _migrate_session_version()
     db = SessionLocal()
     try:
         seed_admin(db)
