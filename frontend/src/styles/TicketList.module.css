@@ -8,6 +8,20 @@
   font-size: 20px;
   margin: 0;
 }
+.count {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 15px;
+}
+
+.loadMore {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+}
+.loadMore button {
+  width: auto;
+}
 
 .filters {
   display: flex;

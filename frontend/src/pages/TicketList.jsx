@@ -13,8 +13,11 @@ import {
 } from "../constants";
 import styles from "../styles/TicketList.module.css";
 
+const PAGE_SIZE = 50;
+
 export default function TicketList() {
   const [tickets, setTickets] = useState([]);
+  const [total, setTotal] = useState(0);
   const [users, setUsers] = useState([]);
   const [filters, setFilters] = useState({
     status: "",
@@ -23,6 +26,7 @@ export default function TicketList() {
     priority: "",
   });
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
 
   // Users list is best-effort (only admins can fetch it); used to label assignees
@@ -34,14 +38,30 @@ export default function TicketList() {
       .catch(() => setUsers([]));
   }, []);
 
+  // (Re)load the first page whenever filters change.
   useEffect(() => {
     setLoading(true);
     api
-      .listTickets(filters)
-      .then(setTickets)
+      .listTickets({ ...filters, limit: PAGE_SIZE, offset: 0 })
+      .then((res) => {
+        setTickets(res.items);
+        setTotal(res.total);
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, [filters]);
+
+  function loadMore() {
+    setLoadingMore(true);
+    api
+      .listTickets({ ...filters, limit: PAGE_SIZE, offset: tickets.length })
+      .then((res) => {
+        setTickets((prev) => [...prev, ...res.items]);
+        setTotal(res.total);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoadingMore(false));
+  }
 
   const userName = (id) => {
     const u = users.find((x) => x.id === id);
@@ -55,7 +75,9 @@ export default function TicketList() {
   return (
     <div>
       <div className={styles.head}>
-        <h1>Tickets</h1>
+        <h1>
+          Tickets {!loading && <span className={styles.count}>({total})</span>}
+        </h1>
         <Link to="/tickets/new">
           <button className="primary">New ticket</button>
         </Link>
@@ -142,6 +164,14 @@ export default function TicketList() {
               </div>
             </Link>
           ))}
+        </div>
+      )}
+
+      {!loading && tickets.length < total && (
+        <div className={styles.loadMore}>
+          <button onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? "Loading…" : `Load more (${total - tickets.length} more)`}
+          </button>
         </div>
       )}
     </div>

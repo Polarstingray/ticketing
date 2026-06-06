@@ -26,11 +26,36 @@ docker compose up --build
 - Frontend: http://localhost:3000
 - Log in with the `ADMIN_USERNAME` / `ADMIN_PASSWORD` you set in `.env`.
 
-The initial admin is created automatically on first run (only when the database is empty).
-Its generated API key is printed in the backend logs and is also visible on the **Profile**
-page.
+The initial admin is created automatically on first run (only when the database is empty),
+along with a first API key named `default` whose plaintext is printed **once** in the backend
+logs — copy it then. Manage keys afterwards on the **Profile** page.
 
 To put it behind Traefik, see [`traefik-labels.md`](./traefik-labels.md).
+
+## Features
+
+- **Tickets** — `code_review` (with highlighted code snapshots) and `task` types; status,
+  priority, assignee, tags, due dates; comments.
+- **Activity trail** — every ticket records who created it, assignment, status/priority
+  changes, and comments.
+- **Multiple named API keys per user** — hashed at rest, optional expiry, revocable, with a
+  `last used` timestamp. Rotate with zero downtime (create new → swap → revoke old).
+- **Email notifications** (optional) — the assignee is emailed when a ticket is assigned, and
+  admins are emailed when a ticket is created. Configure SMTP in `.env` (see below); leave
+  `SMTP_HOST` blank to disable.
+
+### Email configuration
+
+Set these in `.env` to enable notifications (all optional; no email is sent if `SMTP_HOST` is
+empty):
+
+| Var | Purpose |
+|-----|---------|
+| `SMTP_HOST` / `SMTP_PORT` | SMTP relay (port default `587`) |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | auth, if your relay requires it |
+| `SMTP_FROM` | From address |
+| `SMTP_STARTTLS` / `SMTP_SSL` | transport security (`STARTTLS` default `true`) |
+| `PUBLIC_BASE_URL` | base URL used to build clickable ticket links in emails |
 
 ## Local development
 
@@ -78,4 +103,5 @@ ticketing/
 
 ## Out of scope (for now)
 
-Email notifications, file attachments beyond code blocks, OAuth/SSO, multi-workspace.
+File attachments beyond code blocks, OAuth/SSO, multi-workspace, per-user notification
+preferences.

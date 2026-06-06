@@ -22,8 +22,11 @@ class UserPublic(BaseModel):
 
 
 class UserSelf(UserPublic):
-    """User shape returned to the user themselves — includes their API key."""
-    api_key: Optional[str] = None
+    """User shape returned to the user themselves.
+
+    API keys are managed separately (see the ApiKey* schemas) and never embedded
+    here — only their hash is ever stored server-side.
+    """
 
 
 class UserCreate(BaseModel):
@@ -117,7 +120,48 @@ class CommentOut(BaseModel):
     created_at: datetime
 
 
-# --- Misc --------------------------------------------------------------------
+# --- Activity ----------------------------------------------------------------
 
-class ApiKeyOut(BaseModel):
+class ActivityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    ticket_id: int
+    actor: Optional[int] = Field(default=None, validation_alias="actor_id")
+    action: str
+    detail: Optional[dict] = None
+    created_at: datetime
+
+
+# --- Pagination --------------------------------------------------------------
+
+class PaginatedTickets(BaseModel):
+    items: List[TicketOut]
+    total: int
+    limit: int
+    offset: int
+
+
+# --- API keys ----------------------------------------------------------------
+
+class ApiKeyMeta(BaseModel):
+    """Non-secret metadata about an API key (safe to list)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    key_prefix: str
+    created_at: datetime
+    last_used_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    revoked: bool
+
+
+class ApiKeyCreate(BaseModel):
+    name: str = Field(min_length=1)
+    expires_in_days: Optional[int] = Field(default=None, ge=1)
+
+
+class ApiKeyCreated(ApiKeyMeta):
+    """Returned exactly once on creation — includes the plaintext key."""
     api_key: str

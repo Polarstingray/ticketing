@@ -1,0 +1,4 @@
+# Test/dev dependencies for the resolver. Install with:
+#   .venv/bin/pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0
