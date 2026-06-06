@@ -3,6 +3,7 @@ import enum
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -71,6 +72,7 @@ class Ticket(Base):
     description = Column(Text, nullable=False, default="")
     status = Column(String, nullable=False, default=TicketStatus.open.value)
     priority = Column(String, nullable=False, default=TicketPriority.medium.value)
+    archived = Column(Boolean, nullable=False, default=False)
 
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
