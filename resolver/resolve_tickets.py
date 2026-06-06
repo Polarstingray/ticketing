@@ -17,12 +17,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
+import select
+import signal
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import audit
 from config import Config, RepoNotAllowed, RepoNotFound
 from stingray import StingrayClient
 
@@ -36,20 +42,95 @@ TAG_DANGEROUS = "dangerous"
 REPO_TAG_PREFIX = "repo:"
 
 PLAN_MARKER = "📋 **Proposed plan**"
+IMPL_MARKER = "✅ **Implemented**"
+FAIL_MARKER = "⚠️ Resolver could not complete"
 WORK_DIR = Path(__file__).resolve().parent / "work"
+
+# Per-event audit truncation, set from config at sweep start (see main()).
+AUDIT_TAIL_BYTES = 4096
+
+# Tags counting failed plan/implement attempts (see process()/bump_attempts).
+ATTEMPT_PREFIX = "claude:attempt-"
 
 
 def log(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    """Human-readable INFO line — fans out to stdout (cron.log) and sweep log."""
+    audit.get_logger().info(msg)
+
+
+def phase(name: str, ticket: dict, message: str, **extra) -> None:
+    """Record a state transition as a `phase` audit event (and INFO line)."""
+    audit.audit_event(audit.get_logger(), "phase", message,
+                      phase=name, ticket_id=ticket.get("id"), **extra)
+
+
+def _killpg(proc: subprocess.Popen) -> None:
+    """SIGKILL the child's whole process group, falling back to the child."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+
+
+def _cmd_category(cmd: list[str]) -> str:
+    exe = os.path.basename(cmd[0]) if cmd else ""
+    if exe.startswith("git"):
+        return "git"
+    if exe == "gh":
+        return "gh"
+    if "claude" in exe:
+        return "claude"
+    return "bash"
+
+
+def _audit_subprocess(cmd: list[str], cwd, *, rc, start: float, output: str,
+                      **extra) -> None:
+    category = _cmd_category(cmd)
+    audit.audit_event(
+        audit.get_logger(), "subprocess",
+        f"{category}: {' '.join(cmd)} -> rc={rc}",
+        level=logging.DEBUG,
+        argv=cmd,
+        category=category,
+        cwd=str(cwd) if cwd else None,
+        rc=rc,
+        duration_ms=round((time.monotonic() - start) * 1000),
+        output_tail=audit.clip(output, AUDIT_TAIL_BYTES),
+        **extra,
+    )
 
 
 def run(cmd: list[str], cwd: str | Path | None = None, timeout: int | None = 120):
-    """Run a command, capturing combined output. Returns (rc, output)."""
-    proc = subprocess.run(
-        cmd, cwd=str(cwd) if cwd else None, timeout=timeout,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    return proc.returncode, proc.stdout
+    """Run a command, capturing combined output. Returns (rc, output).
+
+    Every invocation is recorded as a `subprocess` audit event (argv, cwd, rc,
+    duration, output tail). The child is started in its own process group
+    (`start_new_session=True`) so that on timeout we can kill the *whole tree*,
+    not just the direct child — otherwise a server or subprocess Claude spawned
+    (e.g. `uvicorn`) is orphaned and keeps running. On TimeoutExpired we re-raise
+    with whatever output was captured so callers can log what hung."""
+    start = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        # A missing binary (bad CLAUDE_BIN, no `gh`) used to propagate raw to the
+        # sweep catch-all; surface it as a clean non-zero result instead.
+        msg = f"{cmd[0]}: {exc}"
+        _audit_subprocess(cmd, cwd, rc=127, start=start, output=msg, error=type(exc).__name__)
+        return 127, msg
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _killpg(proc)
+        out, _ = proc.communicate()
+        _audit_subprocess(cmd, cwd, rc=None, start=start, output=out or "", timed_out=True)
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out)
+    _audit_subprocess(cmd, cwd, rc=proc.returncode, start=start, output=out)
+    return proc.returncode, out
 
 
 # --- ticket helpers ------------------------------------------------------
@@ -84,51 +165,169 @@ def render_code_blocks(ticket: dict) -> str:
     return "\n".join(parts)
 
 
-def find_approved_plan(client: StingrayClient, ticket_id: int, bot_id: int) -> str | None:
+def find_approved_plan(comments: list[dict], bot_id: int) -> str | None:
     """The most recent bot comment that carries the plan marker."""
-    for c in reversed(client.list_comments(ticket_id)):
+    for c in reversed(comments):
         if c.get("author") == bot_id and PLAN_MARKER in (c.get("body") or ""):
             return c["body"]
     return None
 
 
+def latest_human(comments: list[dict], bot_id: int) -> dict | None:
+    """The most recent comment not authored by the bot (comments oldest-first)."""
+    for c in reversed(comments):
+        if c.get("author") != bot_id:
+            return c
+    return None
+
+
+def recent_failures(comments: list[dict], bot_id: int) -> int:
+    """Count consecutive trailing resolver-failure comments — i.e. failures
+    since the last *successful* phase (a posted plan or an implemented PR). This
+    naturally resets the attempt counter once the resolver makes progress, while
+    a ticket that keeps failing accumulates toward the MAX_ATTEMPTS cap."""
+    n = 0
+    for c in reversed(comments):
+        if c.get("author") != bot_id:
+            continue
+        body = c.get("body") or ""
+        if PLAN_MARKER in body or IMPL_MARKER in body:
+            break  # a successful phase resets the streak
+        if FAIL_MARKER in body:
+            n += 1
+    return n
+
+
 # --- Claude runner -------------------------------------------------------
+def summarize_tool_use(name: str, inp: dict | None) -> str:
+    """One-line, secret-free summary of a Claude tool call for the audit log."""
+    inp = inp or {}
+    if name in ("Read", "Write", "Edit", "MultiEdit"):
+        return str(inp.get("file_path") or "")
+    if name == "NotebookEdit":
+        return str(inp.get("notebook_path") or "")
+    if name == "Bash":
+        return str(inp.get("command") or "")
+    if name in ("Glob", "Grep"):
+        pat = inp.get("pattern") or ""
+        path = inp.get("path")
+        return f"{pat} in {path}" if path else str(pat)
+    if name in ("Task", "Agent"):
+        return str(inp.get("description") or "")
+    if name == "WebFetch":
+        return str(inp.get("url") or "")
+    # Unknown tool: compact preview of the first few keys (no values dumped raw).
+    return json.dumps({k: inp[k] for k in list(inp)[:3]}, default=str)[:200]
+
+
+def _claude_event(logger, ticket_id, line: str, result: dict) -> None:
+    """Parse one stream-json line; audit any tool_use and capture the final
+    result. `result` is mutated in place to hold the terminal result event."""
+    try:
+        evt = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    etype = evt.get("type")
+    if etype == "assistant":
+        for block in (evt.get("message", {}) or {}).get("content", []) or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name", "?")
+                audit.audit_event(
+                    logger, "claude_tool",
+                    f"claude {name}: {summarize_tool_use(name, block.get('input'))}",
+                    level=logging.DEBUG, tool=name,
+                    input_summary=summarize_tool_use(name, block.get("input")),
+                )
+    elif etype == "result":
+        result.update(evt)
+
+
 def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
-    """Run headless Claude. mode is 'plan' (read-only) or 'implement'.
+    """Run headless Claude, streaming its output so every tool call (Read/Write/
+    Edit/Bash/...) is recorded as a `claude_tool` audit event. The raw stream is
+    teed verbatim to `log_path`. mode is 'plan' (read-only) or 'implement'.
     Returns (ok, result_text)."""
-    cmd = [cfg.claude_bin, "-p", prompt, "--output-format", "json"]
+    cmd = [cfg.claude_bin, "-p", prompt, "--output-format", "stream-json", "--verbose"]
     if cfg.claude_model:
         cmd += ["--model", cfg.claude_model]
     if mode == "plan":
         # Read-only exploration. We deliberately do NOT use --permission-mode
         # plan: headless, that routes the plan through ExitPlanMode (which can't
         # be approved non-interactively), so the plan text never reaches the
-        # JSON `result`. Granting only read tools and asking for the plan as the
-        # final message captures it cleanly while guaranteeing no edits.
+        # result. Granting only read tools and asking for the plan as the final
+        # message captures it cleanly while guaranteeing no edits.
         cmd += ["--permission-mode", "default", "--allowedTools", "Read", "Glob", "Grep"]
     else:
         cmd += ["--permission-mode", "acceptEdits"]
         if cfg.implement_tools:
             cmd += ["--allowedTools", *cfg.implement_tools.split()]
 
+    # Implement does strictly more than plan (edit + verify), so it gets the
+    # larger budget; plan stays snappy on the smaller one.
+    timeout = cfg.claude_implement_timeout if mode == "implement" else cfg.claude_timeout
+    logger = audit.get_logger()
+    start = time.monotonic()
     try:
-        rc, out = run(cmd, cwd=cwd, timeout=cfg.claude_timeout)
-    except subprocess.TimeoutExpired:
-        log_path.write_text(f"TIMEOUT after {cfg.claude_timeout}s\n")
-        return False, f"Claude timed out after {cfg.claude_timeout}s."
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, start_new_session=True, bufsize=1,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        log_path.write_text(f"LAUNCH FAILED: {cmd[0]}: {exc}\n")
+        return False, f"Could not launch Claude ({cmd[0]}): {exc}"
 
-    log_path.write_text(out)
-    # --output-format json prints a single JSON object with a `result` field.
-    result_text = out.strip()
-    try:
-        data = json.loads(out)
-        if isinstance(data, dict):
-            result_text = data.get("result") or result_text
-            if data.get("is_error") or data.get("subtype") not in (None, "success"):
-                return False, result_text
-    except json.JSONDecodeError:
-        if rc != 0:
-            return False, result_text or f"claude exited {rc}"
+    result: dict = {}
+    deadline = start + timeout
+    timed_out = False
+    with open(log_path, "w", encoding="utf-8") as raw:
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 1.0))
+                if not ready:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                line = proc.stdout.readline()
+                if line == "":  # EOF
+                    break
+                raw.write(line)
+                raw.flush()
+                stripped = line.strip()
+                if stripped:
+                    _claude_event(logger, None, stripped, result)
+        finally:
+            # Only kill on timeout. On a clean EOF the process is exiting on its
+            # own; killing it here would make rc negative and mis-report a
+            # successful run as a failure. Reap with a short grace period, then
+            # force-kill only if it genuinely refuses to exit.
+            if timed_out:
+                _killpg(proc)
+            try:
+                rc = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _killpg(proc)
+                rc = proc.wait()
+
+    audit.audit_event(
+        logger, "subprocess", f"claude ({mode}) -> rc={rc} timed_out={timed_out}",
+        level=logging.DEBUG, category="claude", argv=cmd[:2] + ["...", mode], rc=rc,
+        duration_ms=round((time.monotonic() - start) * 1000), timed_out=timed_out or None,
+    )
+
+    if timed_out:
+        return False, f"Claude timed out after {timeout}s."
+    result_text = (result.get("result") or "").strip()
+    if not result:
+        # No terminal result event — likely a CLI/schema change. Surface it
+        # rather than reporting a silent success.
+        logger.warning("claude produced no result event (rc=%s) — output schema drift?", rc)
+        return rc == 0, result_text or f"claude exited {rc} with no result event"
+    if result.get("is_error") or result.get("subtype") not in (None, "success"):
+        return False, result_text or f"claude error (subtype={result.get('subtype')})"
     return rc == 0, result_text
 
 
@@ -165,10 +364,6 @@ def resolve_base(repo: Path) -> tuple[str, str]:
     rc, cur = run(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"])
     base_branch = remote_default or (cur.strip() if rc == 0 and cur.strip() else "main")
     return base_ref, base_branch
-
-
-def pr_available(repo: Path) -> bool:
-    return has_origin(repo) and run(["gh", "auth", "status"])[0] == 0
 
 
 def prepare_worktree(repo: Path, ticket_id: int, base_ref: str) -> tuple[Path, str]:
@@ -222,16 +417,39 @@ def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
     return "\n".join(x for x in p if x is not None)
 
 
-def implement_prompt(ticket: dict, repo: Path, plan: str | None) -> str:
+def implement_prompt(ticket: dict, repo: Path, plan: str | None,
+                     reviewer_notes: str | None = None) -> str:
     p = [
         f"You are resolving Stingray ticket #{ticket['id']}.",
         f"Your working directory is a dedicated checkout at {repo} — work there and",
         "use paths relative to it. Make the code changes and run the project's tests",
         "if present. Do NOT commit or push — just leave the changes in the working tree.",
         "",
+        "Constraints for this automated run (no human is watching the terminal,",
+        "and the run is killed at a hard time limit):",
+        "- Do NOT start long-running or foreground processes: no dev/app servers",
+        "  (`uvicorn`, `npm run dev`, `flask run`, `vite`), no `--watch` modes, no",
+        "  `docker-compose up` without `-d`, and nothing interactive. They never",
+        "  return and will consume the entire time budget.",
+        "- Run only the project's automated, non-interactive test suite, and wrap",
+        "  any command that might block in a shell `timeout` (e.g.",
+        "  `timeout 180 pytest -q`).",
+        "- If the approved plan's verification asks for a live/booted server or",
+        "  manual behavioral testing, treat that as OUT OF SCOPE for this run: rely",
+        "  on the automated tests and static import checks (e.g.",
+        "  `python -c 'import module'`) to validate the change instead.",
+        "",
     ]
     if plan:
         p += ["Implement this APPROVED plan:", "", plan, ""]
+    if reviewer_notes:
+        p += [
+            "A reviewer looked at your existing PR branch and requested these "
+            "changes — address them on top of the work already on the branch:",
+            "",
+            reviewer_notes,
+            "",
+        ]
     p += [
         "Original ticket:",
         f"Title: {ticket['title']}",
@@ -247,11 +465,14 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None) -> str:
 # --- phase handlers ------------------------------------------------------
 def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             revise_notes: str | None) -> None:
-    set_state(client, ticket, [TAG_PLANNING])
+    # Ack first, then claim: a transient failure posting the ack shouldn't leave
+    # the ticket claimed (claude:planning) but silent.
     client.add_comment(ticket["id"], "🔧 Claude is " +
         ("revising the plan" if revise_notes else "planning this ticket") +
         " — read-only, this can take a few minutes. I'll post the plan and "
         "reassign it back to you when done.")
+    set_state(client, ticket, [TAG_PLANNING])
+    phase("planning", ticket, f"#{ticket['id']}: planning ({'revise' if revise_notes else 'fresh'})")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{ts}.log"
     ok, result = run_claude(cfg, plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
@@ -266,72 +487,134 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     client.add_comment(ticket["id"], body)
     set_state(client, ticket, [TAG_AWAIT_PLAN], status="in_review",
               assigned_to=ticket["created_by"])
-    log(f"#{ticket['id']}: posted plan, handed back to user {ticket['created_by']}")
+    phase("awaiting-plan-approval", ticket,
+          f"#{ticket['id']}: posted plan, handed back to user {ticket['created_by']}")
 
 
 def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
-                 plan: str | None) -> None:
+                 plan: str | None, reviewer_notes: str | None = None) -> None:
     set_state(client, ticket, [TAG_IMPLEMENTING])
     client.add_comment(ticket["id"], "🔧 Claude is implementing this — working on a "
         "branch, this can take a few minutes. I'll post a summary and reassign it "
         "back to you when done.")
-    if has_origin(repo):
-        run(["git", "-C", str(repo), "fetch", "origin"])
+    phase("implementing", ticket, f"#{ticket['id']}: implementing"
+          + (" (rework)" if reviewer_notes else ""))
+    # Compute remote/PR availability once and pass it down (cheaper, consistent).
+    origin = has_origin(repo)
+    pr_ok = origin and run(["gh", "auth", "status"])[0] == 0
+    if origin:
+        run(["git", "-C", str(repo), "fetch", "origin"], timeout=cfg.git_net_timeout)
     base_ref, base_branch = resolve_base(repo)
     wt, branch = prepare_worktree(repo, ticket["id"], base_ref)
     try:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         log_path = cfg.logs_dir / f"ticket-{ticket['id']}-implement-{ts}.log"
-        ok, summary = run_claude(cfg, implement_prompt(ticket, wt, plan), wt, "implement", log_path)
+        ok, summary = run_claude(cfg, implement_prompt(ticket, wt, plan, reviewer_notes),
+                                 wt, "implement", log_path)
         if not ok:
-            fail(client, ticket, f"Implementation failed.\n\n```\n{tail(summary)}\n```")
+            # An approved plan exists — hand back re-implementable so a timeout
+            # doesn't throw the plan away and re-plan from scratch on retry.
+            fail(client, ticket, f"Implementation failed.\n\n```\n{tail(summary)}\n```",
+                 reimplementable=True)
             return
 
         run(["git", "-C", str(wt), "add", "-A"])
-        run(["git", "-C", str(wt), "commit", "-m",
-             f"Resolve Stingray #{ticket['id']}: {ticket['title']}"])
+        # Set the committer identity explicitly: on a host with no global git
+        # identity the commit otherwise fails, and the empty tree downstream gets
+        # misreported as "Claude produced no code changes".
+        run(["git", "-C", str(wt),
+             "-c", f"user.name={cfg.git_author_name}",
+             "-c", f"user.email={cfg.git_author_email}",
+             "commit", "-m", f"Resolve Stingray #{ticket['id']}: {ticket['title']}"])
         ahead = run(["git", "-C", str(wt), "rev-list", "--count", f"{base_ref}..HEAD"])[1].strip()
         if ahead in ("", "0"):
-            fail(client, ticket, "Claude produced no code changes for this ticket.")
+            fail(client, ticket, "Claude produced no code changes for this ticket.",
+                 reimplementable=True)
             return
 
         stat = run(["git", "-C", str(wt), "diff", "--stat", f"{base_ref}..HEAD"])[1].strip()
-        publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summary, stat)
+        publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch,
+                summary, stat, origin=origin, pr_ok=pr_ok)
     finally:
         remove_worktree(repo, wt)
 
 
-def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summary, stat) -> None:
-    """Open a PR (or fall back to branch/patch) and hand the ticket back."""
+def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summary, stat,
+            *, origin: bool, pr_ok: bool) -> None:
+    """Open a PR (or fall back to branch/patch) and hand the ticket back.
+
+    Every repo-writing command's exit code is checked: a failed `git push` must
+    NOT proceed to PR creation and post a misleading "Implemented" comment with
+    no link — the branch never reached the remote, so we hand the ticket back
+    re-implementable with the push error instead."""
     tid = ticket["id"]
     if cfg.patch_fallback:
         diff = run(["git", "-C", str(wt), "diff", f"{base_ref}..HEAD"])[1]
-        body = f"✅ **Implemented** (patch — apply manually)\n\n{summary}\n\n```diff\n{tail(diff, 12000)}\n```"
+        body = f"{IMPL_MARKER} (patch — apply manually)\n\n{summary}\n\n```diff\n{tail(diff, 12000)}\n```"
         run(["git", "-C", str(repo), "branch", "-D", branch])  # discard, nothing persisted
-    elif pr_available(repo):
-        run(["git", "-C", str(wt), "push", "--force-with-lease", "-u", "origin", branch])
+    elif pr_ok:
+        rc, push_out = run(["git", "-C", str(wt), "push", "--force-with-lease", "-u",
+                            "origin", branch], timeout=cfg.git_net_timeout)
+        if rc != 0:
+            fail(client, ticket,
+                 f"Pushed nothing — `git push` failed, so no PR was opened and the "
+                 f"work is on the local branch only.\n\n```\n{tail(push_out)}\n```",
+                 reimplementable=True)
+            return
         pr_body = f"{summary}\n\nResolves Stingray #{tid}."
         rc, out = run(["gh", "pr", "create", "--title", f"Resolve #{tid}: {ticket['title']}",
-                       "--body", pr_body, "--head", branch, "--base", base_branch], cwd=wt)
-        url = out.strip().splitlines()[-1] if rc == 0 else \
-            run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"], cwd=wt)[1].strip()
-        body = f"✅ **Implemented** — {url}\n\n{summary}\n\nChanged files:\n```\n{stat}\n```"
+                       "--body", pr_body, "--head", branch, "--base", base_branch],
+                      cwd=wt, timeout=cfg.git_net_timeout)
+        if rc == 0:
+            url = out.strip().splitlines()[-1] if out.strip() else ""
+        else:
+            # `gh pr create` fails when a PR already exists for the branch — in
+            # that case `gh pr view` gives us the existing URL. Any other failure
+            # leaves url blank and we fall back to the local-branch message.
+            url = run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
+                      cwd=wt)[1].strip()
+        if url:
+            body = f"{IMPL_MARKER} — {url}\n\n{summary}\n\nChanged files:\n```\n{stat}\n```"
+        else:
+            body = (f"{IMPL_MARKER} and pushed to branch `{branch}`, but opening a PR "
+                    f"failed.\n\n{summary}\n\nChanged files:\n```\n{stat}\n```")
     else:
         reason = ("`gh` is not authenticated — run `gh auth login` to get PRs"
-                  if has_origin(repo) else "no GitHub remote configured")
-        body = (f"✅ **Implemented** on local branch `{branch}` ({reason}).\n\n"
+                  if origin else "no GitHub remote configured")
+        body = (f"{IMPL_MARKER} on local branch `{branch}` ({reason}).\n\n"
                 f"{summary}\n\nChanged files:\n```\n{stat}\n```")
 
     client.add_comment(tid, body)
     set_state(client, ticket, [TAG_AWAIT_PR], status="in_review", assigned_to=ticket["created_by"])
-    log(f"#{tid}: implemented, handed back to user {ticket['created_by']}")
+    phase("awaiting-pr-review", ticket,
+          f"#{tid}: implemented, handed back to user {ticket['created_by']}")
 
 
-def fail(client: StingrayClient, ticket: dict, message: str) -> None:
-    """Report a failure, drop claim tags, leave open, and notify the reporter."""
-    client.add_comment(ticket["id"], f"⚠️ Resolver could not complete this ticket.\n\n{message}")
-    set_state(client, ticket, [], status="open", assigned_to=ticket["created_by"])
-    log(f"#{ticket['id']}: FAILED — {message.splitlines()[0]}")
+def fail(client: StingrayClient, ticket: dict, message: str, *,
+         reimplementable: bool = False) -> None:
+    """Report a failure and notify the reporter.
+
+    By default the ticket is dropped back to `open` with no claim tags. When
+    `reimplementable=True` (an *implement*-phase failure where an approved plan
+    already exists), the ticket is instead handed back awaiting plan approval,
+    so a fresh `/approve` re-enters the implement phase with the existing plan
+    rather than discarding it and re-planning from scratch."""
+    if reimplementable:
+        message += ("\n\n_Re-assign to me with `/approve` to retry the implement "
+                    "step using the existing approved plan._")
+    # Best-effort: even if posting the comment throws (despite client retries),
+    # still reset the ticket's state so a wobble can't strand it mid-claim.
+    try:
+        client.add_comment(ticket["id"], f"{FAIL_MARKER} this ticket.\n\n{message}")
+    except Exception as e:
+        audit.get_logger().warning("#%s: fail() could not post comment: %r", ticket["id"], e)
+    if reimplementable:
+        set_state(client, ticket, [TAG_AWAIT_PLAN], status="in_review",
+                  assigned_to=ticket["created_by"])
+    else:
+        set_state(client, ticket, [], status="open", assigned_to=ticket["created_by"])
+    phase("failed", ticket, f"#{ticket['id']}: FAILED — {message.splitlines()[0]}",
+          reimplementable=reimplementable)
 
 
 def tail(text: str, limit: int = 3000) -> str:
@@ -342,6 +625,7 @@ def tail(text: str, limit: int = 3000) -> str:
 # --- dispatch ------------------------------------------------------------
 def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) -> None:
     tid = ticket["id"]
+    audit.set_ticket(tid)
     tags = claude_tags(ticket)
     dangerous = TAG_DANGEROUS in ticket.get("tags", [])
     status = ticket.get("status")
@@ -356,13 +640,14 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
             fail(client, ticket, f"Cannot resolve target repo: {e}")
         return
 
-    # Decide the action from the current sub-state.
-    last = client.latest_human_comment(tid, cfg.bot_user_id)
+    # Fetch comments once and derive everything from the single list (B7).
+    comments = client.list_comments(tid)
+    last = latest_human(comments, cfg.bot_user_id)
     cmd = (last.get("body") or "").strip().lower() if last else ""
 
     if TAG_AWAIT_PLAN in tags:
         if cmd.startswith("/approve"):
-            plan = find_approved_plan(client, tid, cfg.bot_user_id)
+            plan = find_approved_plan(comments, cfg.bot_user_id)
             action, kw = "implement", {"plan": plan}
         elif cmd.startswith("/revise") or status == "changes_requested":
             notes = (last["body"].split(None, 1)[1] if last and len(last["body"].split(None, 1)) > 1 else "")
@@ -370,11 +655,17 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
         else:
             action, kw = "nudge", {}
     elif TAG_AWAIT_PR in tags:
-        action, kw = ("rework", {}) if status == "changes_requested" else ("skip", {})
+        if status == "changes_requested":
+            # Thread the reviewer's change request into the rework so Claude
+            # isn't re-implementing blind (B4).
+            action, kw = "rework", {"plan": find_approved_plan(comments, cfg.bot_user_id),
+                                    "reviewer_notes": last["body"] if last else None}
+        else:
+            action, kw = "skip", {}
     elif TAG_PLANNING in tags:
         action, kw = "replan", {"revise_notes": None}   # retry after a crashed plan run
     elif TAG_IMPLEMENTING in tags or dangerous:
-        action, kw = "implement", {"plan": find_approved_plan(client, tid, cfg.bot_user_id)}
+        action, kw = "implement", {"plan": find_approved_plan(comments, cfg.bot_user_id)}
     else:
         action, kw = "plan", {"revise_notes": None}
 
@@ -382,12 +673,21 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     if dry_run:
         return
 
+    # Attempt cap (B3): a ticket that keeps failing the same phase shouldn't be
+    # auto-retried forever, burning tokens on every cron tick. Once the streak of
+    # recent failures hits the cap, hand it to a human and leave the bot's queue.
+    if cfg.max_attempts > 0 and action in ("plan", "replan", "implement", "rework"):
+        failures = recent_failures(comments, cfg.bot_user_id)
+        if failures >= cfg.max_attempts:
+            give_up(client, ticket, failures)
+            return
+
     if action == "plan":
         do_plan(cfg, client, ticket, repo, kw["revise_notes"])
     elif action == "replan":
         do_plan(cfg, client, ticket, repo, kw["revise_notes"])
     elif action in ("implement", "rework"):
-        do_implement(cfg, client, ticket, repo, kw.get("plan"))
+        do_implement(cfg, client, ticket, repo, kw.get("plan"), kw.get("reviewer_notes"))
     elif action == "nudge":
         client.add_comment(tid, "I need an explicit `/approve` or `/revise <notes>` comment "
                                 "to proceed. Re-assign to me with one of those.")
@@ -396,37 +696,73 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     # "skip": nothing to do.
 
 
-def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None) -> None:
+def give_up(client: StingrayClient, ticket: dict, failures: int) -> None:
+    """Stop auto-retrying a repeatedly-failing ticket: notify, drop claim tags,
+    reopen, and hand it to the reporter so it leaves the bot's sweep."""
+    client.add_comment(
+        ticket["id"],
+        f"🛑 Giving up after {failures} failed attempt(s). I've reopened this "
+        "ticket and handed it back — a human will need to take a look. Re-assign "
+        "it to me to make me try again.")
+    set_state(client, ticket, [], status="open", assigned_to=ticket["created_by"])
+    phase("gave-up", ticket, f"#{ticket['id']}: gave up after {failures} attempts",
+          failures=failures)
+
+
+def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
+          max_tickets: int = 0) -> None:
     if only is not None:
         process(cfg, client, client.get_ticket(only), dry_run)
         return
     # Anything currently assigned to the bot is ours to act on, regardless of
     # status (after /approve the human reassigns but leaves status=in_review).
     # Terminal statuses are skipped so we never re-plan a finished ticket.
-    for ticket in client.iter_tickets(assigned_to=cfg.bot_user_id):
-        if ticket.get("status") in ("resolved", "closed"):
-            continue
+    # Oldest-first (by id) so a bounded sweep drains the backlog fairly; the next
+    # cron tick continues where this one stopped.
+    tickets = [t for t in client.iter_tickets(assigned_to=cfg.bot_user_id)
+               if t.get("status") not in ("resolved", "closed")]
+    tickets.sort(key=lambda t: t.get("id", 0))
+    processed = 0
+    for ticket in tickets:
+        if max_tickets and processed >= max_tickets:
+            log(f"reached max-tickets={max_tickets}; {len(tickets) - processed} left for next sweep")
+            break
+        processed += 1
         try:
             process(cfg, client, ticket, dry_run)
         except Exception as e:  # one bad ticket shouldn't kill the sweep
+            audit.set_ticket(ticket.get("id"))
             log(f"#{ticket['id']}: ERROR {e!r}")
             if not dry_run:
                 try:
                     fail(client, ticket, f"Resolver error: {e!r}")
                 except Exception:
                     pass
+        finally:
+            audit.set_ticket(None)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Stingray ticket resolver sweep")
     ap.add_argument("--ticket", type=int, help="process only this ticket id")
     ap.add_argument("--dry-run", action="store_true", help="report actions without acting")
+    ap.add_argument("--max-tickets", type=int, default=None,
+                    help="process at most N tickets this sweep (default: MAX_TICKETS_PER_SWEEP)")
     args = ap.parse_args()
 
     cfg = Config.load()
-    client = StingrayClient(cfg.stingray_url, cfg.api_key)
-    log(f"sweep start (bot user {cfg.bot_user_id}, root {cfg.projects_root})")
-    sweep(cfg, client, args.dry_run, args.ticket)
+    global AUDIT_TAIL_BYTES
+    AUDIT_TAIL_BYTES = cfg.audit_output_tail_bytes
+    sweep_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    logger = audit.setup_logging(cfg, sweep_id)
+    audit.prune_old_logs(cfg, logger)
+
+    max_tickets = args.max_tickets if args.max_tickets is not None else cfg.max_tickets_per_sweep
+    client = StingrayClient(cfg.stingray_url, cfg.api_key,
+                            max_retries=cfg.stingray_max_retries, logger=logger)
+    log(f"sweep start (bot user {cfg.bot_user_id}, root {cfg.projects_root}, "
+        f"max_tickets={max_tickets or 'unlimited'})")
+    sweep(cfg, client, args.dry_run, args.ticket, max_tickets)
     log("sweep done")
 
 
