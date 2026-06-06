@@ -26,6 +26,13 @@ from seed import seed_admin  # noqa: E402
 @pytest.fixture(scope="module", autouse=True)
 def _setup():
     from database import Base, engine
+    from ratelimit import limiter
+
+    # Disable the per-IP login rate limit for the suite: it shares one client IP
+    # and logs in many times, which would otherwise trip the 5/minute limit.
+    # Setting the boolean flag is honored by slowapi's `if self.enabled` guards.
+    limiter.enabled = False
+
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
