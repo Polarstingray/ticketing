@@ -70,22 +70,23 @@ def hash_api_key(raw: str) -> str:
 
 # --- Sessions (stateless signed cookie) --------------------------------------
 
-def create_session_token(user_id: int) -> str:
-    return _serializer.dumps({"user_id": user_id})
+def create_session_token(user_id: int, session_version: int) -> str:
+    return _serializer.dumps({"user_id": user_id, "sv": session_version})
 
 
 def read_session_token(token: str):
+    """Return the decoded token payload ({"user_id", "sv"}) or None if the
+    signature is bad/expired."""
     try:
-        data = _serializer.loads(token, max_age=SESSION_MAX_AGE)
-        return data.get("user_id")
+        return _serializer.loads(token, max_age=SESSION_MAX_AGE)
     except (BadSignature, SignatureExpired):
         return None
 
 
-def set_session_cookie(response, user_id: int):
+def set_session_cookie(response, user: User):
     response.set_cookie(
         key=SESSION_COOKIE,
-        value=create_session_token(user_id),
+        value=create_session_token(user.id, user.session_version),
         max_age=SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
@@ -147,10 +148,12 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
     token = request.cookies.get(SESSION_COOKIE)
     if token:
-        user_id = read_session_token(token)
-        if user_id is not None:
-            user = db.query(User).filter(User.id == user_id).first()
-            if user:
+        data = read_session_token(token)
+        # Require both a user_id and a session version. Tokens minted before
+        # revocable sessions lacked "sv", so they are rejected here too.
+        if data is not None and "user_id" in data and "sv" in data:
+            user = db.query(User).filter(User.id == data["user_id"]).first()
+            if user and user.session_version == data["sv"]:
                 return user
 
     raise HTTPException(
