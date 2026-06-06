@@ -27,9 +27,15 @@ Send your key in the `X-API-Key` header:
 curl -s "$BASE/tickets" -H "X-API-Key: sk_your_key_here"
 ```
 
-Each user has exactly one API key. View or regenerate it from the **Profile** page in the
-web UI, or via `POST /users/{id}/regenerate-api-key`. The initial admin's key is printed to
-the backend logs on first startup.
+Each user can hold **multiple named API keys** (e.g. one per machine or agent). Mint, list,
+and revoke them on the **Profile** page in the web UI, or via the
+[API-keys endpoints](#api-keys). Keys are stored **hashed** — the plaintext is shown exactly
+once, at creation. Keys can be given an optional expiry and revoked at any time; a revoked or
+expired key returns `401`. The initial admin's first key (named `default`) is printed to the
+backend logs on first startup.
+
+To **rotate** a key with zero downtime: create a new key, swap it into your client, then
+revoke the old one.
 
 ### 2. Session cookie (for browser use)
 
@@ -125,14 +131,16 @@ Response `200`: `{ "ok": true }`. Clears the cookie.
 ```bash
 curl -s -H "X-API-Key: $KEY" "$BASE/auth/me"
 ```
-Response `200`: the [user object (self)](#user-object), including your `api_key`.
+Response `200`: the [user object (self)](#user-object). API keys are not embedded — manage
+them via the [API-keys endpoints](#api-keys).
 
 ---
 
 ### Tickets
 
 #### `GET /tickets`
-List tickets, newest first. All filters are optional query params and combine (AND).
+List tickets, newest first, **paginated**. All filters are optional query params and combine
+(AND).
 
 | Param         | Values |
 |---------------|--------|
@@ -141,12 +149,19 @@ List tickets, newest first. All filters are optional query params and combine (A
 | `assigned_to` | user id (int) |
 | `created_by`  | user id (int) |
 | `priority`    | `low` `medium` `high` `critical` |
-| `tag`         | a single tag string; matches tickets containing that tag |
+| `tag`         | a single tag string; matches tickets containing that exact tag |
+| `limit`       | page size, 1–200 (default `50`) |
+| `offset`      | number to skip (default `0`) |
 
 ```bash
-curl -s -H "X-API-Key: $KEY" "$BASE/tickets?type=code_review&status=open&priority=high"
+curl -s -H "X-API-Key: $KEY" "$BASE/tickets?type=code_review&status=open&limit=20&offset=0"
 ```
-Response `200`: array of [ticket objects](#ticket-object).
+Response `200`: a **paginated envelope** — `items` is the page, `total` is the full count
+across all pages (ignoring `limit`/`offset`):
+```json
+{ "items": [ /* ticket objects */ ], "total": 137, "limit": 20, "offset": 0 }
+```
+To page, increase `offset` by `limit` until `offset + items.length >= total`.
 
 #### `POST /tickets`
 Create a ticket. `created_by` is set to the authenticated user automatically.
@@ -221,6 +236,18 @@ Response `201`: the created [comment object](#comment-object).
 
 ---
 
+### Activity
+
+#### `GET /tickets/{id}/activity`
+Returns the ticket's audit trail (creation, assignment, status/priority changes, comments),
+oldest first.
+```bash
+curl -s -H "X-API-Key: $KEY" "$BASE/tickets/1/activity"
+```
+Response `200`: array of [activity objects](#activity-object).
+
+---
+
 ### Users
 
 #### `GET /users` — **admin only**
@@ -230,15 +257,15 @@ curl -s -H "X-API-Key: $ADMIN_KEY" "$BASE/users"
 ```
 
 #### `POST /users` — **admin only**
-Create a user. An API key is auto-generated.
+Create a user. New users start with **no** API keys — they (or an admin) mint one via the
+[API-keys endpoints](#api-keys).
 
 Request:
 ```json
 { "username": "alice", "display_name": "Alice", "email": "alice@example.com",
   "password": "atleast6chars", "role": "member" }
 ```
-Response `201`: [user object (self)](#user-object) including the new `api_key`.
-`400` if the username already exists.
+Response `201`: [user object (self)](#user-object). `400` if the username already exists.
 
 #### `PATCH /users/{id}`
 Edit a user. A user may edit **themselves**; admins may edit anyone. Fields: `display_name`,
@@ -255,12 +282,86 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$BASE/users/2" -H "X-API-Key
 ```
 Response `204`. You cannot delete your own account (`400`).
 
-#### `POST /users/{id}/regenerate-api-key`
-Generate a new API key (invalidating the old one). Self or admin.
+---
+
+### API keys
+
+All three routes are **self or admin** (you may manage your own keys; admins may manage
+anyone's). `{user_id}` is the owning user's id.
+
+#### `GET /users/{user_id}/api-keys`
+List a user's keys (metadata only — never the secret), newest first.
 ```bash
-curl -s -X POST "$BASE/users/2/regenerate-api-key" -H "X-API-Key: $KEY"
+curl -s -H "X-API-Key: $KEY" "$BASE/users/2/api-keys"
 ```
-Response `200`: `{ "api_key": "sk_..." }`.
+Response `200`: array of [API-key objects](#api-key-object).
+
+#### `POST /users/{user_id}/api-keys`
+Mint a new key. The plaintext `api_key` is returned **once** in this response and never again.
+
+Request:
+```json
+{ "name": "claude-code-laptop", "expires_in_days": 90 }
+```
+`name` is required; `expires_in_days` is optional (omit for a non-expiring key).
+```bash
+curl -s -X POST "$BASE/users/2/api-keys" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"claude-code-laptop"}'
+```
+Response `201`: an [API-key object](#api-key-object) **plus** an `api_key` field with the
+plaintext key.
+
+#### `POST /users/{user_id}/api-keys/{key_id}/revoke`
+Permanently revoke a key. Anything using it immediately gets `401`.
+```bash
+curl -s -X POST "$BASE/users/2/api-keys/5/revoke" -H "X-API-Key: $KEY"
+```
+Response `200`: the updated [API-key object](#api-key-object) (`revoked: true`).
+
+---
+
+## Giving a Claude Code instance access
+
+The recommended setup uses two environment variables, so nothing secret is hard-coded:
+
+```bash
+export STINGRAY_URL=https://tickets.example.com
+export STINGRAY_API_KEY=sk_...        # a dedicated key, e.g. minted as "claude-code-laptop"
+```
+
+Mint **one named key per machine/agent** on your Profile page (so you can revoke a single
+machine without disrupting others), and keep the key out of version control (shell profile or
+a git-ignored `.env`). Drop this snippet into a repo's `CLAUDE.md` so any Claude Code instance
+working there knows how to file a review:
+
+```md
+## Filing a code-review ticket
+When asked to file a review, POST to $STINGRAY_URL/api/tickets with header
+`X-API-Key: $STINGRAY_API_KEY`. Body: {type:"code_review", title, description,
+priority, tags:[], assigned_to:<reviewer id>, code_blocks:[{filename, language,
+line_start, line_end, content}]}. Capture the exact files/line ranges you changed.
+```
+
+**The task → review loop:**
+1. Ask the AI to do the work (ideally on a branch).
+2. On completion it self-files a `code_review` ticket via the API, putting the changed files
+   and line ranges into `code_blocks`, tagging it, and setting `assigned_to` a human reviewer.
+3. The reviewer is emailed (see [Notifications](#notifications)), reviews in the UI with the
+   flagged line ranges highlighted, comments, and sets `changes_requested` or `resolved`.
+4. Every step is captured in the ticket's [activity trail](#activity).
+
+---
+
+## Notifications
+
+If the server is configured with SMTP (`SMTP_HOST` etc.), Stingray sends best-effort emails:
+
+- **Ticket assigned** → the new assignee (never the person who assigned it).
+- **New ticket created** → all admins (except the creator).
+
+Email is entirely optional; with SMTP unconfigured the API behaves identically, just without
+sending mail.
 
 ---
 
@@ -294,15 +395,36 @@ Response `200`: `{ "api_key": "sk_..." }`.
   "body": "Looks good, ship it", "created_at": "2026-06-04T19:08:59.666872" }
 ```
 
+### Activity object
+`actor` is the user id who performed the action (or `null`). `detail` varies by `action`:
+`status_changed`/`priority_changed` carry `{from, to}`; `assigned` carries `{to, name}`;
+`commented` carries `{comment_id}`; `created`/`unassigned` have `null`.
+```json
+{ "id": 7, "ticket_id": 1, "actor": 1, "action": "status_changed",
+  "detail": { "from": "open", "to": "in_review" },
+  "created_at": "2026-06-04T19:09:10.112233" }
+```
+
+### API-key object
+Metadata only. `POST /users/{id}/api-keys` additionally returns a one-time `api_key`
+(plaintext) alongside these fields; no other endpoint ever returns the secret.
+```json
+{
+  "id": 5, "name": "claude-code-laptop", "key_prefix": "sk_URA6YaKc",
+  "created_at": "2026-06-04T19:10:38.015980",
+  "last_used_at": "2026-06-04T19:10:38.296683",
+  "expires_at": null, "revoked": false
+}
+```
+
 ### User object
-The **self** shape (returned from `/auth/me`, `/auth/login`, user create/update, and to
-admins) includes `api_key`. The **public** shape (from `GET /users`) omits it.
+The **self** shape (returned from `/auth/me`, `/auth/login`, user create/update). The
+**public** shape (from `GET /users`) is identical. API keys are never embedded in either.
 ```json
 {
   "id": 1, "username": "admin", "display_name": "admin",
   "email": "admin@example.com", "role": "admin",
-  "created_at": "2026-06-04T19:08:38.425332",
-  "api_key": "sk_..."
+  "created_at": "2026-06-04T19:08:38.425332"
 }
 ```
 

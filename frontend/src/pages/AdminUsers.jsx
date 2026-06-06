@@ -17,7 +17,7 @@ export default function AdminUsers() {
   const [users, setUsers] = useState([]);
   const [form, setForm] = useState(emptyForm());
   const [showForm, setShowForm] = useState(false);
-  const [newKey, setNewKey] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [error, setError] = useState("");
 
   async function load() {
@@ -39,7 +39,7 @@ export default function AdminUsers() {
       const created = await api.createUser(form);
       setForm(emptyForm());
       setShowForm(false);
-      setNewKey({ username: created.username, api_key: created.api_key });
+      setNotice({ username: created.username });
       load();
     } catch (e) {
       setError(e.message);
@@ -78,12 +78,11 @@ export default function AdminUsers() {
 
       {error && <div className="error">{error}</div>}
 
-      {newKey && (
+      {notice && (
         <div className={`card ${styles.keyNotice}`}>
-          <strong>User “{newKey.username}” created.</strong> Their API key (shown once here —
-          they can also view it on their profile):
-          <code className={styles.key}>{newKey.api_key}</code>
-          <button onClick={() => setNewKey(null)}>Dismiss</button>
+          <strong>User “{notice.username}” created.</strong> They can sign in and mint an API
+          key on their <strong>Profile</strong> page (one key per machine/agent).
+          <button onClick={() => setNotice(null)}>Dismiss</button>
         </div>
       )}
 
