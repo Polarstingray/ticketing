@@ -46,6 +46,7 @@ def list_tickets(
     created_by: Optional[int] = Query(default=None),
     priority: Optional[TicketPriority] = Query(default=None),
     tag: Optional[str] = Query(default=None),
+    archived: Optional[bool] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
@@ -64,6 +65,11 @@ def list_tickets(
         q = q.filter(Ticket.created_by == created_by)
     if priority is not None:
         q = q.filter(Ticket.priority == priority.value)
+    # Archived tickets are hidden by default; pass archived=true for the archive view.
+    if archived is None:
+        q = q.filter(Ticket.archived == False)  # noqa: E712
+    else:
+        q = q.filter(Ticket.archived == archived)
     if tag is not None:
         # tags are stored as a JSON text array (e.g. '["auth", "urgent"]'); match the
         # quoted token in SQL so the filter composes with LIMIT/OFFSET. This is a
@@ -231,3 +237,37 @@ def list_activity(
         .order_by(Activity.created_at.asc(), Activity.id.asc())
         .all()
     )
+
+
+@router.post("/{ticket_id}/archive", response_model=TicketOut)
+def archive_ticket(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ticket = _get_ticket_or_404(ticket_id, db)
+    if not can_modify_ticket(user, ticket):
+        raise HTTPException(status_code=403, detail="Not permitted to modify this ticket")
+    if ticket.status != TicketStatus.closed.value:
+        raise HTTPException(status_code=400, detail="Only closed tickets can be archived")
+    ticket.archived = True
+    ticket.updated_at = utcnow()
+    db.commit()
+    db.refresh(ticket)
+    return ticket
+
+
+@router.post("/{ticket_id}/unarchive", response_model=TicketOut)
+def unarchive_ticket(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ticket = _get_ticket_or_404(ticket_id, db)
+    if not can_modify_ticket(user, ticket):
+        raise HTTPException(status_code=403, detail="Not permitted to modify this ticket")
+    ticket.archived = False
+    ticket.updated_at = utcnow()
+    db.commit()
+    db.refresh(ticket)
+    return ticket

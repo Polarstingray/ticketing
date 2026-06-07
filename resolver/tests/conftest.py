@@ -39,6 +39,7 @@ def fake_cfg(tmp_path):
     """A stand-in Config with just the attributes the tested paths read."""
     return SimpleNamespace(
         bot_user_id=BOT,
+        agent="claude",
         max_attempts=3,
         patch_fallback=False,
         git_net_timeout=300,

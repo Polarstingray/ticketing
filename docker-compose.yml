@@ -8,6 +8,10 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      # Deployment environment. Set to "production" on a real server: the app
+      # then refuses to start with a default/empty SESSION_SECRET. Default "dev"
+      # only warns. (COOKIE_SECURE=true also implies production.)
+      APP_ENV: ${APP_ENV:-dev}
       # Secret used to sign session cookies. CHANGE THIS in production.
       SESSION_SECRET: ${SESSION_SECRET:-please-change-me}
       # Set to "true" when served over HTTPS (Traefik) so the cookie is Secure.
@@ -48,6 +52,23 @@ services:
     # See traefik-labels.md for a ready-to-paste block.
     # labels:
     #   - "traefik.enable=true"
+
+  # Optional: periodic SQLite backups into the data volume's `backups/` dir,
+  # using the online backup API (safe while the backend runs). Uncomment to
+  # enable; tune the interval and retention to taste.
+  # backup:
+  #   build: ./backend
+  #   container_name: stingray-backup
+  #   restart: unless-stopped
+  #   environment:
+  #     DATABASE_PATH: /data/stingray.db
+  #   volumes:
+  #     - stingray-data:/data
+  #   networks:
+  #     - internal
+  #   entrypoint: ["/bin/sh", "-c"]
+  #   command:
+  #     - "while true; do python backup_db.py --keep 14; sleep 86400; done"
 
 networks:
   internal:

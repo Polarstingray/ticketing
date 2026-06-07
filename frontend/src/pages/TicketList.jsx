@@ -24,6 +24,7 @@ export default function TicketList() {
     type: "",
     assigned_to: "",
     priority: "",
+    archived: "",
   });
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -122,9 +123,23 @@ export default function TicketList() {
             </option>
           ))}
         </select>
+        <label className={styles.archivedToggle}>
+          <input
+            type="checkbox"
+            checked={filters.archived === "true"}
+            onChange={(e) => setFilter("archived", e.target.checked ? "true" : "")}
+          />
+          Show archived
+        </label>
         <button
           onClick={() =>
-            setFilters({ status: "", type: "", assigned_to: "", priority: "" })
+            setFilters({
+              status: "",
+              type: "",
+              assigned_to: "",
+              priority: "",
+              archived: "",
+            })
           }
         >
           Clear
@@ -148,6 +163,7 @@ export default function TicketList() {
                   </div>
                   <div className={styles.rowMeta}>
                     <TypeBadge type={t.type} />
+                    {t.archived && <span className={styles.tag}>Archived</span>}
                     {t.tags?.map((tag) => (
                       <span key={tag} className={styles.tag}>
                         {tag}
