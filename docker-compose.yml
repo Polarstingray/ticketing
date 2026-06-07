@@ -53,6 +53,23 @@ services:
     # labels:
     #   - "traefik.enable=true"
 
+  # Optional: periodic SQLite backups into the data volume's `backups/` dir,
+  # using the online backup API (safe while the backend runs). Uncomment to
+  # enable; tune the interval and retention to taste.
+  # backup:
+  #   build: ./backend
+  #   container_name: stingray-backup
+  #   restart: unless-stopped
+  #   environment:
+  #     DATABASE_PATH: /data/stingray.db
+  #   volumes:
+  #     - stingray-data:/data
+  #   networks:
+  #     - internal
+  #   entrypoint: ["/bin/sh", "-c"]
+  #   command:
+  #     - "while true; do python backup_db.py --keep 14; sleep 86400; done"
+
 networks:
   internal:
     driver: bridge
