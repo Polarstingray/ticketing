@@ -47,6 +47,25 @@
   color: var(--text);
 }
 
+.bell {
+  margin-right: 4px;
+}
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 18px;
+  padding: 0 5px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--danger, #e5484d);
+  border-radius: 9px;
+  vertical-align: middle;
+}
+
 .userbox {
   display: flex;
   align-items: center;

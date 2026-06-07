@@ -48,6 +48,11 @@ class TicketPriority(str, enum.Enum):
     critical = "critical"
 
 
+class NotificationType(str, enum.Enum):
+    assigned = "assigned"
+    commented = "commented"
+
+
 # --- Models ------------------------------------------------------------------
 
 class User(Base):
@@ -134,6 +139,33 @@ class Comment(Base):
 
     ticket = relationship("Ticket", back_populates="comments")
     author_user = relationship("User", foreign_keys=[author])
+
+
+class Notification(Base):
+    """An in-app notification delivered to a single recipient.
+
+    One row per (recipient, event). Strictly per-user — every endpoint filters by
+    the authenticated user. Ticket/actor fields are *snapshots* (denormalized,
+    mirroring how ``Activity.detail`` stores ``{name}``) so the inbox renders
+    without joins and survives deletion of the ticket or actor; ``ticket_id`` is
+    deliberately not an enforced FK for the same reason.
+
+    ``type`` categorizes each notification (see :class:`NotificationType`) and is
+    the seam for a future notification-settings panel: every notification carries
+    a type and flows through the ``should_notify`` gate in ``inbox.py``.
+    """
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)  # recipient
+    type = Column(String, nullable=False)        # NotificationType value
+    ticket_id = Column(Integer, nullable=True)   # not FK-enforced; snapshot below keeps it usable
+    ticket_title = Column(String, nullable=False, default="")
+    actor_id = Column(Integer, nullable=True)
+    actor_name = Column(String, nullable=False, default="")
+    comment_id = Column(Integer, nullable=True)
+    read = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class Activity(Base):

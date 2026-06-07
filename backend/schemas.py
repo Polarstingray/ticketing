@@ -133,6 +133,39 @@ class ActivityOut(BaseModel):
     created_at: datetime
 
 
+# --- Notifications -----------------------------------------------------------
+
+class NotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    type: str
+    ticket_id: Optional[int] = None
+    ticket_title: str
+    actor_id: Optional[int] = None
+    actor_name: str
+    comment_id: Optional[int] = None
+    read: bool
+    created_at: datetime
+
+
+class NotificationList(BaseModel):
+    items: List[NotificationOut]
+    total: int
+    unread_count: int
+    limit: int
+    offset: int
+
+
+class UnreadCount(BaseModel):
+    unread_count: int
+
+
+class BulkDeleteRequest(BaseModel):
+    ids: List[int] = Field(default_factory=list)
+    all: bool = False
+
+
 # --- Pagination --------------------------------------------------------------
 
 class PaginatedTickets(BaseModel):
