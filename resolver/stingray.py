@@ -126,6 +126,12 @@ class StingrayClient:
     def update_ticket(self, ticket_id: int, **fields: Any) -> dict:
         return self._request("PATCH", f"/tickets/{ticket_id}", json=fields).json()
 
+    def create_ticket(self, **fields: Any) -> dict:
+        """Create a ticket (e.g. a resolver-filed `code_review` follow-up). The
+        same `/tickets` path the other calls use — STINGRAY_URL points at the
+        backend directly, not the `/api` frontend proxy."""
+        return self._request("POST", "/tickets", json=fields).json()
+
     # --- comments --------------------------------------------------------
     def list_comments(self, ticket_id: int) -> list[dict]:
         return self._request("GET", f"/tickets/{ticket_id}/comments").json()

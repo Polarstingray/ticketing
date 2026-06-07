@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import select
 import shutil
 import signal
@@ -39,12 +40,14 @@ TAG_PLANNING = "claude:planning"            # plan run in flight
 TAG_AWAIT_PLAN = "claude:awaiting-plan-approval"
 TAG_IMPLEMENTING = "claude:implementing"    # implement run in flight
 TAG_AWAIT_PR = "claude:awaiting-pr-review"
+TAG_FILED = "claude:followup-filed"         # a /ticket follow-up was filed already
 TAG_DANGEROUS = "dangerous"
 REPO_TAG_PREFIX = "repo:"
 
 PLAN_MARKER = "📋 **Proposed plan**"
 IMPL_MARKER = "✅ **Implemented**"
 FAIL_MARKER = "⚠️ Resolver could not complete"
+FILED_MARKER = "🎫 **Filed follow-up ticket**"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Per-event audit truncation, set from config at sweep start (see main()).
@@ -484,6 +487,202 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
     return "\n".join(x for x in p if x is not None)
 
 
+# --- /ticket follow-up filing --------------------------------------------
+# A human leaves a `/ticket [options]` line (peer to /approve and /revise) to
+# tell the resolver to file a structured follow-up ticket — typically a
+# `code_review` whose code_blocks are pulled from the real git diff — once the
+# implementation lands. Grammar (all parts optional):
+#   /ticket [review|task] assign[:<id>] priority:<low|medium|high|critical>
+#           tags:<comma,list> title:<rest of line>  <free text -> description>
+_KIND_WORDS = {"review": "code_review", "code-review": "code_review",
+               "code_review": "code_review", "task": "task"}
+_PRIORITIES = {"low", "medium", "high", "critical"}
+
+# Map a file extension to a highlight.js language id for code_blocks.
+_EXT_LANG = {
+    ".py": "python", ".js": "javascript", ".jsx": "javascript",
+    ".mjs": "javascript", ".ts": "typescript", ".tsx": "typescript",
+    ".json": "json", ".md": "markdown", ".sh": "bash", ".bash": "bash",
+    ".yml": "yaml", ".yaml": "yaml", ".html": "html", ".css": "css",
+    ".scss": "scss", ".sql": "sql", ".go": "go", ".rs": "rust",
+    ".java": "java", ".rb": "ruby", ".php": "php", ".c": "c", ".h": "c",
+    ".cpp": "cpp", ".hpp": "cpp", ".cs": "csharp", ".kt": "kotlin",
+    ".swift": "swift", ".toml": "ini", ".ini": "ini", ".cfg": "ini",
+    ".xml": "xml", ".dockerfile": "dockerfile",
+}
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _lang_for(filename: str) -> str:
+    return _EXT_LANG.get(Path(filename).suffix.lower(), "plaintext")
+
+
+def parse_ticket_directive(comments: list[dict], bot_id: int) -> dict | None:
+    """Scan human comments (newest first) for a line starting with `/ticket` and
+    parse it into a spec dict, or return None when no human comment carries one.
+
+    Pure (no network) → unit-testable. An explicit `assign:<id>` that names the
+    bot is dropped to the fallback so we never re-enter our own sweep."""
+    line = None
+    for c in reversed(comments or []):
+        if c.get("author") == bot_id:
+            continue
+        for raw in (c.get("body") or "").splitlines():
+            if raw.strip().lower().startswith("/ticket"):
+                line = raw.strip()
+                break
+        if line is not None:
+            break
+    if line is None:
+        return None
+
+    spec = {"kind": "code_review", "assignee_id": None, "assign_fallback": False,
+            "priority": None, "tags": [], "title": None, "description": ""}
+    tokens = line[len("/ticket"):].strip().split()
+    i = 0
+    if tokens and ":" not in tokens[0] and tokens[0].lower() in _KIND_WORDS:
+        spec["kind"] = _KIND_WORDS[tokens[0].lower()]
+        i = 1
+
+    leftover: list[str] = []
+    while i < len(tokens):
+        tok = tokens[i]
+        low = tok.lower()
+        if low.startswith("title:"):
+            # title takes the rest of the line.
+            parts = [tok[len("title:"):]] + tokens[i + 1:]
+            spec["title"] = " ".join(p for p in parts if p).strip() or None
+            break
+        if low.startswith("assign:"):
+            val = tok[len("assign:"):].strip()
+            if val.isdigit():
+                spec["assignee_id"] = int(val)
+            else:
+                spec["assign_fallback"] = True
+        elif low in ("assign", "+assign"):
+            spec["assign_fallback"] = True
+        elif low.startswith("priority:"):
+            val = tok[len("priority:"):].strip().lower()
+            if val in _PRIORITIES:
+                spec["priority"] = val
+        elif low.startswith("tags:"):
+            spec["tags"] = [t.strip() for t in tok[len("tags:"):].split(",") if t.strip()]
+        else:
+            leftover.append(tok)
+        i += 1
+
+    if leftover:
+        spec["description"] = " ".join(leftover).strip()
+    # Never let the bot be the explicit assignee — drop to the fallback instead.
+    if spec["assignee_id"] == bot_id:
+        spec["assignee_id"] = None
+        spec["assign_fallback"] = True
+    return spec
+
+
+def _resolve_assignee(spec: dict, cfg: Config, ticket: dict) -> int | None:
+    """Resolve the follow-up's assignee per the directive: an explicit id wins;
+    a bare `assign` falls back to RESOLVER_DEFAULT_REVIEWER_ID then the source
+    ticket's creator. The bot is never returned (that would loop the sweep)."""
+    aid = spec.get("assignee_id")
+    if aid is None and spec.get("assign_fallback"):
+        aid = cfg.default_reviewer_id or ticket.get("created_by")
+    if aid == cfg.bot_user_id:
+        creator = ticket.get("created_by")
+        aid = creator if creator != cfg.bot_user_id else None
+    return aid
+
+
+def diff_to_code_blocks(diff_text: str, max_blocks: int = 20,
+                        max_block_lines: int = 400) -> list[dict]:
+    """Turn a unified `git diff` into `code_blocks` for a code_review ticket.
+
+    One block per hunk: `line_start` is the hunk's post-image start line and the
+    content is the hunk's added + context lines (removed lines are dropped, since
+    they aren't in the new file), so `line_end` lines up with the real file. The
+    block count and per-block line count are capped so a huge diff can't blow the
+    request body."""
+    blocks: list[dict] = []
+    filename: str | None = None
+    lang = "plaintext"
+    start_line = 0
+    hunk: list[str] | None = None
+
+    def flush() -> None:
+        nonlocal hunk
+        if filename and hunk and len(blocks) < max_blocks:
+            lines = hunk[:max_block_lines]
+            blocks.append({
+                "filename": filename, "language": lang, "line_start": start_line,
+                "line_end": start_line + len(lines) - 1, "content": "\n".join(lines),
+            })
+        hunk = None
+
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            flush()
+            path = line[4:].strip()
+            if path.startswith("b/"):
+                path = path[2:]
+            filename = None if path == "/dev/null" else path
+            lang = _lang_for(filename) if filename else "plaintext"
+        elif line.startswith("@@"):
+            flush()
+            m = _HUNK_RE.match(line)
+            if m and filename is not None:
+                start_line = int(m.group(1))
+                hunk = []
+        elif hunk is not None:
+            if line.startswith("+") or line.startswith(" "):
+                hunk.append(line[1:])
+            elif line.startswith("-") or line.startswith("\\"):
+                continue  # removed line / "\ No newline" — not in the post-image
+            else:
+                flush()  # diff metadata (diff --git, index, ...) ends the hunk
+        if len(blocks) >= max_blocks:
+            break
+    flush()
+    return blocks[:max_blocks]
+
+
+def file_followup_ticket(cfg: Config, client: StingrayClient, ticket: dict, wt: Path,
+                         base_ref: str, summary: str, spec: dict) -> dict | None:
+    """Build and POST a structured follow-up ticket from the real git diff, then
+    note it on the source ticket. Best-effort: a failure here must NOT fail the
+    resolution — the PR already succeeded."""
+    tid = ticket["id"]
+    kind = spec.get("kind") or "code_review"
+    description = (spec.get("description") or summary or "").rstrip()
+    description = (description + f"\n\n_Filed by the Stingray resolver from #{tid}._").strip()
+    tags = list(dict.fromkeys((cfg.followup_tags or []) + (spec.get("tags") or [])))
+    payload: dict = {
+        "type": kind,
+        "title": spec.get("title") or f"Review: {ticket['title']}",
+        "description": description,
+        "priority": spec.get("priority") or ticket.get("priority") or "medium",
+        "tags": tags,
+    }
+    assignee = _resolve_assignee(spec, cfg, ticket)
+    if assignee is not None:
+        payload["assigned_to"] = assignee
+    if kind == "code_review":
+        diff = run(["git", "-C", str(wt), "diff", f"{base_ref}..HEAD"])[1]
+        payload["code_blocks"] = diff_to_code_blocks(diff)
+    try:
+        created = client.create_ticket(**payload)
+        new_id = created.get("id")
+        client.add_comment(tid, f"{FILED_MARKER} #{new_id} (`{kind}`)"
+                           + (f", assigned to user {assignee}." if assignee else "."))
+        phase("filed-followup", ticket, f"#{tid}: filed follow-up #{new_id} ({kind})",
+              followup_id=new_id, assigned_to=assignee)
+        return created
+    except Exception as e:
+        audit.get_logger().warning("#%s: could not file follow-up ticket: %r", tid, e)
+        client.add_comment(tid, f"⚠️ Tried to file a follow-up `{kind}` ticket from "
+                           f"`/ticket`, but the API call failed: {e!r}")
+        return None
+
+
 # --- phase handlers ------------------------------------------------------
 def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             revise_notes: str | None) -> None:
@@ -515,7 +714,11 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
 
 
 def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
-                 plan: str | None, reviewer_notes: str | None = None) -> None:
+                 plan: str | None, reviewer_notes: str | None = None, *,
+                 comments: list[dict] | None = None) -> None:
+    # Parse any human `/ticket` directive once; forwarded to publish() so a
+    # follow-up review ticket is filed deterministically after the PR lands.
+    spec = parse_ticket_directive(comments or [], cfg.bot_user_id)
     set_state(client, ticket, [TAG_IMPLEMENTING])
     agent_label = agents.get_runner(cfg.agent).label
     client.add_comment(ticket["id"], f"🔧 {agent_label} is implementing this — working on a "
@@ -558,13 +761,13 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
 
         stat = run(["git", "-C", str(wt), "diff", "--stat", f"{base_ref}..HEAD"])[1].strip()
         publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch,
-                summary, stat, origin=origin, pr_ok=pr_ok)
+                summary, stat, origin=origin, pr_ok=pr_ok, spec=spec)
     finally:
         remove_worktree(repo, wt)
 
 
 def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summary, stat,
-            *, origin: bool, pr_ok: bool) -> None:
+            *, origin: bool, pr_ok: bool, spec: dict | None = None) -> None:
     """Open a PR (or fall back to branch/patch) and hand the ticket back.
 
     Every repo-writing command's exit code is checked: a failed `git push` must
@@ -612,6 +815,14 @@ def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summar
     set_state(client, ticket, [TAG_AWAIT_PR], status="in_review", assigned_to=ticket["created_by"])
     phase("awaiting-pr-review", ticket,
           f"#{tid}: implemented, handed back to user {ticket['created_by']}")
+
+    # A `/ticket` directive files a structured follow-up from the real diff — but
+    # only on the PR/branch path (patch_fallback persists nothing to review) and
+    # only once (TAG_FILED guards a later rework from double-filing).
+    if spec and not cfg.patch_fallback and TAG_FILED not in ticket.get("tags", []):
+        file_followup_ticket(cfg, client, ticket, wt, base_ref, summary, spec)
+        set_state(client, ticket, [TAG_AWAIT_PR, TAG_FILED], status="in_review",
+                  assigned_to=ticket["created_by"])
 
 
 def fail(client: StingrayClient, ticket: dict, message: str, *,
@@ -711,7 +922,8 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     elif action == "replan":
         do_plan(cfg, client, ticket, repo, kw["revise_notes"])
     elif action in ("implement", "rework"):
-        do_implement(cfg, client, ticket, repo, kw.get("plan"), kw.get("reviewer_notes"))
+        do_implement(cfg, client, ticket, repo, kw.get("plan"), kw.get("reviewer_notes"),
+                     comments=comments)
     elif action == "nudge":
         client.add_comment(tid, "I need an explicit `/approve` or `/revise <notes>` comment "
                                 "to proceed. Re-assign to me with one of those.")

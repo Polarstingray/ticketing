@@ -1,4 +1,16 @@
-## Filing a Stingray code-review ticket
+## Filing a follow-up review ticket from the resolver
+
+> **If the resolver is doing the work, prefer the `/ticket` directive.** When the
+> Stingray resolver implements a ticket, it can file the follow-up `code_review`
+> ticket itself — deterministically, through its hardened `StingrayClient`, with
+> `code_blocks` pulled from the real git diff. A human just leaves a `/ticket
+> [options]` comment (peer to `/approve`) on the source ticket; see
+> `resolver/README.md` → "Filing a follow-up review ticket (`/ticket`)". This
+> replaces asking a headless Claude to `curl` the API by hand (which was
+> unreliable). The manual `curl` recipe below is the fallback for ad-hoc use
+> outside the resolver.
+
+## Filing a Stingray code-review ticket (manual)
 
 When asked to file a review, create a ticket in **Stingray Tickets** via its REST API.
 

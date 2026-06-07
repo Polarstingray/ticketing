@@ -93,6 +93,12 @@ curl -s -X POST "$BASE/tickets" \
   }'
 ```
 
+> **Automated resolvers:** the Stingray *resolver* doesn't shell out to `curl` for
+> this — it calls `POST /tickets` programmatically via its `StingrayClient`
+> (`create_ticket`, which inherits the client's retries + audit), driven by a
+> human `/ticket` directive. See `resolver/README.md`. Prefer that path over a
+> headless agent hand-rolling the request.
+
 **`code_blocks` field shape** (only meaningful for `type: "code_review"`; ignored for tasks):
 
 | Field        | Type   | Notes |

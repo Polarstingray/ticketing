@@ -91,6 +91,33 @@ comment:
 - `/approve` — implement the plan.
 - `/revise <notes>` — re-plan with your notes.
 
+## Filing a follow-up review ticket (`/ticket`)
+
+The resolver files follow-up tickets itself — deterministically, through the same
+hardened `StingrayClient` (retries + audit) it uses for everything else, rather
+than asking a headless Claude to `curl` the API. Leave a `/ticket [options]` line
+in a human comment (alongside `/approve` or in its own comment); once the
+implementation lands and the PR/branch is published, the resolver builds a
+structured ticket whose `code_blocks` come straight from the **real git diff**
+(exact files + line ranges) and assigns it to a reviewer.
+
+```
+/ticket review assign:5 priority:high tags:backend,auth title:Review the auth refactor
+```
+
+- **kind** (first bare word, optional): `review`/`code-review` (default) or `task`.
+- **`assign:<id>`** — reviewer's user id. Bare `assign`/`+assign` falls back to
+  `RESOLVER_DEFAULT_REVIEWER_ID`, then the source ticket's creator. The bot is
+  never assigned (that would loop the sweep).
+- **`priority:<low|medium|high|critical>`**, **`tags:<comma,list>`** (merged with
+  `RESOLVER_FOLLOWUP_TAGS`), **`title:<rest of line>`**.
+- Any leftover free text becomes the new ticket's description (defaults to the
+  implementation summary). The new ticket's id is linked back on the source.
+
+Filed once per resolution (a `claude:followup-filed` tag guards a later rework
+from double-filing), and never on the `PATCH_FALLBACK` path (nothing is published
+to review there).
+
 ## Running it
 
 ```bash

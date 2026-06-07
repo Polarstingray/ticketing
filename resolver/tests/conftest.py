@@ -21,6 +21,7 @@ class FakeClient:
         self._comments = comments or []
         self.comments_added: list[tuple[int, str]] = []
         self.updates: list[dict] = []
+        self.created: list[dict] = []
 
     def list_comments(self, ticket_id):
         return self._comments
@@ -33,6 +34,10 @@ class FakeClient:
         self.updates.append(fields)
         return {"id": ticket_id, **fields}
 
+    def create_ticket(self, **fields):
+        self.created.append(fields)
+        return {"id": 1000 + len(self.created), **fields}
+
 
 @pytest.fixture
 def fake_cfg(tmp_path):
@@ -42,6 +47,8 @@ def fake_cfg(tmp_path):
         agent="claude",
         max_attempts=3,
         patch_fallback=False,
+        default_reviewer_id=None,
+        followup_tags=["resolver"],
         git_net_timeout=300,
         git_author_name="Test Bot",
         git_author_email="bot@test.local",

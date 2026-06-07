@@ -76,6 +76,9 @@ class Config:
     claude_timeout: int
     claude_implement_timeout: int
     patch_fallback: bool
+    # --- follow-up ticketing (/ticket directive) ---
+    default_reviewer_id: int | None
+    followup_tags: list[str]
     # --- reliability / hygiene tunables ---
     stingray_max_retries: int
     max_attempts: int
@@ -116,6 +119,21 @@ class Config:
                 os.environ.get("CLAUDE_IMPLEMENT_TIMEOUT", "2400")
             ),
             patch_fallback=os.environ.get("PATCH_FALLBACK", "0").strip() in ("1", "true", "yes"),
+            # Who a bare `assign` on a `/ticket` directive resolves to when no
+            # explicit id is given (falls back to the source ticket's creator if
+            # unset). Blank = unset.
+            default_reviewer_id=(
+                int(os.environ["RESOLVER_DEFAULT_REVIEWER_ID"])
+                if os.environ.get("RESOLVER_DEFAULT_REVIEWER_ID", "").strip()
+                else None
+            ),
+            # Tags merged onto every resolver-filed follow-up ticket so they're
+            # identifiable. Comma-separated; blank = no extra tags.
+            followup_tags=[
+                t.strip()
+                for t in os.environ.get("RESOLVER_FOLLOWUP_TAGS", "resolver").split(",")
+                if t.strip()
+            ],
             # Retry transient Stingray API failures (connection/5xx/429) this many
             # times before giving up, so a network blip mid-sweep doesn't strand a
             # ticket in a claude:* in-flight state.
