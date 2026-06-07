@@ -30,6 +30,10 @@
   font-size: 13px;
   color: var(--text-dim);
 }
+.selectAll input {
+  width: auto;
+  margin: 0;
+}
 
 .list {
   display: flex;
@@ -56,6 +60,8 @@
 
 .check {
   flex-shrink: 0;
+  width: auto;
+  margin: 0;
 }
 
 .body {
