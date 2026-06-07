@@ -50,6 +50,12 @@ export function describeActivity(entry) {
 
 export function formatDate(iso) {
   if (!iso) return "—";
+  // Defensive: a timezone-less ISO string (e.g. from a stale cache or a client
+  // that predates the UTC-aware API) is parsed as *local* time by Date, skewing
+  // the display by the viewer's offset. Treat such strings as UTC.
+  if (typeof iso === "string" && /T\d{2}:\d{2}/.test(iso) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(iso)) {
+    iso = iso + "Z";
+  }
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString(undefined, {

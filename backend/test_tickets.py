@@ -4,6 +4,8 @@ Uses the shared conftest fixtures. The suite shares one database, so list
 assertions check membership by id rather than absolute counts.
 """
 
+from datetime import datetime
+
 
 def _create(client, key, **overrides):
     body = {"type": "task", "title": "A ticket"}
@@ -25,6 +27,17 @@ def test_create_and_get_ticket(client, admin_key):
     r = client.get(f"/tickets/{t['id']}", headers={"X-API-Key": admin_key})
     assert r.status_code == 200
     assert r.json()["id"] == t["id"]
+
+
+def test_timestamps_serialized_as_utc_aware(client, admin_key):
+    """Timestamps must carry an explicit UTC offset so clients don't reinterpret
+    a naive (local-looking) string and skew the displayed time (#24)."""
+    t = _create(client, admin_key, due_date="2026-06-07T01:23:45")
+    for field in ("created_at", "updated_at", "due_date"):
+        val = t[field]
+        assert val.endswith(("Z", "+00:00")), f"{field} not UTC-aware: {val!r}"
+        parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        assert parsed.tzinfo is not None
 
 
 def test_create_requires_title(client, admin_key):
