@@ -1,9 +1,11 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { useNotifications } from "../notifications/NotificationsContext";
 import styles from "../styles/Layout.module.css";
 
 export default function Layout() {
   const { user, logout } = useAuth();
+  const { unreadCount } = useNotifications();
   const navigate = useNavigate();
 
   async function handleLogout() {
@@ -32,6 +34,15 @@ export default function Layout() {
               Users
             </NavLink>
           )}
+          <NavLink to="/notifications" className={linkClass}>
+            <span className={styles.bell}>🔔</span>
+            Notifications
+            {unreadCount > 0 && (
+              <span className={styles.badge}>
+                {unreadCount > 99 ? "99+" : unreadCount}
+              </span>
+            )}
+          </NavLink>
           <NavLink to="/profile" className={linkClass}>
             Profile
           </NavLink>

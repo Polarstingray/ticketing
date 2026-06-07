@@ -6,6 +6,7 @@ import TicketList from "./pages/TicketList";
 import TicketNew from "./pages/TicketNew";
 import TicketDetail from "./pages/TicketDetail";
 import AdminUsers from "./pages/AdminUsers";
+import Notifications from "./pages/Notifications";
 import Profile from "./pages/Profile";
 
 function Protected({ children, adminOnly = false }) {
@@ -31,6 +32,7 @@ export default function App() {
         <Route path="/tickets" element={<TicketList />} />
         <Route path="/tickets/new" element={<TicketNew />} />
         <Route path="/tickets/:id" element={<TicketDetail />} />
+        <Route path="/notifications" element={<Notifications />} />
         <Route path="/profile" element={<Profile />} />
         <Route
           path="/admin/users"

@@ -32,6 +32,14 @@ services:
       - stingray-data:/data
     networks:
       - internal
+    # Gate the frontend on the backend being reachable so nginx doesn't 502 on a
+    # cold start. Uses the stdlib (no curl in the slim image) to hit /health.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     # No published port by default — the frontend proxies to it over the
     # internal network. Uncomment to expose the API directly:
     # ports:
@@ -42,7 +50,8 @@ services:
     container_name: stingray-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - internal
       # - web        # <- external Traefik network; see traefik-labels.md
