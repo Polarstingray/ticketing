@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from models import TicketPriority, TicketStatus, TicketType, UserRole
 
-
 # --- Users -------------------------------------------------------------------
 
 class UserPublic(BaseModel):
@@ -95,6 +94,7 @@ class TicketOut(BaseModel):
     description: str
     status: TicketStatus
     priority: TicketPriority
+    archived: bool
     created_by: int
     assigned_to: Optional[int]
     created_at: datetime

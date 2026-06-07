@@ -1,0 +1,29 @@
+# Ruff config for the Python code (backend + resolver). The frontend is JS.
+target-version = "py312"
+line-length = 100
+
+# Import roots, so first-party modules (e.g. `from database import ...`) are
+# grouped separately from third-party packages by the import sorter.
+src = ["backend", "resolver"]
+
+# Don't consult .gitignore when walking the tree. In some dev sandboxes /home is
+# an autofs mount and ruff's gitignore walk stalls statting ancestor dirs; the
+# explicit excludes below cover what .gitignore would have skipped anyway.
+respect-gitignore = false
+
+extend-exclude = [
+    ".venv",
+    "venv",
+    "__pycache__",
+    "resolver/work",   # per-ticket git worktrees the resolver checks out
+    "resolver/logs",
+    "frontend",
+]
+
+[lint]
+# A pragmatic starter set: pyflakes (F), pycodestyle errors/warnings (E/W),
+# and import sorting (I). Add more rule families later if wanted.
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # line length: enforced loosely; long log/help strings are fine
+]

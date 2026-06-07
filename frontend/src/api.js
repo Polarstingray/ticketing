@@ -61,6 +61,8 @@ export const api = {
   updateTicket: (id, body) => request("PATCH", `/tickets/${id}`, body),
   deleteTicket: (id) => request("DELETE", `/tickets/${id}`),
   listActivity: (id) => request("GET", `/tickets/${id}/activity`),
+  archiveTicket: (id) => request("POST", `/tickets/${id}/archive`),
+  unarchiveTicket: (id) => request("POST", `/tickets/${id}/unarchive`),
 
   listComments: (id) => request("GET", `/tickets/${id}/comments`),
   addComment: (id, body) => request("POST", `/tickets/${id}/comments`, { body }),
