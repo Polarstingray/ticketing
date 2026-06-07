@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from activity import record_activity
 from auth import can_modify_ticket, can_view_ticket, get_current_user, is_admin
 from database import get_db
+from inbox import create_notification
 from models import (
     Activity,
     Ticket,
@@ -119,6 +120,9 @@ def create_ticket(
             db, ticket.id, user.id, "assigned",
             {"to": assignee.id, "name": assignee.display_name},
         )
+        create_notification(
+            db, user_id=assignee.id, type="assigned", ticket=ticket, actor=user,
+        )
     db.commit()
     db.refresh(ticket)
 
@@ -193,6 +197,9 @@ def update_ticket(
         else:
             record_activity(db, ticket.id, user.id, "assigned",
                             {"to": new_assignee.id, "name": new_assignee.display_name})
+            create_notification(
+                db, user_id=new_assignee.id, type="assigned", ticket=ticket, actor=user,
+            )
 
     ticket.updated_at = utcnow()
     db.commit()

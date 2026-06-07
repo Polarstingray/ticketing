@@ -65,6 +65,23 @@ export const api = {
   listComments: (id) => request("GET", `/tickets/${id}/comments`),
   addComment: (id, body) => request("POST", `/tickets/${id}/comments`, { body }),
 
+  // Notifications (the bell/inbox). listNotifications returns
+  // { items, total, unread_count, limit, offset }.
+  listNotifications: (params = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== "" && v !== null && v !== undefined) q.append(k, v);
+    });
+    const qs = q.toString();
+    return request("GET", "/notifications" + (qs ? `?${qs}` : ""));
+  },
+  unreadCount: () => request("GET", "/notifications/unread_count"),
+  markNotificationRead: (id) => request("POST", `/notifications/${id}/read`),
+  markAllNotificationsRead: () => request("POST", "/notifications/read_all"),
+  deleteNotification: (id) => request("DELETE", `/notifications/${id}`),
+  bulkDeleteNotifications: (ids) =>
+    request("POST", "/notifications/bulk_delete", { ids }),
+
   listUsers: () => request("GET", "/users"),
   createUser: (body) => request("POST", "/users", body),
   updateUser: (id, body) => request("PATCH", `/users/${id}`, body),
