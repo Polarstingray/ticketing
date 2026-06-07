@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from models import TicketPriority, TicketStatus, TicketType, UserRole
 
-
 # --- Users -------------------------------------------------------------------
 
 class UserPublic(BaseModel):

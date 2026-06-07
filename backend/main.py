@@ -15,6 +15,7 @@ from routers import comments as comments_router
 from routers import tickets as tickets_router
 from routers import users as users_router
 from seed import seed_admin
+from startup import check_startup_security
 
 
 def _migrate_session_version():
@@ -51,6 +52,8 @@ def _migrate_archived():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail fast on insecure defaults before doing anything else (no-op in dev).
+    check_startup_security()
     # Create tables and seed the first admin on startup.
     Base.metadata.create_all(bind=engine)
     _migrate_session_version()
