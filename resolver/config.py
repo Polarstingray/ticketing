@@ -9,7 +9,6 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 HERE = Path(__file__).resolve().parent
 
 
@@ -38,6 +37,19 @@ def _require(name: str) -> str:
     return val
 
 
+def _bot_user_id() -> int:
+    """The resolver's bot user id. Prefer the agent-neutral RESOLVER_BOT_USER_ID;
+    fall back to the original CLAUDE_BOT_USER_ID for backward compatibility."""
+    raw = (os.environ.get("RESOLVER_BOT_USER_ID")
+           or os.environ.get("CLAUDE_BOT_USER_ID") or "").strip()
+    if not raw:
+        raise SystemExit(
+            "resolver: missing required env var RESOLVER_BOT_USER_ID "
+            "(or legacy CLAUDE_BOT_USER_ID); see .env.example"
+        )
+    return int(raw)
+
+
 def _parse_repo_map(raw: str) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for chunk in raw.split(","):
@@ -54,6 +66,7 @@ class Config:
     stingray_url: str
     api_key: str
     bot_user_id: int
+    agent: str
     projects_root: Path
     repo_map: dict[str, str]
     default_repo: str
@@ -80,7 +93,10 @@ class Config:
         cfg = cls(
             stingray_url=_require("STINGRAY_URL").rstrip("/"),
             api_key=_require("STINGRAY_API_KEY"),
-            bot_user_id=int(_require("CLAUDE_BOT_USER_ID")),
+            bot_user_id=_bot_user_id(),
+            # Which agent runner drives plan/implement. "claude" today; a resolver
+            # on another identity can set RESOLVER_AGENT to a registered runner.
+            agent=os.environ.get("RESOLVER_AGENT", "claude").strip() or "claude",
             projects_root=Path(_require("PROJECTS_ROOT")).resolve(),
             repo_map=_parse_repo_map(os.environ.get("REPO_MAP", "")),
             default_repo=os.environ.get("DEFAULT_REPO", "").strip(),

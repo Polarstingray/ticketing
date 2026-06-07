@@ -20,14 +20,15 @@ import json
 import logging
 import os
 import select
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import agents
 import audit
 from config import Config, RepoNotAllowed, RepoNotFound
 from stingray import StingrayClient
@@ -331,6 +332,27 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
     return rc == 0, result_text
 
 
+class ClaudeRunner(agents.AgentRunner):
+    """Claude Code adapter — delegates to run_claude (defined above), which owns
+    the stream-json parsing and audit wiring."""
+
+    name = "claude"
+    label = "Claude"
+
+    def run(self, cfg: Config, prompt: str, cwd: Path, mode: str,
+            log_path: Path) -> tuple[bool, str]:
+        return run_claude(cfg, prompt, cwd, mode, log_path)
+
+
+agents.register_runner(ClaudeRunner())
+
+
+def run_agent(cfg: Config, prompt: str, cwd: Path, mode: str,
+              log_path: Path) -> tuple[bool, str]:
+    """Dispatch one plan/implement phase to the configured agent runner."""
+    return agents.get_runner(cfg.agent).run(cfg, prompt, cwd, mode, log_path)
+
+
 # --- git / worktree ------------------------------------------------------
 def has_origin(repo: Path) -> bool:
     return run(["git", "-C", str(repo), "remote", "get-url", "origin"])[0] == 0
@@ -467,7 +489,8 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             revise_notes: str | None) -> None:
     # Ack first, then claim: a transient failure posting the ack shouldn't leave
     # the ticket claimed (claude:planning) but silent.
-    client.add_comment(ticket["id"], "🔧 Claude is " +
+    agent_label = agents.get_runner(cfg.agent).label
+    client.add_comment(ticket["id"], f"🔧 {agent_label} is " +
         ("revising the plan" if revise_notes else "planning this ticket") +
         " — read-only, this can take a few minutes. I'll post the plan and "
         "reassign it back to you when done.")
@@ -475,7 +498,7 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     phase("planning", ticket, f"#{ticket['id']}: planning ({'revise' if revise_notes else 'fresh'})")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{ts}.log"
-    ok, result = run_claude(cfg, plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
+    ok, result = run_agent(cfg, plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
     if not ok:
         fail(client, ticket, f"Planning failed.\n\n```\n{tail(result)}\n```")
         return
@@ -494,7 +517,8 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
 def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                  plan: str | None, reviewer_notes: str | None = None) -> None:
     set_state(client, ticket, [TAG_IMPLEMENTING])
-    client.add_comment(ticket["id"], "🔧 Claude is implementing this — working on a "
+    agent_label = agents.get_runner(cfg.agent).label
+    client.add_comment(ticket["id"], f"🔧 {agent_label} is implementing this — working on a "
         "branch, this can take a few minutes. I'll post a summary and reassign it "
         "back to you when done.")
     phase("implementing", ticket, f"#{ticket['id']}: implementing"
@@ -509,8 +533,8 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     try:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         log_path = cfg.logs_dir / f"ticket-{ticket['id']}-implement-{ts}.log"
-        ok, summary = run_claude(cfg, implement_prompt(ticket, wt, plan, reviewer_notes),
-                                 wt, "implement", log_path)
+        ok, summary = run_agent(cfg, implement_prompt(ticket, wt, plan, reviewer_notes),
+                                wt, "implement", log_path)
         if not ok:
             # An approved plan exists — hand back re-implementable so a timeout
             # doesn't throw the plan away and re-plan from scratch on retry.
@@ -757,11 +781,13 @@ def main() -> None:
     logger = audit.setup_logging(cfg, sweep_id)
     audit.prune_old_logs(cfg, logger)
 
+    # Fail fast on an unknown RESOLVER_AGENT before touching the network.
+    runner = agents.get_runner(cfg.agent)
     max_tickets = args.max_tickets if args.max_tickets is not None else cfg.max_tickets_per_sweep
     client = StingrayClient(cfg.stingray_url, cfg.api_key,
                             max_retries=cfg.stingray_max_retries, logger=logger)
-    log(f"sweep start (bot user {cfg.bot_user_id}, root {cfg.projects_root}, "
-        f"max_tickets={max_tickets or 'unlimited'})")
+    log(f"sweep start (agent {runner.name}, bot user {cfg.bot_user_id}, "
+        f"root {cfg.projects_root}, max_tickets={max_tickets or 'unlimited'})")
     sweep(cfg, client, args.dry_run, args.ticket, max_tickets)
     log("sweep done")
 
