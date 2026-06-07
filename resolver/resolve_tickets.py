@@ -20,8 +20,8 @@ import json
 import logging
 import os
 import select
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
