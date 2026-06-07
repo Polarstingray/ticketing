@@ -1,83 +1,9 @@
 """Tests for ticket archive / unarchive.
 
-Each test module run uses an isolated temp SQLite database, selected by setting
-DATABASE_PATH *before* importing the app (the database module reads it at import
-time). Authentication uses the seeded admin's API key plus an extra member.
+Uses the shared fixtures in conftest.py (isolated DB, seeded admin, API keys,
+rate-limit disabled). Assertions check membership/flags rather than absolute
+counts because the suite shares one database.
 """
-import os
-import tempfile
-
-# Point the app at a throwaway database before anything imports `database`.
-_tmpdir = tempfile.mkdtemp(prefix="stingray-archive-test-")
-os.environ["DATABASE_PATH"] = os.path.join(_tmpdir, "test.db")
-os.environ.setdefault("ADMIN_USERNAME", "admin")
-# Keep this in sync with test_revocable_sessions.py: when both suites run in one
-# pytest process they share a single seeded admin (the database module reads
-# DATABASE_PATH once at import), so a mismatched admin password would 401 the
-# other suite's login.
-os.environ.setdefault("ADMIN_PASSWORD", "admin")
-
-import pytest
-from fastapi.testclient import TestClient
-
-from database import SessionLocal
-from main import app
-from models import ApiKey, User, UserRole
-from auth import generate_api_key, hash_api_key, hash_password
-
-
-def _mint_key(db, user) -> str:
-    """Create an API key for `user` via the ApiKey table and return its raw value
-    (the integrated schema stores only the hash, not a User.api_key column)."""
-    raw = generate_api_key()
-    db.add(ApiKey(
-        user_id=user.id,
-        name="test",
-        key_prefix=raw[:11],
-        key_hash=hash_api_key(raw),
-    ))
-    db.commit()
-    return raw
-
-
-@pytest.fixture(scope="module")
-def client():
-    # The lifespan handler creates tables, runs the archived migration, and seeds
-    # the admin user.
-    with TestClient(app) as c:
-        yield c
-
-
-@pytest.fixture(scope="module")
-def admin_key():
-    db = SessionLocal()
-    try:
-        admin = db.query(User).filter(User.username == "admin").first()
-        return _mint_key(db, admin)
-    finally:
-        db.close()
-
-
-@pytest.fixture(scope="module")
-def member_key():
-    """A second, non-admin user who is neither creator nor assignee of test tickets."""
-    db = SessionLocal()
-    try:
-        member = db.query(User).filter(User.username == "member").first()
-        if member is None:
-            member = User(
-                username="member",
-                display_name="Member",
-                email="member@example.com",
-                role=UserRole.member.value,
-                hashed_password=hash_password("member123"),
-            )
-            db.add(member)
-            db.commit()
-            db.refresh(member)
-        return _mint_key(db, member)
-    finally:
-        db.close()
 
 
 def _create_ticket(client, key, **overrides):
@@ -139,11 +65,16 @@ def test_unarchive_restores_to_default_list(client, admin_key):
     assert t["id"] in [x["id"] for x in default.json()["items"]]
 
 
-def test_archive_forbidden_for_non_creator_member(client, admin_key, member_key):
+def test_archive_forbidden_for_non_creator_member(client, admin_key, make_user):
     t = _create_ticket(client, admin_key, title="Admin owns this")
     _set_status(client, admin_key, t["id"], "closed")
 
-    r = client.post(f"/tickets/{t['id']}/archive", headers={"X-API-Key": member_key})
+    member = make_user()
+    r = client.post(
+        f"/tickets/{t['id']}/archive", headers={"X-API-Key": member.key}
+    )
+    # The archive endpoint checks modify permission directly -> 403 for a member
+    # who is neither creator nor assignee.
     assert r.status_code == 403, r.text
 
 

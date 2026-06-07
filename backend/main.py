@@ -6,55 +6,25 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from sqlalchemy import inspect, text
 
 from database import Base, SessionLocal, engine
+from migrations import run_migrations
 from ratelimit import limiter
 from routers import auth as auth_router
 from routers import comments as comments_router
 from routers import tickets as tickets_router
 from routers import users as users_router
 from seed import seed_admin
-
-
-def _migrate_session_version():
-    """Add the users.session_version column to pre-existing databases.
-
-    ``create_all`` never alters tables that already exist, and there's no
-    Alembic in this project, so an older ``stingray.db`` would be missing the
-    column. This idempotent guard adds it when absent.
-    """
-    inspector = inspect(engine)
-    columns = {col["name"] for col in inspector.get_columns("users")}
-    if "session_version" not in columns:
-        with engine.begin() as conn:
-            conn.execute(
-                text("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
-            )
-
-
-def _migrate_archived():
-    """Add the `tickets.archived` column to pre-existing databases.
-
-    `create_all` only creates missing tables; it won't alter an existing
-    `tickets` table, and there's no Alembic in this project. This is a small,
-    idempotent migration that adds the column when it's absent.
-    """
-    with engine.begin() as conn:
-        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(tickets)"))]
-        # `cols` is empty if the table doesn't exist yet (create_all handles that).
-        if cols and "archived" not in cols:
-            conn.execute(
-                text("ALTER TABLE tickets ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0")
-            )
+from startup import check_startup_security
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create tables and seed the first admin on startup.
+    # Fail fast on insecure defaults before doing anything else (no-op in dev).
+    check_startup_security()
+    # Create tables, apply idempotent migrations, and seed the first admin.
     Base.metadata.create_all(bind=engine)
-    _migrate_session_version()
-    _migrate_archived()
+    run_migrations(engine)
     db = SessionLocal()
     try:
         seed_admin(db)
