@@ -39,8 +39,8 @@ implements and opens a PR directly (one review gate instead of two).
      -H 'Content-Type: application/json' \
      -d '{"username":"claude-bot","display_name":"Claude","email":"claude-bot@localhost","password":"<random>","role":"member"}'
    ```
-   Note the returned `id` — that's `CLAUDE_BOT_USER_ID`. A `member` (not admin) is
-   correct: it can only modify tickets assigned to it (least privilege).
+   Note the returned `id` — that's `RESOLVER_BOT_USER_ID`. A `member` (not admin)
+   is correct: it can only modify tickets assigned to it (least privilege).
 
 2. **Mint its API key:**
    ```bash
@@ -110,6 +110,34 @@ Cron (under `flock` so sweeps never overlap):
 
 Bound a busy sweep with `--max-tickets N` (or `MAX_TICKETS_PER_SWEEP`) so one
 tick does a fixed amount of work under the lock and the next tick continues.
+
+## Scaling: multiple resolvers / identities
+
+The resolver claims work by sweeping tickets **assigned to its own bot user**
+(`RESOLVER_BOT_USER_ID`), so the way to run several resolvers is to give each its
+own bot user and route tickets by assignment. No shared coordination is needed —
+the `flock` only serializes sweeps **on one machine**, and distinct bot ids mean
+two resolvers never see the same ticket.
+
+This covers both shapes the homelab might take:
+
+- **2–3 stations:** one bot user per station (`claude-bot-vm1`, `claude-bot-vm2`,
+  …); assign a ticket to whichever station should do it.
+- **Multiple agents:** a `claude-bot` and a `codex-bot`, each on its own box (or
+  the same one), with `RESOLVER_AGENT` set per resolver.
+
+Each resolver just needs its own `.env` (its `STINGRAY_API_KEY`,
+`RESOLVER_BOT_USER_ID`, and `RESOLVER_AGENT`).
+
+### Agents
+
+The plan/implement invocation is behind an `AgentRunner` interface (`agents.py`);
+the orchestration around it is agent-agnostic. `claude` (Claude Code) is
+implemented and registered. To add another (e.g. OpenAI Codex): subclass
+`AgentRunner`, implement `run()` to drive that CLI, `register_runner(...)` it
+(see the `CodexRunner` template), then point a resolver at it with
+`RESOLVER_AGENT=<name>`. Selecting an unregistered agent fails fast at startup
+with guidance, so a half-configured resolver never strands a ticket.
 
 ## Logging & audit trail
 
