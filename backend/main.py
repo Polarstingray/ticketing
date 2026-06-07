@@ -2,12 +2,13 @@
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import inspect, text
 
+from auth import COOKIE_SECURE
 from database import Base, SessionLocal, engine
 from ratelimit import limiter
 from routers import auth as auth_router
@@ -61,9 +62,39 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in cors_origins.split(",") if o.strip()],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Narrowed to the methods/headers the app actually uses (plus the implicit
+    # OPTIONS preflight and Content-Type). X-API-Key carries programmatic auth.
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
+
+
+# Security headers. The backend serves JSON only, so a tight CSP is safe here;
+# this is the dev safety net (Vite has no nginx) and guarantees API responses
+# carry these headers regardless of any fronting proxy. nginx adds the
+# document-level CSP for the built SPA in production.
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for header, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+    # HSTS only over HTTPS (prod). COOKIE_SECURE is the existing "served over
+    # TLS" signal; sending HSTS on plain-HTTP dev would poison localhost.
+    if COOKIE_SECURE:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+    return response
+
 
 app.include_router(auth_router.router)
 app.include_router(tickets_router.router)
