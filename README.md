@@ -32,6 +32,46 @@ logs — copy it then. Manage keys afterwards on the **Profile** page.
 
 To put it behind Traefik, see [`traefik-labels.md`](./traefik-labels.md).
 
+## Deploying to a server (production)
+
+The typical homelab topology: **Stingray runs on a server** (behind Traefik/HTTPS), and
+**resolver(s) run on dev stations** (see [`resolver/`](./resolver)) that pull bot-assigned
+tickets and open PRs. To harden a real deployment, set these in `.env`:
+
+| Var | Production value |
+|-----|------------------|
+| `APP_ENV` | `production` — the backend then **refuses to start** with a default/empty `SESSION_SECRET` and warns on a weak `ADMIN_PASSWORD` |
+| `SESSION_SECRET` | a long random string: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `ADMIN_PASSWORD` | a strong, unique password (used only to seed the first admin) |
+| `COOKIE_SECURE` | `true` when served over HTTPS (also implies production) |
+| `CORS_ORIGINS` | your real origin(s), e.g. `https://tickets.example.com` |
+
+```bash
+cp .env.example .env        # set APP_ENV=production, a real SESSION_SECRET, etc.
+docker compose up --build -d
+```
+
+### Backups
+
+The database is a single SQLite file on the `stingray-data` volume. Take consistent
+online snapshots with [`backend/backup_db.py`](./backend/backup_db.py) (uses SQLite's
+backup API — safe while the app is running):
+
+```bash
+# one-off, from the host:
+docker compose exec backend python backup_db.py --keep 14
+# -> writes /data/backups/stingray-<timestamp>.db inside the volume
+```
+
+Schedule it with cron/systemd on the host, or enable the optional `backup` sidecar in
+`docker-compose.yml` (a commented-out service that snapshots daily and keeps 14).
+
+### Schema migrations
+
+There's no Alembic. Column additions are small idempotent steps in
+[`backend/migrations.py`](./backend/migrations.py), applied automatically on startup after
+`create_all`. To add one, append a function to `MIGRATIONS` following the pattern there.
+
 ## Features
 
 - **Tickets** — `code_review` (with highlighted code snapshots) and `task` types; status,
@@ -93,8 +133,9 @@ create tickets.
 
 ```
 ticketing/
-  backend/      FastAPI app, models, auth, routers
+  backend/      FastAPI app, models, auth, routers, migrations, backup
   frontend/     React/Vite SPA
+  resolver/     headless agent that resolves bot-assigned tickets on dev stations
   docker-compose.yml
   traefik-labels.md
   api_guide.md
