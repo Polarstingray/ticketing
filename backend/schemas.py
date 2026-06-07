@@ -1,10 +1,24 @@
 """Pydantic request/response schemas."""
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import Annotated, List, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer
 
 from models import TicketPriority, TicketStatus, TicketType, UserRole
+
+# --- Datetime serialization --------------------------------------------------
+# DB datetimes are stored as UTC but come back naive (SQLite has no tz type, and
+# the columns are plain DateTime). Serialize them as UTC-aware ISO-8601 so every
+# consumer (frontend, bot, curl) gets an explicit offset instead of an ambiguous
+# timezone-less string that browsers reinterpret as local time.
+
+def _as_utc_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+UTCDateTime = Annotated[datetime, PlainSerializer(_as_utc_iso, return_type=str)]
 
 # --- Users -------------------------------------------------------------------
 
@@ -17,7 +31,7 @@ class UserPublic(BaseModel):
     display_name: str
     email: str
     role: UserRole
-    created_at: datetime
+    created_at: UTCDateTime
 
 
 class UserSelf(UserPublic):
@@ -97,9 +111,9 @@ class TicketOut(BaseModel):
     archived: bool
     created_by: int
     assigned_to: Optional[int]
-    created_at: datetime
-    updated_at: datetime
-    due_date: Optional[datetime]
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
+    due_date: Optional[UTCDateTime]
     code_blocks: List[CodeBlock]
     tags: List[str]
 
@@ -117,7 +131,7 @@ class CommentOut(BaseModel):
     ticket_id: int
     author: int
     body: str
-    created_at: datetime
+    created_at: UTCDateTime
 
 
 # --- Activity ----------------------------------------------------------------
@@ -130,7 +144,7 @@ class ActivityOut(BaseModel):
     actor: Optional[int] = Field(default=None, validation_alias="actor_id")
     action: str
     detail: Optional[dict] = None
-    created_at: datetime
+    created_at: UTCDateTime
 
 
 # --- Pagination --------------------------------------------------------------
@@ -151,9 +165,9 @@ class ApiKeyMeta(BaseModel):
     id: int
     name: str
     key_prefix: str
-    created_at: datetime
-    last_used_at: Optional[datetime] = None
-    expires_at: Optional[datetime] = None
+    created_at: UTCDateTime
+    last_used_at: Optional[UTCDateTime] = None
+    expires_at: Optional[UTCDateTime] = None
     revoked: bool
 
 
