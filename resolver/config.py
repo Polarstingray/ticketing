@@ -37,6 +37,17 @@ def _require(name: str) -> str:
     return val
 
 
+def _env(*names: str, default: str = "") -> str:
+    """First non-empty env var among `names`, else `default`. Lets agent-neutral
+    AGENT_* names take precedence while still honoring the legacy CLAUDE_* names
+    (mirrors the RESOLVER_BOT_USER_ID <- CLAUDE_BOT_USER_ID fallback)."""
+    for name in names:
+        val = os.environ.get(name, "").strip()
+        if val:
+            return val
+    return default
+
+
 def _bot_user_id() -> int:
     """The resolver's bot user id. Prefer the agent-neutral RESOLVER_BOT_USER_ID;
     fall back to the original CLAUDE_BOT_USER_ID for backward compatibility."""
@@ -70,11 +81,16 @@ class Config:
     projects_root: Path
     repo_map: dict[str, str]
     default_repo: str
-    claude_bin: str
-    claude_model: str
+    # --- agent invocation (agent-neutral; legacy CLAUDE_* names still honored) ---
+    agent_bin: str
+    agent_model: str
     implement_tools: str
-    claude_timeout: int
-    claude_implement_timeout: int
+    agent_timeout: int
+    agent_implement_timeout: int
+    # opencode-specific: which named agents drive the read-only plan phase and the
+    # edit-capable implement phase (built-in "plan"/"build"; unused by Claude).
+    opencode_plan_agent: str
+    opencode_build_agent: str
     patch_fallback: bool
     # --- reliability / hygiene tunables ---
     stingray_max_retries: int
@@ -89,7 +105,15 @@ class Config:
 
     @classmethod
     def load(cls) -> "Config":
-        _load_env_file(HERE / ".env")
+        # Which env file to load (default `.env`). Lets several resolver identities
+        # share this one code dir — e.g. RESOLVER_ENV_FILE=.env.gemini selects the
+        # opencode/Gemini bot's config. The selector is read from the real
+        # environment; a relative path is taken next to this module.
+        env_file = os.environ.get("RESOLVER_ENV_FILE", "").strip() or ".env"
+        env_path = Path(env_file)
+        if not env_path.is_absolute():
+            env_path = HERE / env_path
+        _load_env_file(env_path)
         cfg = cls(
             stingray_url=_require("STINGRAY_URL").rstrip("/"),
             api_key=_require("STINGRAY_API_KEY"),
@@ -100,21 +124,28 @@ class Config:
             projects_root=Path(_require("PROJECTS_ROOT")).resolve(),
             repo_map=_parse_repo_map(os.environ.get("REPO_MAP", "")),
             default_repo=os.environ.get("DEFAULT_REPO", "").strip(),
-            claude_bin=os.environ.get("CLAUDE_BIN", "claude").strip() or "claude",
-            claude_model=os.environ.get("CLAUDE_MODEL", "").strip(),
-            implement_tools=os.environ.get(
-                "CLAUDE_IMPLEMENT_TOOLS",
-                # Broad Bash so Claude can run tests/build in the worktree;
+            # Agent CLI binary/model. AGENT_* is the agent-neutral name; the legacy
+            # CLAUDE_* names still work so existing Claude resolvers need no change.
+            agent_bin=_env("AGENT_BIN", "CLAUDE_BIN", default="claude"),
+            agent_model=_env("AGENT_MODEL", "CLAUDE_MODEL"),
+            implement_tools=_env(
+                "AGENT_IMPLEMENT_TOOLS", "CLAUDE_IMPLEMENT_TOOLS",
+                # Broad Bash so the agent can run tests/build in the worktree;
                 # isolation comes from the worktree + PROJECTS_ROOT allowlist,
                 # not from narrowing Bash (compound `cd && cmd` defeats that).
-                "Edit Write Read Glob Grep Bash",
-            ).strip(),
-            claude_timeout=int(os.environ.get("CLAUDE_TIMEOUT", "1800")),
+                # Claude-tool-name allowlist; the opencode runner ignores this.
+                default="Edit Write Read Glob Grep Bash",
+            ),
+            agent_timeout=int(_env("AGENT_TIMEOUT", "CLAUDE_TIMEOUT", default="1800")),
             # The implement phase does strictly more than plan (edit + verify),
             # so give it a larger default budget than the (read-only) plan phase.
-            claude_implement_timeout=int(
-                os.environ.get("CLAUDE_IMPLEMENT_TIMEOUT", "2400")
+            agent_implement_timeout=int(
+                _env("AGENT_IMPLEMENT_TIMEOUT", "CLAUDE_IMPLEMENT_TIMEOUT", default="2400")
             ),
+            # opencode named agents: "plan" is permission-restricted (no edit/bash)
+            # for the read-only plan phase; "build" is unrestricted for implement.
+            opencode_plan_agent=_env("OPENCODE_PLAN_AGENT", default="plan"),
+            opencode_build_agent=_env("OPENCODE_BUILD_AGENT", default="build"),
             patch_fallback=os.environ.get("PATCH_FALLBACK", "0").strip() in ("1", "true", "yes"),
             # Retry transient Stingray API failures (connection/5xx/429) this many
             # times before giving up, so a network blip mid-sweep doesn't strand a

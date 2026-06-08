@@ -123,8 +123,9 @@ This covers both shapes the homelab might take:
 
 - **2–3 stations:** one bot user per station (`claude-bot-vm1`, `claude-bot-vm2`,
   …); assign a ticket to whichever station should do it.
-- **Multiple agents:** a `claude-bot` and a `codex-bot`, each on its own box (or
-  the same one), with `RESOLVER_AGENT` set per resolver.
+- **Multiple agents:** a `claude-bot` and a `gemini-bot`, each on its own box (or
+  the same one), with `RESOLVER_AGENT` set per resolver — use Claude for the heavy
+  lifting and a free/cheap harness (opencode + Gemini) for mechanical tickets.
 
 Each resolver just needs its own `.env` (its `STINGRAY_API_KEY`,
 `RESOLVER_BOT_USER_ID`, and `RESOLVER_AGENT`).
@@ -132,12 +133,63 @@ Each resolver just needs its own `.env` (its `STINGRAY_API_KEY`,
 ### Agents
 
 The plan/implement invocation is behind an `AgentRunner` interface (`agents.py`);
-the orchestration around it is agent-agnostic. `claude` (Claude Code) is
-implemented and registered. To add another (e.g. OpenAI Codex): subclass
-`AgentRunner`, implement `run()` to drive that CLI, `register_runner(...)` it
-(see the `CodexRunner` template), then point a resolver at it with
-`RESOLVER_AGENT=<name>`. Selecting an unregistered agent fails fast at startup
-with guidance, so a half-configured resolver never strands a ticket.
+the orchestration around it is agent-agnostic. Two runners ship today: `claude`
+(Claude Code) and `opencode` (the [opencode](https://opencode.ai) CLI, which is
+model-agnostic — point it at Gemini, etc.). Select one per resolver with
+`RESOLVER_AGENT`. Selecting an unregistered agent fails fast at startup with
+guidance, so a half-configured resolver never strands a ticket. To add a third
+(e.g. OpenAI Codex): subclass `AgentRunner`, implement `run()`, `register_runner(...)`
+it (see the `CodexRunner` template).
+
+The agent-invocation env vars are agent-neutral (`AGENT_BIN`, `AGENT_MODEL`,
+`AGENT_TIMEOUT`, `AGENT_IMPLEMENT_TIMEOUT`, `AGENT_IMPLEMENT_TOOLS`); the legacy
+`CLAUDE_*` names still work as fallbacks, so existing Claude resolvers need no
+change.
+
+#### Adding the opencode + Gemini bot (a cheap second bot)
+
+Run a second resolver that drives opencode against Gemini's free API tier, and
+route the simple work to it by **assignment** — no dispatcher code, just a second
+bot user.
+
+1. **Create `gemini-bot`** (a `member`, exactly like `claude-bot` in setup above)
+   and mint its API key. Note its user id.
+2. **Install opencode** on that box and give it a Gemini **API key** (from
+   [AI Studio](https://aistudio.google.com/apikey)) via opencode's auth/config —
+   use the API-key path, *not* the bundled Gemini-CLI login (Google discontinued
+   that free OAuth tier on 2026-06-18; the API free tier remains).
+3. **Give it its own env file** in this same dir (e.g. `.env.gemini`) — both
+   identities share the code; `RESOLVER_ENV_FILE` picks which config to load
+   (`.env.*` is gitignored except `.env.example`):
+   ```bash
+   RESOLVER_AGENT=opencode
+   RESOLVER_BOT_USER_ID=<gemini-bot id>
+   STINGRAY_API_KEY=<gemini-bot's own key>   # not the admin key
+   AGENT_BIN=/home/you/.local/bin/opencode   # absolute path for cron's thin PATH
+   AGENT_MODEL=google/gemini-2.5-flash       # provider/model
+   # plan phase uses opencode's read-only `plan` agent; implement uses `build`.
+   # Override only if you've defined custom opencode agents:
+   # OPENCODE_PLAN_AGENT=plan
+   # OPENCODE_BUILD_AGENT=build
+   ```
+4. **Add a second cron line** under its *own* `flock` lock, selecting the env file:
+   ```cron
+   */10 * * * * /usr/bin/flock -n /tmp/stingray-resolver-gemini.lock \
+     /usr/bin/env RESOLVER_ENV_FILE=.env.gemini \
+     /home/you/projects/ticketing/resolver/.venv/bin/python \
+     /home/you/projects/ticketing/resolver/resolve_tickets.py \
+     >> /home/you/projects/ticketing/resolver/logs/cron-gemini.log 2>&1
+   ```
+
+**Routing rule:** assign mechanical tickets (small PRs, merge conflicts, lint /
+dependency bumps) to `gemini-bot`; assign heavy or ambiguous work to `claude-bot`.
+Each resolver only sweeps its own bot's queue, so the two never collide.
+
+> **Read-only safety:** the plan phase runs opencode's permission-restricted
+> `plan` agent and does **not** pass `--dangerously-skip-permissions`, so it
+> cannot edit files or run shell — the same two-gate guarantee Claude gets. The
+> implement phase uses the unrestricted `build` agent; isolation comes from the
+> per-ticket worktree + the `PROJECTS_ROOT` allowlist.
 
 ## Logging & audit trail
 
@@ -147,17 +199,17 @@ the API key and token-shaped strings first):
 | File | Contents |
 |------|----------|
 | `cron.log` | the INFO summary (sweep start/done, per-ticket phase transitions) |
-| `sweep-<ts>.log` | the full human-readable trace at DEBUG — every `git`/`gh`/`bash` command, every API call, every Claude tool use |
-| `audit-<ts>.jsonl` | one structured JSON object per event (`subprocess` / `api` / `claude_tool` / `phase`) for grep/analysis |
-| `ticket-<id>-<phase>-<ts>.log` | the raw Claude stream-json transcript for that run |
+| `sweep-<ts>.log` | the full human-readable trace at DEBUG — every `git`/`gh`/`bash` command, every API call, every agent tool use |
+| `audit-<ts>.jsonl` | one structured JSON object per event (`subprocess` / `api` / `agent_tool` / `phase`) for grep/analysis |
+| `ticket-<id>-<phase>-<ts>.log` | the raw agent transcript (Claude stream-json / opencode JSONL) for that run |
 
-Because the implement phase runs Claude with `--output-format stream-json`, the
-audit log records **each file the bot reads/writes/edits and each shell command
-it runs**, e.g.:
+Because the implement phase streams the agent's output as JSON, the audit log
+records **each file the bot reads/writes/edits and each shell command it runs**
+(the `agent_tool` events carry an `agent` field — `claude` or `opencode`), e.g.:
 
 ```bash
 # what did the bot touch on ticket 42?
-grep '"kind": "claude_tool"' logs/audit-*.jsonl | grep '"ticket": "42"'
+grep '"kind": "agent_tool"' logs/audit-*.jsonl | grep '"ticket": "42"'
 # every non-zero subprocess in the last sweep
 jq 'select(.kind=="subprocess" and .rc!=0)' logs/audit-*.jsonl
 ```
