@@ -16,10 +16,13 @@ See actions only:     python resolve_tickets.py --dry-run
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -30,8 +33,11 @@ from pathlib import Path
 
 import agents
 import audit
+import file_ticket
 from config import Config, RepoNotAllowed, RepoNotFound
 from stingray import StingrayClient
+
+HERE = Path(__file__).resolve().parent
 
 # --- tag conventions -----------------------------------------------------
 CLAUDE_PREFIX = "claude:"
@@ -45,6 +51,7 @@ REPO_TAG_PREFIX = "repo:"
 PLAN_MARKER = "📋 **Proposed plan**"
 IMPL_MARKER = "✅ **Implemented**"
 FAIL_MARKER = "⚠️ Resolver could not complete"
+FILED_MARKER = "🎫 Filed from `/ticket`"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Per-event audit truncation, set from config at sweep start (see main()).
@@ -197,6 +204,141 @@ def recent_failures(comments: list[dict], bot_id: int) -> int:
         if FAIL_MARKER in body:
             n += 1
     return n
+
+
+# --- /ticket directive ---------------------------------------------------
+# A human can ask the resolver to file a NEW ticket by writing a `/ticket` line
+# in the ticket body or a comment. Unlike file_ticket.py (which the implement
+# agent runs), this is parsed deterministically by the resolver — the model is
+# never in the loop, so the type/priority/auth can't be gotten wrong.
+_KEY_RE = re.compile(r"\[key:([0-9a-f]{10})\]")
+
+
+class _DirectiveError(ValueError):
+    """A /ticket directive that couldn't be parsed/validated. The message is
+    surfaced back on the ticket so the author can fix it."""
+
+
+class _DirectiveParser(argparse.ArgumentParser):
+    """argparse that raises instead of calling sys.exit, so one bad directive
+    can't abort the sweep."""
+
+    def error(self, message: str):  # noqa: D401 - argparse hook
+        raise _DirectiveError(message)
+
+
+def _directive_parser() -> _DirectiveParser:
+    p = _DirectiveParser(prog="/ticket", add_help=False)
+    p.add_argument("type", choices=file_ticket.TYPES)
+    p.add_argument("title")
+    p.add_argument("--priority", default="medium", choices=file_ticket.PRIORITIES)
+    p.add_argument("--description", default="")
+    p.add_argument("--tag", action="append")
+    p.add_argument("--assign", type=int)
+    p.add_argument("--code-block", action="append", dest="code_block")
+    return p
+
+
+def directive_key(line: str) -> str:
+    """Stable id for a directive line, used to file it exactly once across sweeps."""
+    return hashlib.sha1(line.strip().encode("utf-8")).hexdigest()[:10]
+
+
+def collect_directives(ticket: dict, comments: list[dict], bot_id: int) -> list[dict]:
+    """Find every `/ticket ...` line in the ticket body and human comments.
+    Returns dicts of {key, line, args, author}. Bot-authored text (incl. our own
+    marker comment) is ignored so the resolver never parses its own output."""
+    sources: list[tuple[str, int | None]] = [
+        (ticket.get("description") or "", ticket.get("created_by"))
+    ]
+    for c in comments:
+        if c.get("author") != bot_id:
+            sources.append((c.get("body") or "", c.get("author")))
+
+    found: list[dict] = []
+    seen: set[str] = set()
+    for text, author in sources:
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line != "/ticket" and not line.startswith("/ticket "):
+                continue
+            key = directive_key(line)
+            if key in seen:
+                continue  # identical directive twice in one sweep -> file once
+            seen.add(key)
+            found.append({
+                "key": key,
+                "line": line,
+                "args": line[len("/ticket"):].strip(),
+                "author": author,
+            })
+    return found
+
+
+def already_handled_keys(comments: list[dict], bot_id: int) -> set[str]:
+    """Directive keys the resolver already acted on, read back from its own
+    marker comments — this is what makes a body directive file only once."""
+    keys: set[str] = set()
+    for c in comments:
+        if c.get("author") == bot_id and FILED_MARKER in (c.get("body") or ""):
+            keys.update(_KEY_RE.findall(c.get("body") or ""))
+    return keys
+
+
+def directive_payload(directive: dict, repo: Path) -> dict:
+    """Parse one directive into a create_ticket payload, reusing file_ticket's
+    validation + on-disk code-block reading. Raises _DirectiveError on bad input."""
+    try:
+        tokens = shlex.split(directive["args"])
+    except ValueError as exc:
+        raise _DirectiveError(f"could not parse arguments: {exc}")
+    args = _directive_parser().parse_args(tokens)
+    args.root = str(repo)
+    try:
+        payload = file_ticket.build_payload(args)
+    except ValueError as exc:
+        raise _DirectiveError(str(exc))
+    # Default the new ticket to the directive's author so the requester can find
+    # it; an explicit --assign wins (build_payload already set assigned_to then).
+    if "assigned_to" not in payload and directive["author"] is not None:
+        payload["assigned_to"] = directive["author"]
+    return payload
+
+
+def handle_ticket_directives(cfg: Config, client: StingrayClient, ticket: dict,
+                             comments: list[dict], repo: Path, dry_run: bool) -> None:
+    """File any new `/ticket` directives on this ticket (once each), then record
+    what happened in a single marker comment so the next sweep skips them."""
+    directives = collect_directives(ticket, comments, cfg.bot_user_id)
+    if not directives:
+        return
+    done = already_handled_keys(comments, cfg.bot_user_id)
+    pending = [d for d in directives if d["key"] not in done]
+    if not pending:
+        return
+
+    if dry_run:
+        log(f"#{ticket['id']}: would file {len(pending)} /ticket directive(s)")
+        return
+
+    lines: list[str] = []
+    for d in pending:
+        try:
+            payload = directive_payload(d, repo)
+            created = client.create_ticket(**payload)
+            lines.append(
+                f"- #{created['id']} — {payload['type']} \"{created.get('title')}\""
+                f"  [key:{d['key']}]"
+            )
+            log(f"#{ticket['id']}: /ticket filed #{created['id']} ({d['key']})")
+        except _DirectiveError as exc:
+            lines.append(f"- error: {exc}  `{d['line']}`  [key:{d['key']}]")
+            log(f"#{ticket['id']}: /ticket rejected ({d['key']}): {exc}")
+        except Exception as exc:  # API failure etc. — report, don't crash the sweep
+            lines.append(f"- error filing: {exc}  `{d['line']}`  [key:{d['key']}]")
+            log(f"#{ticket['id']}: /ticket failed ({d['key']}): {exc}")
+
+    client.add_comment(ticket["id"], f"{FILED_MARKER}\n\n" + "\n".join(lines))
 
 
 # --- agent runners -------------------------------------------------------
@@ -600,6 +742,17 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         "  on the automated tests and static import checks (e.g.",
         "  `python -c 'import module'`) to validate the change instead.",
         "",
+        "To file a SEPARATE Stingray ticket during this run (a review request for the",
+        "changes you made, or a follow-up issue you noticed) do NOT hand-write curl —",
+        "run the resolver's validated filer from the repo root:",
+        f"  {sys.executable} {HERE / 'file_ticket.py'} \\",
+        "    --type code_review|task --title \"...\" [--priority low|medium|high|critical] \\",
+        "    [--tag NAME ...] [--code-block PATH:LANGUAGE:START-END ...]",
+        "It reads the Stingray URL and API key from the resolver config (you do not",
+        "supply them), and --code-block reads the exact lines off disk so you never",
+        "escape code by hand. Only file one if the ticket asks for it or it's clearly",
+        "warranted; otherwise skip it.",
+        "",
     ]
     if plan:
         p += ["Implement this APPROVED plan:", "", plan, ""]
@@ -805,6 +958,12 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
 
     # Fetch comments once and derive everything from the single list (B7).
     comments = client.list_comments(tid)
+
+    # Honor any `/ticket` directives in the body/comments before the normal
+    # plan/implement dispatch — filing a follow-up ticket is independent of this
+    # ticket's own workflow state.
+    handle_ticket_directives(cfg, client, ticket, comments, repo, dry_run)
+
     last = latest_human(comments, cfg.bot_user_id)
     cmd = (last.get("body") or "").strip().lower() if last else ""
 
@@ -873,10 +1032,12 @@ def give_up(client: StingrayClient, ticket: dict, failures: int) -> None:
 
 
 def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
-          max_tickets: int = 0) -> None:
+          max_tickets: int = 0) -> int:
+    """Process the bot's queue; return how many tickets were processed (used by
+    main() to drop the log files of an empty sweep)."""
     if only is not None:
         process(cfg, client, client.get_ticket(only), dry_run)
-        return
+        return 1
     # Anything currently assigned to the bot is ours to act on, regardless of
     # status (after /approve the human reassigns but leaves status=in_review).
     # Terminal statuses are skipped so we never re-plan a finished ticket.
@@ -903,6 +1064,7 @@ def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
                     pass
         finally:
             audit.set_ticket(None)
+    return processed
 
 
 def main() -> None:
@@ -918,7 +1080,7 @@ def main() -> None:
     AUDIT_TAIL_BYTES = cfg.audit_output_tail_bytes
     sweep_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     logger = audit.setup_logging(cfg, sweep_id)
-    audit.prune_old_logs(cfg, logger)
+    audit.maintain_logs(cfg, logger)
 
     # Fail fast on an unknown RESOLVER_AGENT before touching the network.
     runner = agents.get_runner(cfg.agent)
@@ -927,8 +1089,13 @@ def main() -> None:
                             max_retries=cfg.stingray_max_retries, logger=logger)
     log(f"sweep start (agent {runner.name}, bot user {cfg.bot_user_id}, "
         f"root {cfg.projects_root}, max_tickets={max_tickets or 'unlimited'})")
-    sweep(cfg, client, args.dry_run, args.ticket, max_tickets)
+    processed = sweep(cfg, client, args.dry_run, args.ticket, max_tickets)
     log("sweep done")
+    # An empty sweep did nothing worth a trace — drop its own log/audit pair so
+    # ~288 idle sweeps/day don't bury the dir in near-empty files. A sweep that
+    # errored propagates past here, keeping its log.
+    if not processed and not args.dry_run:
+        audit.discard_sweep_logs(cfg, sweep_id)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,10 @@
 ## Filing a Stingray code-review ticket
 
+> **Resolver runs:** if you are a `resolver/` agent, don't hand-write the `curl`
+> below — run `resolver/file_ticket.py` instead. It reads the URL/key from the
+> resolver config, validates the fields, and reads `--code-block` content off disk.
+> See `resolver/README.md`.
+
 When asked to file a review, create a ticket in **Stingray Tickets** via its REST API.
 
 - **Endpoint:** `POST $STINGRAY_URL/api/tickets`

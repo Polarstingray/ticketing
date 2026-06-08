@@ -14,13 +14,17 @@ record so a multi-ticket sweep stays filterable.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import re
 import sys
+import tarfile
 import time
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 LOGGER_NAME = "resolver"
@@ -144,14 +148,105 @@ def audit_event(logger: logging.Logger, kind: str, message: str,
     logger.log(level, message, extra={"audit": {"kind": kind, **fields}})
 
 
+# Loose per-sweep / per-ticket log files this lifecycle manages. The cron
+# stdout logs and the archive/ tarballs are handled separately.
+_LOOSE_PATTERNS = ("sweep-*.log", "audit-*.jsonl", "ticket-*-*.log")
+
+
+def discard_sweep_logs(cfg, sweep_id: str) -> int:
+    """Drop this sweep's own `sweep-<id>.log` + `audit-<id>.jsonl` — called when
+    a sweep processed no tickets, so empty sweeps leave no files behind. Closes
+    the matching FileHandlers first so the unlink is clean. Returns count removed."""
+    targets = {
+        str(cfg.logs_dir / f"sweep-{sweep_id}.log"),
+        str(cfg.logs_dir / f"audit-{sweep_id}.jsonl"),
+    }
+    logger = logging.getLogger(LOGGER_NAME)
+    for h in list(logger.handlers):
+        if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) in targets:
+            h.close()
+            logger.removeHandler(h)
+    removed = 0
+    for name in targets:
+        try:
+            Path(name).unlink()
+            removed += 1
+        except OSError:
+            pass  # never created (delay=True and no write) — fine
+    return removed
+
+
+def archive_old_logs(cfg, logger: logging.Logger | None = None) -> int:
+    """Roll loose logs from days older than cfg.log_archive_after_days into one
+    gzipped tarball per day under logs/archive/, then unlink the originals.
+    flock-guarded so two bots sharing the dir don't double-archive. Returns the
+    number of tarballs written."""
+    if cfg.log_archive_after_days <= 0:
+        return 0
+    logs_dir: Path = cfg.logs_dir
+    cutoff_day = date.today() - timedelta(days=cfg.log_archive_after_days)
+
+    by_day: dict[str, list[Path]] = {}
+    for pattern in _LOOSE_PATTERNS:
+        for path in logs_dir.glob(pattern):
+            try:
+                day = date.fromtimestamp(path.stat().st_mtime)
+            except OSError:
+                continue
+            if day <= cutoff_day:
+                by_day.setdefault(day.isoformat(), []).append(path)
+    if not by_day:
+        return 0
+
+    archive_dir = logs_dir / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    lock_path = logs_dir / ".archive.lock"
+    with open(lock_path, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return 0  # another sweep is archiving; skip this tick
+
+        written = 0
+        for day, paths in sorted(by_day.items()):
+            tarball = archive_dir / f"{day}.tar.gz"
+            if tarball.exists():
+                continue  # already archived; leave stragglers to prune's safety net
+            tmp = tarball.with_suffix(".tar.gz.tmp")
+            try:
+                with tarfile.open(tmp, "w:gz") as tar:
+                    for p in paths:
+                        tar.add(p, arcname=p.name)
+                os.replace(tmp, tarball)
+            except OSError:
+                tmp.unlink(missing_ok=True)
+                continue
+            for p in paths:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            written += 1
+        if logger and written:
+            logger.info("archived %d day(s) of logs into %s", written, archive_dir)
+        return written
+
+
 def prune_old_logs(cfg, logger: logging.Logger | None = None) -> int:
-    """Delete sweep/audit/per-ticket logs older than cfg.log_retention_days.
-    Returns the number removed. A non-positive retention disables pruning."""
+    """Delete archived tarballs (and any stray loose logs) older than
+    cfg.log_retention_days. Returns the number removed. Non-positive disables it."""
     if cfg.log_retention_days <= 0:
         return 0
     cutoff = time.time() - cfg.log_retention_days * 86400
     removed = 0
-    for pattern in ("sweep-*.log", "audit-*.jsonl", "ticket-*-*.log"):
+    for path in cfg.logs_dir.glob("archive/*.tar.gz"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            pass
+    for pattern in _LOOSE_PATTERNS:  # safety net for loose files that escaped archiving
         for path in cfg.logs_dir.glob(pattern):
             try:
                 if path.stat().st_mtime < cutoff:
@@ -160,5 +255,33 @@ def prune_old_logs(cfg, logger: logging.Logger | None = None) -> int:
             except OSError:
                 pass
     if logger and removed:
-        logger.info("pruned %d log file(s) older than %d days", removed, cfg.log_retention_days)
+        logger.info("pruned %d archived/old log file(s) older than %d days",
+                    removed, cfg.log_retention_days)
     return removed
+
+
+def rotate_cron_log(cfg, logger: logging.Logger | None = None) -> bool:
+    """Size-rotate this resolver's cron stdout log to <path>.1 when it exceeds
+    cfg.cron_log_max_bytes. Renaming (not truncating) is safe under cron's `>>`:
+    the running process keeps writing into the renamed inode and the next tick
+    opens a fresh file. Keeps one backup. Returns True if it rotated."""
+    path: Path | None = cfg.cron_log
+    if path is None or cfg.cron_log_max_bytes <= 0:
+        return False
+    try:
+        if path.stat().st_size <= cfg.cron_log_max_bytes:
+            return False
+        os.replace(path, path.with_name(path.name + ".1"))
+    except OSError:
+        return False
+    if logger:
+        logger.info("rotated cron log %s (> %d bytes)", path.name, cfg.cron_log_max_bytes)
+    return True
+
+
+def maintain_logs(cfg, logger: logging.Logger | None = None) -> None:
+    """One-call log lifecycle at sweep start: archive finished days into daily
+    tarballs, delete archives past retention, and size-rotate the cron log."""
+    archive_old_logs(cfg, logger)
+    prune_old_logs(cfg, logger)
+    rotate_cron_log(cfg, logger)
