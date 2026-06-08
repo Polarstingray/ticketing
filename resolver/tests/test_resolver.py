@@ -375,6 +375,67 @@ def test_patch_fallback_files_nothing(fake_cfg, monkeypatch):
     assert client.created == []
 
 
+# --- /ticket directive: standalone filing after the PR is up ------------
+def _branch_env(monkeypatch, *, ref_ok=True):
+    """Stub the git plumbing file_followup_from_branch reaches for: a published
+    branch whose diff is SAMPLE_DIFF, branching off HEAD."""
+    def fake_run(cmd, cwd=None, timeout=None):
+        return (0, SAMPLE_DIFF) if "diff" in cmd else (0, "")
+    monkeypatch.setattr(rt, "run", fake_run)
+    monkeypatch.setattr(rt, "has_origin", lambda repo: True)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "ref_exists", lambda repo, ref: ref_ok)
+
+
+def test_process_files_followup_from_branch_after_pr(fake_cfg, monkeypatch):
+    _branch_env(monkeypatch)
+    comments = [
+        {"author": BOT, "body": f"{rt.IMPL_MARKER} — http://pr/1\n\ndid the thing"},
+        {"author": 9, "body": "/ticket review tags:auth"},
+    ]
+    client = FakeClient(comments)
+    ticket = {"id": 5, "tags": [rt.TAG_AWAIT_PR], "status": "in_review",
+              "created_by": 9, "title": "Fix the bug", "priority": "high"}
+
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+
+    assert len(client.created) == 1
+    created = client.created[0]
+    assert created["type"] == "code_review"
+    assert created["code_blocks"] and created["code_blocks"][0]["filename"] == "foo.py"
+    assert "auth" in created["tags"] and "resolver" in created["tags"]
+    assert "did the thing" in created["description"]  # defaulted to the impl summary
+    assert any(rt.FILED_MARKER in body for _, body in client.comments_added)
+    assert rt.TAG_FILED in client.updates[-1]["tags"]
+
+
+def test_process_followup_idempotent_when_already_filed(fake_cfg, monkeypatch):
+    _branch_env(monkeypatch)
+    comments = [{"author": 9, "body": "/ticket"}]
+    client = FakeClient(comments)
+    ticket = {"id": 5, "tags": [rt.TAG_AWAIT_PR, rt.TAG_FILED], "status": "in_review",
+              "created_by": 9, "title": "t", "priority": "low"}
+
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+
+    assert client.created == []
+    assert any("already filed" in body for _, body in client.comments_added)
+    assert rt.TAG_FILED in client.updates[-1]["tags"]  # not dropped
+
+
+def test_process_followup_no_branch_is_not_silent(fake_cfg, monkeypatch):
+    _branch_env(monkeypatch, ref_ok=False)
+    comments = [{"author": 9, "body": "/ticket"}]
+    client = FakeClient(comments)
+    ticket = {"id": 5, "tags": [rt.TAG_AWAIT_PR], "status": "in_review",
+              "created_by": 9, "title": "t", "priority": "low"}
+
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+
+    assert client.created == []
+    assert any("no published branch" in body for _, body in client.comments_added)
+
+
 def test_run_claude_handles_missing_binary(tmp_path, fake_cfg):
     fake_cfg.claude_bin = "definitely-not-a-real-binary-xyz"
     fake_cfg.claude_model = ""

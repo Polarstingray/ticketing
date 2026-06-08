@@ -4,7 +4,9 @@
 > Stingray resolver implements a ticket, it can file the follow-up `code_review`
 > ticket itself — deterministically, through its hardened `StingrayClient`, with
 > `code_blocks` pulled from the real git diff. A human just leaves a `/ticket
-> [options]` comment (peer to `/approve`) on the source ticket; see
+> [options]` comment (peer to `/approve`) on the source ticket — either at
+> `/approve` time or, later, on an already-published ticket (re-assign it to the
+> bot and the follow-up is filed from the `claude/ticket-<id>` branch diff). See
 > `resolver/README.md` → "Filing a follow-up review ticket (`/ticket`)". This
 > replaces asking a headless Claude to `curl` the API by hand (which was
 > unreliable). The manual `curl` recipe below is the fallback for ad-hoc use

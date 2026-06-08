@@ -114,9 +114,25 @@ structured ticket whose `code_blocks` come straight from the **real git diff**
 - Any leftover free text becomes the new ticket's description (defaults to the
   implementation summary). The new ticket's id is linked back on the source.
 
-Filed once per resolution (a `claude:followup-filed` tag guards a later rework
-from double-filing), and never on the `PATCH_FALLBACK` path (nothing is published
-to review there).
+You can leave `/ticket` at **two** points:
+
+- **At `/approve` time** (in the same comment or its own) — it's parsed during the
+  implement run and filed inline from the worktree diff once the PR/branch lands.
+- **After the PR is up** — if you only think to ask for a review once you see the
+  PR, drop a `/ticket [options]` comment on the ticket and re-assign it to the bot.
+  The resolver files the follow-up from the published `claude/ticket-<id>` branch
+  diff, without re-implementing anything. (A `/ticket` left on an
+  `awaiting-pr-review` ticket no longer just gets skipped — if it can't file, it
+  says why instead of staying silent.)
+
+Filed once per ticket (a `claude:followup-filed` tag guards reworks and repeat
+`/ticket` comments from double-filing), and never on the `PATCH_FALLBACK` path
+(nothing is published to review there).
+
+> **Bootstrap caveat:** the resolver acts with whatever version of this code it's
+> *running*. The `/ticket` capability itself was added in #30, so #30's own
+> resolution (which predated the feature) couldn't use it — file its review by
+> re-assigning #30 to the bot with a `/ticket` comment now that the feature is live.
 
 ## Running it
 

@@ -645,11 +645,14 @@ def diff_to_code_blocks(diff_text: str, max_blocks: int = 20,
     return blocks[:max_blocks]
 
 
-def file_followup_ticket(cfg: Config, client: StingrayClient, ticket: dict, wt: Path,
-                         base_ref: str, summary: str, spec: dict) -> dict | None:
-    """Build and POST a structured follow-up ticket from the real git diff, then
-    note it on the source ticket. Best-effort: a failure here must NOT fail the
-    resolution — the PR already succeeded."""
+def _post_followup(cfg: Config, client: StingrayClient, ticket: dict, summary: str,
+                   spec: dict, code_blocks: list[dict] | None) -> dict | None:
+    """Build and POST the structured follow-up ticket, then note it on the source.
+
+    Diff-agnostic: the caller supplies `code_blocks` (from the live worktree or the
+    published branch), keeping the payload/assignee/comment logic in one place.
+    Best-effort — a failure here warns and comments but never raises, so it can't
+    fail a resolution."""
     tid = ticket["id"]
     kind = spec.get("kind") or "code_review"
     description = (spec.get("description") or summary or "").rstrip()
@@ -666,8 +669,7 @@ def file_followup_ticket(cfg: Config, client: StingrayClient, ticket: dict, wt: 
     if assignee is not None:
         payload["assigned_to"] = assignee
     if kind == "code_review":
-        diff = run(["git", "-C", str(wt), "diff", f"{base_ref}..HEAD"])[1]
-        payload["code_blocks"] = diff_to_code_blocks(diff)
+        payload["code_blocks"] = code_blocks or []
     try:
         created = client.create_ticket(**payload)
         new_id = created.get("id")
@@ -681,6 +683,41 @@ def file_followup_ticket(cfg: Config, client: StingrayClient, ticket: dict, wt: 
         client.add_comment(tid, f"⚠️ Tried to file a follow-up `{kind}` ticket from "
                            f"`/ticket`, but the API call failed: {e!r}")
         return None
+
+
+def file_followup_ticket(cfg: Config, client: StingrayClient, ticket: dict, wt: Path,
+                         base_ref: str, summary: str, spec: dict) -> dict | None:
+    """Follow-up filed inline from the live worktree once the PR lands — the diff is
+    `base_ref..HEAD` in `wt`. The POST itself lives in `_post_followup`."""
+    code_blocks = None
+    if (spec.get("kind") or "code_review") == "code_review":
+        diff = run(["git", "-C", str(wt), "diff", f"{base_ref}..HEAD"])[1]
+        code_blocks = diff_to_code_blocks(diff)
+    return _post_followup(cfg, client, ticket, summary, spec, code_blocks)
+
+
+def file_followup_from_branch(cfg: Config, client: StingrayClient, ticket: dict,
+                              repo: Path, spec: dict, summary: str) -> dict | None:
+    """Standalone follow-up: file a review for an already-published ticket from its
+    `claude/ticket-<id>` branch diff, with no worktree. Lets a human add `/ticket`
+    *after* the PR is up (the natural moment to ask for a review) instead of only at
+    `/approve` time. Returns None without filing if there's no branch to review."""
+    tid = ticket["id"]
+    if has_origin(repo):
+        run(["git", "-C", str(repo), "fetch", "origin"], timeout=cfg.git_net_timeout)
+    base_ref, _ = resolve_base(repo)
+    branch = f"claude/ticket-{tid}"
+    # Prefer the remote tip (what the PR shows); fall back to the local branch.
+    ref = next((r for r in (f"origin/{branch}", branch) if ref_exists(repo, r)), None)
+    if ref is None:
+        client.add_comment(tid, "⚠️ Couldn't file a `/ticket` follow-up: no published "
+                           f"branch `{branch}` to build the review diff from.")
+        return None
+    code_blocks = None
+    if (spec.get("kind") or "code_review") == "code_review":
+        diff = run(["git", "-C", str(repo), "diff", f"{base_ref}..{ref}"])[1]
+        code_blocks = diff_to_code_blocks(diff)
+    return _post_followup(cfg, client, ticket, summary, spec, code_blocks)
 
 
 # --- phase handlers ------------------------------------------------------
@@ -895,6 +932,11 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
             # isn't re-implementing blind (B4).
             action, kw = "rework", {"plan": find_approved_plan(comments, cfg.bot_user_id),
                                     "reviewer_notes": last["body"] if last else None}
+        elif cmd.startswith("/ticket"):
+            # A human asked for a follow-up review *after* the PR is up. File it
+            # from the published branch instead of silently skipping. TAG_FILED
+            # makes it idempotent and shares the guard the in-publish path uses.
+            action, kw = ("filed-note", {}) if TAG_FILED in tags else ("file-followup", {})
         else:
             action, kw = "skip", {}
     elif TAG_PLANNING in tags:
@@ -924,6 +966,20 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     elif action in ("implement", "rework"):
         do_implement(cfg, client, ticket, repo, kw.get("plan"), kw.get("reviewer_notes"),
                      comments=comments)
+    elif action == "file-followup":
+        spec = parse_ticket_directive(comments, cfg.bot_user_id) or {}
+        summary = next((c["body"] for c in reversed(comments)
+                        if c.get("author") == cfg.bot_user_id
+                        and IMPL_MARKER in (c.get("body") or "")), "")
+        file_followup_from_branch(cfg, client, ticket, repo, spec, summary)
+        set_state(client, ticket, [TAG_AWAIT_PR, TAG_FILED], status="in_review",
+                  assigned_to=ticket["created_by"])
+    elif action == "filed-note":
+        client.add_comment(tid, "A follow-up review ticket was already filed for this "
+                           "(`claude:followup-filed`). Remove that tag if you want me to "
+                           "file another.")
+        set_state(client, ticket, [TAG_AWAIT_PR, TAG_FILED], status="in_review",
+                  assigned_to=ticket["created_by"])
     elif action == "nudge":
         client.add_comment(tid, "I need an explicit `/approve` or `/revise <notes>` comment "
                                 "to proceed. Re-assign to me with one of those.")
