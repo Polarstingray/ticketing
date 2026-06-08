@@ -91,6 +91,58 @@ comment:
 - `/approve` — implement the plan.
 - `/revise <notes>` — re-plan with your notes.
 
+## Filing tickets from a run
+
+When a resolver needs to file its *own* Stingray ticket — a review request for the
+changes it made, or a follow-up issue it noticed — it uses `file_ticket.py` instead
+of hand-writing `curl`. The URL, API key and bot identity come from the resolver's
+`.env` (never the agent's prompt), enum/required fields are validated up front, and
+`--code-block` reads the exact lines off disk so multi-line code never has to be
+JSON-escaped. The implement-phase prompt points the agent at it automatically.
+
+```bash
+.venv/bin/python file_ticket.py \
+  --type code_review --title "Review: auth refactor" \
+  --priority high --tag backend \
+  --code-block backend/auth.py:python:60-66      # PATH:LANGUAGE:START-END, read off disk
+
+.venv/bin/python file_ticket.py \
+  --type task --title "Flaky retry test" --description "Failed twice this week"
+```
+
+- `--type code_review|task`, `--title` are required; `--priority` defaults to `medium`.
+- `--tag` and `--code-block` are repeatable; `--assign <user_id>` sets the assignee.
+- `--code-block` paths resolve under `--root` (default: the current directory), so run
+  it from the repo root and pass repo-relative paths. Only valid for `code_review`.
+- `--dry-run` prints the JSON payload without filing.
+
+### The `/ticket` directive (you ask, the resolver files)
+
+You can also ask the resolver to file a ticket **without the LLM in the loop** — write
+a `/ticket` line in a bot-assigned ticket's **description or a comment**, and the
+resolver parses it deterministically (like `/approve`) and files it via the API on its
+next sweep:
+
+```
+/ticket <type> "<title>" [--priority low|medium|high|critical] [--tag NAME]...
+        [--description "..."] [--assign USER_ID] [--code-block PATH:LANG:START-END]...
+```
+
+```
+/ticket task "Add index on tickets.created_at" --priority high --tag backend
+/ticket code_review "Review the new retry path" --code-block stingray.py:python:80-105
+```
+
+- `<type>` is `task` or `code_review`; quote the title. Same validation and on-disk
+  `--code-block` reading as `file_ticket.py` (code-block paths are relative to the
+  ticket's target repo). Only honored on tickets assigned to this bot.
+- **Filed once:** the resolver replies with a `🎫 Filed from /ticket` comment carrying
+  each directive's `[key:…]`, and skips keys it has already handled — so a directive
+  sitting in the body isn't re-filed every sweep. A malformed directive is reported in
+  that comment once, not repeatedly.
+- **Default assignee:** the person who wrote the directive (so you can find the ticket
+  you asked for); `--assign <user_id>` overrides.
+
 ## Running it
 
 ```bash
@@ -214,19 +266,40 @@ grep '"kind": "agent_tool"' logs/audit-*.jsonl | grep '"ticket": "42"'
 jq 'select(.kind=="subprocess" and .rc!=0)' logs/audit-*.jsonl
 ```
 
-Logs older than `LOG_RETENTION_DAYS` (default 14) are pruned at the start of each
-sweep. `cron.log` is append-only and not pruned — rotate it with logrotate:
+### Viewing logs
 
+Use `./logs.py` to read the per-ticket plan/implement transcripts without
+hunting for timestamped filenames. It covers **both** bots (they share `logs/`)
+and reads transparently from the daily archives once a day has been rolled up:
+
+```bash
+./logs.py            # list recent runs, newest first (id, phase, time, size, status)
+./logs.py 42         # print ticket 42's latest *implement* transcript
+./logs.py 42 --plan  # ...its plan transcript instead
+./logs.py 42 --all   # list every run for ticket 42
+./logs.py 42 -f      # follow a run in progress (tail -f)
 ```
-/home/penguin/projects/ticketing/resolver/logs/cron.log {
-    weekly
-    rotate 8
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-```
+
+### Retention, archiving & rotation
+
+With two bots sweeping every 10 min, the noisy bit is the per-sweep files, so the
+lifecycle (all at sweep start) keeps `logs/` small without losing history:
+
+- **Empty sweeps leave nothing.** A sweep that processed no tickets deletes its
+  own `sweep-*`/`audit-*` pair, so ~288 idle sweeps/day don't pile up.
+- **Finished days are batched & compressed.** Loose logs from days older than
+  `LOG_ARCHIVE_AFTER_DAYS` (default 1 — today stays loose) are rolled into one
+  `logs/archive/<date>.tar.gz` per day (gzip; ~20–50× smaller). `./logs.py` and
+  `tar`/`zcat` read them back.
+- **Old archives are deleted** past `LOG_RETENTION_DAYS` (default 14).
+
+Archiving is `flock`-guarded so the two bots sharing `logs/` never double-roll.
+
+`cron.log` is append-only; set **`CRON_LOG`** in each bot's env to its own file
+(`logs/cron.log` for the Claude bot, `logs/cron-gemini.log` for the Gemini bot)
+and the resolver size-rotates it to `<file>.1` at sweep start (cap
+`CRON_LOG_MAX_BYTES`, default 5 MB) — no external logrotate needed. (Prefer
+logrotate? Leave `CRON_LOG` unset and add a stanza with `copytruncate`.)
 
 ## Reliability
 

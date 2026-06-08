@@ -5,11 +5,17 @@ No network, no subprocesses, no real Claude — every external edge is stubbed.
 import json
 import logging
 import os
+import tarfile
+import time
+from datetime import date
+from types import SimpleNamespace
 
 import pytest
 import requests
 
 import audit
+import file_ticket as ft
+import logs as logviewer
 import resolve_tickets as rt
 import stingray
 from conftest import BOT, FakeClient
@@ -352,3 +358,290 @@ def test_env_prefers_agent_then_falls_back_to_claude(monkeypatch):
     assert config._env("AGENT_BIN", "CLAUDE_BIN", default="x") == "claude"
     monkeypatch.setenv("AGENT_BIN", "opencode")
     assert config._env("AGENT_BIN", "CLAUDE_BIN", default="x") == "opencode"
+
+
+# --- log lifecycle (archive / prune / discard / rotate) ------------------
+def _logcfg(tmp_path, **over):
+    ns = SimpleNamespace(
+        logs_dir=tmp_path,
+        log_archive_after_days=1,
+        log_retention_days=14,
+        cron_log=None,
+        cron_log_max_bytes=5_000_000,
+    )
+    for k, v in over.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _age(path, days):
+    t = time.time() - days * 86400
+    os.utime(path, (t, t))
+
+
+def test_archive_old_logs_batches_finished_days(tmp_path):
+    cfg = _logcfg(tmp_path)
+    old_sweep = tmp_path / "sweep-20200101-000000.log"
+    old_sweep.write_text("old sweep")
+    old_ticket = tmp_path / "ticket-42-implement-20200101-000000.log"
+    old_ticket.write_text("impl log")
+    for p in (old_sweep, old_ticket):
+        _age(p, 3)
+    today = tmp_path / "ticket-43-plan-20990101-000000.log"
+    today.write_text("today")  # mtime = now, must be left loose
+
+    assert audit.archive_old_logs(cfg) == 1
+    day = date.fromtimestamp(time.time() - 3 * 86400).isoformat()
+    tarball = tmp_path / "archive" / f"{day}.tar.gz"
+    assert tarball.exists()
+    with tarfile.open(tarball) as tar:
+        assert sorted(m.name for m in tar.getmembers()) == [
+            "sweep-20200101-000000.log",
+            "ticket-42-implement-20200101-000000.log",
+        ]
+    assert not old_sweep.exists() and not old_ticket.exists()
+    assert today.exists()  # today's log untouched
+
+
+def test_archive_skips_when_nothing_old(tmp_path):
+    cfg = _logcfg(tmp_path)
+    (tmp_path / "ticket-1-plan-20990101-000000.log").write_text("fresh")
+    assert audit.archive_old_logs(cfg) == 0
+    assert not (tmp_path / "archive").exists() or not list((tmp_path / "archive").glob("*.tar.gz"))
+
+
+def test_prune_old_logs_deletes_aged_archives(tmp_path):
+    cfg = _logcfg(tmp_path, log_retention_days=14)
+    arch = tmp_path / "archive"
+    arch.mkdir()
+    old_tar = arch / "2020-01-01.tar.gz"
+    old_tar.write_bytes(b"x")
+    _age(old_tar, 30)
+    fresh_tar = arch / "2099-01-01.tar.gz"
+    fresh_tar.write_bytes(b"y")
+    assert audit.prune_old_logs(cfg) == 1
+    assert not old_tar.exists()
+    assert fresh_tar.exists()
+
+
+def test_discard_sweep_logs_removes_pair(tmp_path):
+    cfg = _logcfg(tmp_path)
+    sid = "20260608-120000"
+    (tmp_path / f"sweep-{sid}.log").write_text("start")
+    (tmp_path / f"audit-{sid}.jsonl").write_text("{}")
+    assert audit.discard_sweep_logs(cfg, sid) == 2
+    assert not (tmp_path / f"sweep-{sid}.log").exists()
+    assert not (tmp_path / f"audit-{sid}.jsonl").exists()
+
+
+def test_rotate_cron_log_only_when_over_cap(tmp_path):
+    cron = tmp_path / "cron.log"
+    cron.write_text("x" * 100)
+    assert audit.rotate_cron_log(_logcfg(tmp_path, cron_log=cron, cron_log_max_bytes=10)) is True
+    assert (tmp_path / "cron.log.1").exists()
+    assert not cron.exists()
+
+    cron.write_text("tiny")
+    assert audit.rotate_cron_log(
+        _logcfg(tmp_path, cron_log=cron, cron_log_max_bytes=10_000)) is False
+    assert cron.exists()
+
+
+def test_logs_collect_picks_newest_run(tmp_path):
+    (tmp_path / "ticket-42-implement-20260101-000000.log").write_text("first")
+    (tmp_path / "ticket-42-implement-20260102-000000.log").write_text("second")
+    (tmp_path / "ticket-42-plan-20260101-000000.log").write_text("planlog")
+    refs = logviewer.collect_logs(tmp_path, ticket=42, phase="implement")
+    assert [r.ts for r in refs] == ["20260102-000000", "20260101-000000"]
+    assert logviewer.read_log(refs[0]) == "second"
+
+
+def test_logs_reads_from_archive(tmp_path):
+    arch = tmp_path / "archive"
+    arch.mkdir()
+    member = tmp_path / "ticket-99-implement-20260101-010101.log"
+    member.write_text("archived body")
+    with tarfile.open(arch / "2026-01-01.tar.gz", "w:gz") as tar:
+        tar.add(member, arcname=member.name)
+    member.unlink()
+    refs = logviewer.collect_logs(tmp_path, ticket=99)
+    assert len(refs) == 1
+    assert refs[0].archive == arch / "2026-01-01.tar.gz"
+    assert logviewer.read_log(refs[0]) == "archived body"
+
+
+# --- filing tickets (file_ticket.py) -------------------------------------
+def test_create_ticket_posts_to_tickets_endpoint():
+    c = _client([FakeResp(201, {"id": 7, "title": "t"})])
+    out = c.create_ticket(type="task", title="t", priority="low")
+    assert out == {"id": 7, "title": "t"}
+    assert c.session.calls == 1
+
+
+def _args(**over):
+    base = dict(type="code_review", title="t", description="", priority="medium",
+               tag=None, assign=None, code_block=None, root=".")
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_parse_code_block_reads_exact_lines(tmp_path):
+    (tmp_path / "a.py").write_text("L1\nL2\nL3\nL4\n")
+    block = ft.parse_code_block("a.py:python:2-3", tmp_path)
+    assert block == {
+        "filename": "a.py", "language": "python",
+        "line_start": 2, "line_end": 3, "content": "L2\nL3",
+    }
+
+
+def test_parse_code_block_single_line(tmp_path):
+    (tmp_path / "a.py").write_text("only\n")
+    block = ft.parse_code_block("a.py:python:1", tmp_path)
+    assert block["line_start"] == block["line_end"] == 1
+    assert block["content"] == "only"
+
+
+@pytest.mark.parametrize("spec", [
+    "a.py:python",          # no range
+    "a.py:2-3",             # no language
+    "a.py:python:3-1",      # end before start
+    "a.py:python:0-2",      # start < 1
+    "a.py:python:x-2",      # non-numeric
+    "a.py:python:1-99",     # out of range
+])
+def test_parse_code_block_rejects_bad_specs(tmp_path, spec):
+    (tmp_path / "a.py").write_text("one\ntwo\n")
+    with pytest.raises(ValueError):
+        ft.parse_code_block(spec, tmp_path)
+
+
+def test_parse_code_block_missing_file(tmp_path):
+    with pytest.raises(ValueError):
+        ft.parse_code_block("nope.py:python:1-2", tmp_path)
+
+
+def test_build_payload_assembles_fields(tmp_path):
+    (tmp_path / "a.py").write_text("x\ny\nz\n")
+    args = _args(tag=["backend", "auth"], assign=5,
+                 code_block=["a.py:python:1-2"], root=str(tmp_path))
+    payload = ft.build_payload(args)
+    assert payload["type"] == "code_review"
+    assert payload["tags"] == ["backend", "auth"]
+    assert payload["assigned_to"] == 5
+    assert payload["code_blocks"][0]["content"] == "x\ny"
+
+
+def test_build_payload_blank_title_rejected():
+    with pytest.raises(ValueError):
+        ft.build_payload(_args(title="   "))
+
+
+def test_build_payload_code_block_requires_code_review(tmp_path):
+    (tmp_path / "a.py").write_text("x\n")
+    args = _args(type="task", code_block=["a.py:python:1"], root=str(tmp_path))
+    with pytest.raises(ValueError):
+        ft.build_payload(args)
+
+
+# --- /ticket directive (resolver-parsed) ---------------------------------
+class DirectiveClient:
+    """Records create_ticket + add_comment so directive tests can assert."""
+
+    def __init__(self, comments=None):
+        self._comments = comments or []
+        self.created: list[dict] = []
+        self.comments_added: list[tuple[int, str]] = []
+
+    def list_comments(self, tid):
+        return self._comments
+
+    def create_ticket(self, **fields):
+        self.created.append(fields)
+        return {"id": 100 + len(self.created), "title": fields.get("title")}
+
+    def add_comment(self, tid, body):
+        self.comments_added.append((tid, body))
+        return {"id": 1}
+
+
+def test_collect_directives_body_and_comments_ignores_bot_and_noise():
+    ticket = {"id": 1, "created_by": 9,
+              "description": "fix it\n/ticket task \"Add index\" --tag backend"}
+    comments = [
+        {"author": 9, "body": "/ticket code_review \"Review\""},
+        {"author": BOT, "body": "/ticket task \"bot wrote this\""},  # ignored
+        {"author": 9, "body": "plain note, no directive"},
+    ]
+    ds = rt.collect_directives(ticket, comments, bot_id=BOT)
+    assert [d["author"] for d in ds] == [9, 9]
+    assert ds[0]["args"].startswith('task "Add index"')
+
+
+def test_collect_directives_dedups_identical_lines_in_one_sweep():
+    ticket = {"id": 1, "created_by": 9, "description": '/ticket task "dup"'}
+    comments = [{"author": 9, "body": '/ticket task "dup"'}]
+    ds = rt.collect_directives(ticket, comments, bot_id=BOT)
+    assert len(ds) == 1
+
+
+def test_directive_payload_defaults_to_author_and_assign_overrides(tmp_path):
+    body = {"key": "k", "line": "x", "author": 9,
+            "args": 'task "Add index" --priority high --tag backend'}
+    p = rt.directive_payload(body, tmp_path)
+    assert p["assigned_to"] == 9 and p["priority"] == "high" and p["tags"] == ["backend"]
+
+    explicit = {"key": "k", "line": "x", "author": 9,
+                "args": 'task "t" --assign 3'}
+    assert rt.directive_payload(explicit, tmp_path)["assigned_to"] == 3
+
+
+@pytest.mark.parametrize("args", [
+    'bug "x"',                       # bad type
+    'task',                          # missing title
+    'task "x" --priority huge',      # bad priority
+    'task "x" --code-block a.py:python:1',  # code_block on a task
+    'task "unbalanced',              # shlex error
+])
+def test_directive_payload_rejects_bad(tmp_path, args):
+    d = {"key": "k", "line": "/ticket " + args, "author": 9, "args": args}
+    with pytest.raises(rt._DirectiveError):
+        rt.directive_payload(d, tmp_path)
+
+
+def test_handle_directives_files_once_and_marks(fake_cfg, tmp_path):
+    client = DirectiveClient()
+    ticket = {"id": 7, "created_by": 9, "description": '/ticket task "Add index" --tag backend'}
+    rt.handle_ticket_directives(fake_cfg, client, ticket, client.list_comments(7), tmp_path, dry_run=False)
+    assert len(client.created) == 1
+    assert client.created[0]["type"] == "task" and client.created[0]["assigned_to"] == 9
+    # exactly one marker comment, carrying the directive key for next-sweep dedup
+    assert len(client.comments_added) == 1
+    body = client.comments_added[0][1]
+    assert rt.FILED_MARKER in body and "[key:" in body
+
+
+def test_handle_directives_dedup_skips_already_filed(fake_cfg, tmp_path):
+    line = '/ticket task "Add index"'
+    key = rt.directive_key(line)
+    client = DirectiveClient(comments=[
+        {"author": BOT, "body": f"{rt.FILED_MARKER}\n\n- #101 — task \"Add index\"  [key:{key}]"},
+    ])
+    ticket = {"id": 7, "created_by": 9, "description": line}
+    rt.handle_ticket_directives(fake_cfg, client, ticket, client.list_comments(7), tmp_path, dry_run=False)
+    assert client.created == [] and client.comments_added == []
+
+
+def test_handle_directives_bad_directive_reported_not_raised(fake_cfg, tmp_path):
+    client = DirectiveClient()
+    ticket = {"id": 7, "created_by": 9, "description": '/ticket bogus "x"'}
+    rt.handle_ticket_directives(fake_cfg, client, ticket, client.list_comments(7), tmp_path, dry_run=False)
+    assert client.created == []
+    assert len(client.comments_added) == 1
+    assert "error:" in client.comments_added[0][1]
+
+
+def test_handle_directives_dry_run_files_nothing(fake_cfg, tmp_path):
+    client = DirectiveClient()
+    ticket = {"id": 7, "created_by": 9, "description": '/ticket task "Add index"'}
+    rt.handle_ticket_directives(fake_cfg, client, ticket, client.list_comments(7), tmp_path, dry_run=True)
+    assert client.created == [] and client.comments_added == []

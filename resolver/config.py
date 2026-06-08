@@ -61,6 +61,16 @@ def _bot_user_id() -> int:
     return int(raw)
 
 
+def _cron_log_path() -> "Path | None":
+    """This resolver's cron stdout log, for size-rotation. A relative path is
+    taken next to this module (matching logs_dir). Unset = no rotation."""
+    raw = os.environ.get("CRON_LOG", "").strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    return p if p.is_absolute() else HERE / p
+
+
 def _parse_repo_map(raw: str) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for chunk in raw.split(","):
@@ -98,6 +108,13 @@ class Config:
     max_tickets_per_sweep: int
     git_net_timeout: int
     log_retention_days: int
+    # Loose per-sweep/ticket logs from days older than this get rolled into a
+    # daily archive/<date>.tar.gz; the archives are deleted after retention.
+    log_archive_after_days: int
+    # Optional path to this resolver's cron stdout log (its own per bot). When
+    # set, it is size-rotated to <path>.1 at sweep start. None = no rotation.
+    cron_log: Path | None
+    cron_log_max_bytes: int
     git_author_name: str
     git_author_email: str
     audit_output_tail_bytes: int
@@ -161,8 +178,16 @@ class Config:
             # Longer timeout for network git/gh commands (push/fetch/pr create) so a
             # slow transfer isn't SIGKILLed mid-flight by the default run() budget.
             git_net_timeout=int(os.environ.get("GIT_NET_TIMEOUT", "300")),
-            # Prune sweep/audit/ticket logs older than this many days at sweep start.
+            # Delete archived logs older than this many days at sweep start.
             log_retention_days=int(os.environ.get("LOG_RETENTION_DAYS", "14")),
+            # Roll loose logs from days older than this into daily tarballs. 1 =
+            # keep today loose, archive yesterday and older.
+            log_archive_after_days=int(os.environ.get("LOG_ARCHIVE_AFTER_DAYS", "1")),
+            # This bot's own cron stdout log, size-rotated at sweep start. Each
+            # identity points CRON_LOG at its own file (e.g. cron.log vs
+            # cron-gemini.log); unset disables rotation (back-compat).
+            cron_log=_cron_log_path(),
+            cron_log_max_bytes=int(os.environ.get("CRON_LOG_MAX_BYTES", "5000000")),
             # Identity stamped on the resolver's commits, so the commit doesn't fail
             # on a host with no global git identity (which gets misreported as
             # "Claude produced no code changes").
