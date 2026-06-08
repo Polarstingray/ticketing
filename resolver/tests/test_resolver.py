@@ -4,6 +4,7 @@ No network, no subprocesses, no real Claude — every external edge is stubbed.
 """
 import json
 import logging
+import os
 
 import pytest
 import requests
@@ -187,9 +188,10 @@ def test_stream_json_tool_use_becomes_audit_events():
         "type": "result", "subtype": "success", "is_error": False, "result": "all done",
     }), result)
 
-    tools = [r.audit for r in cap.records if getattr(r, "audit", {}).get("kind") == "claude_tool"]
+    tools = [r.audit for r in cap.records if getattr(r, "audit", {}).get("kind") == "agent_tool"]
     assert len(tools) == 1
     assert tools[0]["tool"] == "Bash"
+    assert tools[0]["agent"] == "claude"
     assert "pytest -q" in tools[0]["input_summary"]
     assert result.get("result") == "all done"
 
@@ -201,12 +203,152 @@ def test_summarize_tool_use_shapes():
 
 
 def test_run_claude_handles_missing_binary(tmp_path, fake_cfg):
-    fake_cfg.claude_bin = "definitely-not-a-real-binary-xyz"
-    fake_cfg.claude_model = ""
+    fake_cfg.agent_bin = "definitely-not-a-real-binary-xyz"
+    fake_cfg.agent_model = ""
     fake_cfg.implement_tools = "Read"
-    fake_cfg.claude_timeout = 5
-    fake_cfg.claude_implement_timeout = 5
+    fake_cfg.agent_timeout = 5
+    fake_cfg.agent_implement_timeout = 5
     log_path = tmp_path / "out.log"
     ok, msg = rt.run_claude(fake_cfg, "hi", tmp_path, "plan", log_path)
     assert ok is False
     assert "definitely-not-a-real-binary-xyz" in msg
+
+
+# --- opencode runner -----------------------------------------------------
+def _set_opencode_cfg(fake_cfg):
+    fake_cfg.agent_bin = "opencode"
+    fake_cfg.agent_model = "google/gemini-2.5-flash"
+    fake_cfg.agent_timeout = 5
+    fake_cfg.agent_implement_timeout = 5
+    fake_cfg.opencode_plan_agent = "plan"
+    fake_cfg.opencode_build_agent = "build"
+    return fake_cfg
+
+
+def test_opencode_event_parses_tool_and_final_text():
+    logger = logging.getLogger("resolver.opencodetest")
+    logger.setLevel(logging.DEBUG)
+    cap = _Capture()
+    logger.handlers = [cap]
+    logger.propagate = False
+
+    # Event shapes verified against a live opencode 1.16.2 `run --format json`:
+    # tool_use carries part.tool + part.state.input; step_finish's stop reason is
+    # on part.reason (NOT the top level).
+    state = {}
+    rt._opencode_event(logger, json.dumps({"type": "tool_use", "part": {
+        "type": "tool", "tool": "bash",
+        "state": {"status": "completed", "input": {"command": "pytest -q"}}}}), state)
+    rt._opencode_event(logger, json.dumps({"type": "step_start", "part": {"type": "step-start"}}), state)
+    rt._opencode_event(logger, json.dumps({"type": "text", "part": {"type": "text", "text": "all "}}), state)
+    rt._opencode_event(logger, json.dumps({"type": "text", "part": {"type": "text", "text": "done"}}), state)
+    rt._opencode_event(logger, json.dumps({"type": "step_finish",
+        "part": {"type": "step-finish", "reason": "stop"}}), state)
+
+    tools = [r.audit for r in cap.records if getattr(r, "audit", {}).get("kind") == "agent_tool"]
+    assert len(tools) == 1
+    assert tools[0]["agent"] == "opencode"
+    assert tools[0]["tool"] == "bash"
+    assert "pytest -q" in tools[0]["input_summary"]
+    # the final answer is the text from the step that ends with reason=stop
+    assert state["final"] == "all done"
+    assert state["stopped"] is True
+
+
+def test_opencode_event_records_error():
+    state = {}
+    rt._opencode_event(logging.getLogger("resolver.ocerr"),
+                       json.dumps({"type": "error", "error": {"name": "ProviderError"}}), state)
+    assert state["error"]["name"] == "ProviderError"
+
+
+def test_summarize_opencode_tool_shapes():
+    assert rt._summarize_opencode_tool("read", {"filePath": "/a/b.py"}) == "/a/b.py"
+    assert rt._summarize_opencode_tool("bash", {"command": "ls -la"}) == "ls -la"
+    assert rt._summarize_opencode_tool("grep", {"pattern": "foo", "path": "src"}) == "foo in src"
+
+
+def test_run_opencode_plan_is_readonly_implement_can_edit(tmp_path, fake_cfg, monkeypatch):
+    _set_opencode_cfg(fake_cfg)
+    captured = {}
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        captured["cmd"] = list(cmd)
+        captured["category"] = category
+        captured["label"] = label
+        on_line(json.dumps({"type": "text", "part": {"text": "the plan"}}))
+        on_line(json.dumps({"type": "step_finish", "part": {"reason": "stop"}}))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+
+    # plan: the read-only `plan` agent, and crucially NO skip-permissions flag.
+    ok, text = rt.run_opencode(fake_cfg, "do it", tmp_path, "plan", tmp_path / "p.log")
+    assert ok is True and text == "the plan"
+    cmd = captured["cmd"]
+    assert cmd[:4] == ["opencode", "run", "do it", "--format"]
+    assert "--model" in cmd and "google/gemini-2.5-flash" in cmd
+    assert cmd[cmd.index("--agent") + 1] == "plan"
+    assert "--dangerously-skip-permissions" not in cmd
+    assert captured["category"] == "opencode" and captured["label"] == "plan"
+
+    # implement: the unrestricted `build` agent, edits auto-approved.
+    rt.run_opencode(fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log")
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--agent") + 1] == "build"
+    assert "--dangerously-skip-permissions" in cmd
+
+
+def test_run_opencode_handles_missing_binary(tmp_path, fake_cfg):
+    _set_opencode_cfg(fake_cfg)
+    fake_cfg.agent_bin = "definitely-not-a-real-binary-xyz"
+    fake_cfg.agent_model = ""
+    ok, msg = rt.run_opencode(fake_cfg, "hi", tmp_path, "plan", tmp_path / "o.log")
+    assert ok is False
+    assert "definitely-not-a-real-binary-xyz" in msg
+
+
+def test_opencode_runner_registered_and_unknown_fails():
+    import agents
+    runner = agents.get_runner("opencode")
+    assert runner.name == "opencode"
+    with pytest.raises(SystemExit):
+        agents.get_runner("nope-not-a-registered-agent")
+
+
+def test_resolver_env_file_selects_alternate_identity(tmp_path, monkeypatch):
+    import config
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    envf = tmp_path / "alt.env"
+    envf.write_text(
+        "STINGRAY_URL=http://x/api\n"
+        "STINGRAY_API_KEY=sk_test_unit_key_alt_000000\n"
+        "RESOLVER_BOT_USER_ID=3\n"
+        "RESOLVER_AGENT=opencode\n"
+        f"PROJECTS_ROOT={proj}\n"
+        "AGENT_BIN=opencode\n"
+        "AGENT_MODEL=google/gemini-2.5-flash\n"
+    )
+    monkeypatch.setenv("RESOLVER_ENV_FILE", str(envf))
+    saved = dict(os.environ)  # _load_env_file mutates os.environ; restore after
+    try:
+        cfg = config.Config.load()
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    assert cfg.agent == "opencode"
+    assert cfg.bot_user_id == 3
+    assert cfg.agent_bin == "opencode"
+    assert cfg.agent_model == "google/gemini-2.5-flash"
+
+
+def test_env_prefers_agent_then_falls_back_to_claude(monkeypatch):
+    import config
+    monkeypatch.delenv("AGENT_BIN", raising=False)
+    monkeypatch.delenv("CLAUDE_BIN", raising=False)
+    assert config._env("AGENT_BIN", "CLAUDE_BIN", default="claude") == "claude"
+    monkeypatch.setenv("CLAUDE_BIN", "claude")
+    assert config._env("AGENT_BIN", "CLAUDE_BIN", default="x") == "claude"
+    monkeypatch.setenv("AGENT_BIN", "opencode")
+    assert config._env("AGENT_BIN", "CLAUDE_BIN", default="x") == "opencode"

@@ -199,7 +199,68 @@ def recent_failures(comments: list[dict], bot_id: int) -> int:
     return n
 
 
-# --- Claude runner -------------------------------------------------------
+# --- agent runners -------------------------------------------------------
+def _stream_subprocess(cmd: list[str], cwd: Path, timeout: int, log_path: Path,
+                       on_line, *, category: str, label: str):
+    """Spawn `cmd`, stream stdout line-by-line into `on_line(stripped_line)`, tee
+    the raw output verbatim to `log_path`, and enforce `timeout`. Returns
+    `(rc, timed_out, launch_err)`; on a launch failure rc is None and launch_err
+    is the exception. Shared by every agent runner so they get identical
+    kill/reap/timeout/audit behavior — only the per-line parsing differs."""
+    logger = audit.get_logger()
+    start = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, start_new_session=True, bufsize=1,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        log_path.write_text(f"LAUNCH FAILED: {cmd[0]}: {exc}\n")
+        return None, False, exc
+
+    deadline = start + timeout
+    timed_out = False
+    with open(log_path, "w", encoding="utf-8") as raw:
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 1.0))
+                if not ready:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                line = proc.stdout.readline()
+                if line == "":  # EOF
+                    break
+                raw.write(line)
+                raw.flush()
+                stripped = line.strip()
+                if stripped:
+                    on_line(stripped)
+        finally:
+            # Only kill on timeout. On a clean EOF the process is exiting on its
+            # own; killing it here would make rc negative and mis-report a
+            # successful run as a failure. Reap with a short grace period, then
+            # force-kill only if it genuinely refuses to exit.
+            if timed_out:
+                _killpg(proc)
+            try:
+                rc = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _killpg(proc)
+                rc = proc.wait()
+
+    audit.audit_event(
+        logger, "subprocess", f"{category} ({label}) -> rc={rc} timed_out={timed_out}",
+        level=logging.DEBUG, category=category, argv=cmd[:2] + ["...", label], rc=rc,
+        duration_ms=round((time.monotonic() - start) * 1000), timed_out=timed_out or None,
+    )
+    return rc, timed_out, None
+
+
 def summarize_tool_use(name: str, inp: dict | None) -> str:
     """One-line, secret-free summary of a Claude tool call for the audit log."""
     inp = inp or {}
@@ -233,11 +294,11 @@ def _claude_event(logger, ticket_id, line: str, result: dict) -> None:
         for block in (evt.get("message", {}) or {}).get("content", []) or []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "?")
+                summary = summarize_tool_use(name, block.get("input"))
                 audit.audit_event(
-                    logger, "claude_tool",
-                    f"claude {name}: {summarize_tool_use(name, block.get('input'))}",
-                    level=logging.DEBUG, tool=name,
-                    input_summary=summarize_tool_use(name, block.get("input")),
+                    logger, "agent_tool", f"claude {name}: {summary}",
+                    level=logging.DEBUG, agent="claude", tool=name,
+                    input_summary=summary,
                 )
     elif etype == "result":
         result.update(evt)
@@ -245,12 +306,12 @@ def _claude_event(logger, ticket_id, line: str, result: dict) -> None:
 
 def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
     """Run headless Claude, streaming its output so every tool call (Read/Write/
-    Edit/Bash/...) is recorded as a `claude_tool` audit event. The raw stream is
+    Edit/Bash/...) is recorded as an `agent_tool` audit event. The raw stream is
     teed verbatim to `log_path`. mode is 'plan' (read-only) or 'implement'.
     Returns (ok, result_text)."""
-    cmd = [cfg.claude_bin, "-p", prompt, "--output-format", "stream-json", "--verbose"]
-    if cfg.claude_model:
-        cmd += ["--model", cfg.claude_model]
+    cmd = [cfg.agent_bin, "-p", prompt, "--output-format", "stream-json", "--verbose"]
+    if cfg.agent_model:
+        cmd += ["--model", cfg.agent_model]
     if mode == "plan":
         # Read-only exploration. We deliberately do NOT use --permission-mode
         # plan: headless, that routes the plan through ExitPlanMode (which can't
@@ -265,60 +326,16 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
 
     # Implement does strictly more than plan (edit + verify), so it gets the
     # larger budget; plan stays snappy on the smaller one.
-    timeout = cfg.claude_implement_timeout if mode == "implement" else cfg.claude_timeout
+    timeout = cfg.agent_implement_timeout if mode == "implement" else cfg.agent_timeout
     logger = audit.get_logger()
-    start = time.monotonic()
-    try:
-        proc = subprocess.Popen(
-            cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, start_new_session=True, bufsize=1,
-        )
-    except (FileNotFoundError, OSError) as exc:
-        log_path.write_text(f"LAUNCH FAILED: {cmd[0]}: {exc}\n")
-        return False, f"Could not launch Claude ({cmd[0]}): {exc}"
-
     result: dict = {}
-    deadline = start + timeout
-    timed_out = False
-    with open(log_path, "w", encoding="utf-8") as raw:
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 1.0))
-                if not ready:
-                    if proc.poll() is not None:
-                        break
-                    continue
-                line = proc.stdout.readline()
-                if line == "":  # EOF
-                    break
-                raw.write(line)
-                raw.flush()
-                stripped = line.strip()
-                if stripped:
-                    _claude_event(logger, None, stripped, result)
-        finally:
-            # Only kill on timeout. On a clean EOF the process is exiting on its
-            # own; killing it here would make rc negative and mis-report a
-            # successful run as a failure. Reap with a short grace period, then
-            # force-kill only if it genuinely refuses to exit.
-            if timed_out:
-                _killpg(proc)
-            try:
-                rc = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _killpg(proc)
-                rc = proc.wait()
-
-    audit.audit_event(
-        logger, "subprocess", f"claude ({mode}) -> rc={rc} timed_out={timed_out}",
-        level=logging.DEBUG, category="claude", argv=cmd[:2] + ["...", mode], rc=rc,
-        duration_ms=round((time.monotonic() - start) * 1000), timed_out=timed_out or None,
+    rc, timed_out, launch_err = _stream_subprocess(
+        cmd, cwd, timeout, log_path,
+        lambda line: _claude_event(logger, None, line, result),
+        category="claude", label=mode,
     )
-
+    if launch_err is not None:
+        return False, f"Could not launch Claude ({cmd[0]}): {launch_err}"
     if timed_out:
         return False, f"Claude timed out after {timeout}s."
     result_text = (result.get("result") or "").strip()
@@ -329,6 +346,114 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
         return rc == 0, result_text or f"claude exited {rc} with no result event"
     if result.get("is_error") or result.get("subtype") not in (None, "success"):
         return False, result_text or f"claude error (subtype={result.get('subtype')})"
+    return rc == 0, result_text
+
+
+def _summarize_opencode_tool(tool: str, inp: dict | None) -> str:
+    """One-line, secret-free summary of an opencode tool call for the audit log.
+    opencode tool names are lowercase and its file inputs use `filePath`, so this
+    can't reuse summarize_tool_use (which keys on Claude's tool names)."""
+    inp = inp or {}
+    if tool == "bash":
+        return str(inp.get("command") or "")
+    if tool in ("read", "write", "edit", "patch"):
+        return str(inp.get("filePath") or inp.get("file_path") or inp.get("path") or "")
+    if tool in ("grep", "glob"):
+        pat = inp.get("pattern") or inp.get("query") or ""
+        path = inp.get("path")
+        return f"{pat} in {path}" if path else str(pat)
+    if tool in ("list", "ls"):
+        return str(inp.get("path") or "")
+    if tool in ("webfetch", "fetch"):
+        return str(inp.get("url") or "")
+    # Unknown tool: compact preview of the first few keys (no values dumped raw).
+    return json.dumps({k: inp[k] for k in list(inp)[:3]}, default=str)[:200]
+
+
+def _opencode_event(logger, line: str, state: dict) -> None:
+    """Parse one opencode `run --format json` (JSONL) event, auditing tool calls
+    as `agent_tool` events and accumulating the final assistant text into `state`
+    (mutated in place: `texts`, `step_texts`, `final`, `stopped`, `error`).
+
+    Observed schema (verified against opencode 1.16.2) — each line has a top-level
+    `type`: step_start | tool_use | text | step_finish | error. For step_finish the
+    stop reason lives at `part.reason` (e.g. "stop"), not at the top level; tool
+    events carry `part.tool` + `part.state.input`; text carries `part.text`.
+    NOTE: opencode's --format json schema is not formally documented; re-verify if
+    opencode changes it (mirrors the schema-drift guard in run_claude)."""
+    try:
+        evt = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    etype = evt.get("type")
+    part = evt.get("part") or {}
+    if etype == "tool_use":
+        tool = part.get("tool", "?")
+        inp = (part.get("state") or {}).get("input") or {}
+        summary = _summarize_opencode_tool(tool, inp)
+        audit.audit_event(
+            logger, "agent_tool", f"opencode {tool}: {summary}",
+            level=logging.DEBUG, agent="opencode", tool=tool, input_summary=summary,
+        )
+    elif etype == "text":
+        text = part.get("text") or ""
+        if text:
+            state.setdefault("texts", []).append(text)
+            state.setdefault("step_texts", []).append(text)
+    elif etype == "step_start":
+        # A new step's text supersedes the prior step's; the final answer is the
+        # text emitted in the step that ends with reason=stop.
+        state["step_texts"] = []
+    elif etype == "step_finish":
+        # The stop reason is on the part (part.reason), not the top-level event;
+        # keep the top-level read as a fallback against schema variance.
+        if (part.get("reason") or evt.get("reason")) == "stop":
+            state["stopped"] = True
+            state["final"] = "".join(state.get("step_texts") or state.get("texts") or [])
+    elif etype == "error":
+        state["error"] = evt.get("error") or {"name": "unknown"}
+
+
+def run_opencode(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
+    """Run headless opencode (`opencode run ... --format json`), auditing each tool
+    call as an `agent_tool` event and teeing the raw JSONL to `log_path`.
+
+    mode is 'plan' (read-only: the permission-restricted `plan` agent, with no
+    --dangerously-skip-permissions, so it cannot edit/run bash) or 'implement'
+    (the unrestricted `build` agent with permissions auto-approved so edits run
+    headlessly — isolation comes from the per-ticket worktree + PROJECTS_ROOT
+    allowlist, same rationale as Claude's broad Bash allowlist). Returns
+    (ok, result_text)."""
+    cmd = [cfg.agent_bin, "run", prompt, "--format", "json"]
+    if cfg.agent_model:
+        cmd += ["--model", cfg.agent_model]
+    if mode == "plan":
+        cmd += ["--agent", cfg.opencode_plan_agent]
+    else:
+        cmd += ["--agent", cfg.opencode_build_agent, "--dangerously-skip-permissions"]
+
+    timeout = cfg.agent_implement_timeout if mode == "implement" else cfg.agent_timeout
+    logger = audit.get_logger()
+    state: dict = {}
+    rc, timed_out, launch_err = _stream_subprocess(
+        cmd, cwd, timeout, log_path,
+        lambda line: _opencode_event(logger, line, state),
+        category="opencode", label=mode,
+    )
+    if launch_err is not None:
+        return False, f"Could not launch opencode ({cmd[0]}): {launch_err}"
+    if timed_out:
+        return False, f"opencode timed out after {timeout}s."
+    if state.get("error"):
+        err = state["error"]
+        name = err.get("name") if isinstance(err, dict) else err
+        return False, f"opencode error: {name}"
+    result_text = (state.get("final") or "".join(state.get("texts") or [])).strip()
+    if not state.get("stopped") and not result_text:
+        # No text/stop event — likely a schema change. Surface it rather than
+        # reporting a silent success.
+        logger.warning("opencode produced no text/stop event (rc=%s) — schema drift?", rc)
+        return rc == 0, result_text or f"opencode exited {rc} with no result"
     return rc == 0, result_text
 
 
@@ -344,7 +469,21 @@ class ClaudeRunner(agents.AgentRunner):
         return run_claude(cfg, prompt, cwd, mode, log_path)
 
 
+class OpenCodeRunner(agents.AgentRunner):
+    """opencode adapter — delegates to run_opencode (defined above), which owns the
+    JSONL parsing and audit wiring. Point it at a free/cheap model (e.g. Gemini)
+    via AGENT_MODEL on its resolver's .env."""
+
+    name = "opencode"
+    label = "opencode"
+
+    def run(self, cfg: Config, prompt: str, cwd: Path, mode: str,
+            log_path: Path) -> tuple[bool, str]:
+        return run_opencode(cfg, prompt, cwd, mode, log_path)
+
+
 agents.register_runner(ClaudeRunner())
+agents.register_runner(OpenCodeRunner())
 
 
 def run_agent(cfg: Config, prompt: str, cwd: Path, mode: str,
@@ -545,14 +684,14 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         run(["git", "-C", str(wt), "add", "-A"])
         # Set the committer identity explicitly: on a host with no global git
         # identity the commit otherwise fails, and the empty tree downstream gets
-        # misreported as "Claude produced no code changes".
+        # misreported as the agent having "produced no code changes".
         run(["git", "-C", str(wt),
              "-c", f"user.name={cfg.git_author_name}",
              "-c", f"user.email={cfg.git_author_email}",
              "commit", "-m", f"Resolve Stingray #{ticket['id']}: {ticket['title']}"])
         ahead = run(["git", "-C", str(wt), "rev-list", "--count", f"{base_ref}..HEAD"])[1].strip()
         if ahead in ("", "0"):
-            fail(client, ticket, "Claude produced no code changes for this ticket.",
+            fail(client, ticket, f"{agent_label} produced no code changes for this ticket.",
                  reimplementable=True)
             return
 
