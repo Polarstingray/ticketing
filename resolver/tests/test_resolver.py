@@ -314,6 +314,35 @@ def test_run_opencode_handles_missing_binary(tmp_path, fake_cfg):
     assert "definitely-not-a-real-binary-xyz" in msg
 
 
+def test_run_opencode_no_output_is_failure_not_silent_success(tmp_path, fake_cfg, monkeypatch):
+    # A swallowed provider error (e.g. Gemini 503): opencode emits only step_start,
+    # makes no edits, and still exits 0. Must be reported as a failure so it isn't
+    # misread downstream as "produced no code changes".
+    _set_opencode_cfg(fake_cfg)
+
+    def only_step_start(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        on_line(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))
+        return 0, False, None  # rc=0, not timed out, no launch error
+
+    monkeypatch.setattr(rt, "_stream_subprocess", only_step_start)
+    ok, msg = rt.run_opencode(fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log")
+    assert ok is False
+    assert "no output" in msg and "provider" in msg
+
+
+def test_filed_tickets_in_log_parses_created_lines(tmp_path):
+    log = tmp_path / "impl.log"
+    # file_ticket.py output lands in the agent's captured tool result (here shown
+    # inline + once JSON-escaped, as it appears in a stream-json transcript).
+    log.write_text('blah\ncreated ticket #42: Review X\n'
+                   '{"text":"... created ticket #42 ... created ticket #57 ..."}\n')
+    assert rt.filed_tickets_in_log(log) == [42, 57]   # de-duped, in order
+
+
+def test_filed_tickets_in_log_missing_file_is_empty(tmp_path):
+    assert rt.filed_tickets_in_log(tmp_path / "nope.log") == []
+
+
 def test_opencode_runner_registered_and_unknown_fails():
     import agents
     runner = agents.get_runner("opencode")
@@ -645,3 +674,57 @@ def test_handle_directives_dry_run_files_nothing(fake_cfg, tmp_path):
     ticket = {"id": 7, "created_by": 9, "description": '/ticket task "Add index"'}
     rt.handle_ticket_directives(fake_cfg, client, ticket, client.list_comments(7), tmp_path, dry_run=True)
     assert client.created == [] and client.comments_added == []
+
+
+def test_directive_assign_username_gives_actionable_error(tmp_path):
+    d = {"key": "k", "line": "x", "author": 9,
+         "args": 'code_review "sha256 verification" --assign admin'}
+    with pytest.raises(rt._DirectiveError) as exc:
+        rt.directive_payload(d, tmp_path)
+    assert "numeric user id" in str(exc.value) and "omit --assign" in str(exc.value)
+
+
+@pytest.mark.parametrize("desc,expected", [
+    ('/ticket task "x"', True),
+    ('\n/ticket task "x"\n  ', True),
+    ('/ticket task "a"\n/ticket task "b"', True),
+    ('do real work\n/ticket task "x"', False),  # has substantive content
+    ('', False),                                  # empty body
+    ('just a normal task', False),                # no directive
+])
+def test_body_is_directive_only(desc, expected):
+    assert rt.body_is_directive_only({"description": desc}) is expected
+
+
+class FakeClientWithCreate(FakeClient):
+    def __init__(self, comments=None):
+        super().__init__(comments)
+        self.created: list[dict] = []
+
+    def create_ticket(self, **fields):
+        self.created.append(fields)
+        return {"id": 200 + len(self.created), "title": fields.get("title")}
+
+
+def test_process_directive_only_files_and_hands_back_without_planning(fake_cfg):
+    client = FakeClientWithCreate()
+    ticket = {"id": 7, "tags": ["repo:x"], "status": "open", "created_by": 9,
+              "description": '/ticket code_review "sha256 verification"'}
+
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+
+    # filed the directive once...
+    assert len(client.created) == 1 and client.created[0]["type"] == "code_review"
+    # ...handed the host ticket back to the author, no claude:* tags, never planned
+    last = client.updates[-1]
+    assert last["status"] == "in_review" and last["assigned_to"] == 9
+    assert all(not t.startswith("claude:") for t in last["tags"])
+    assert not any("planning" in body for _, body in client.comments_added)
+
+
+def test_process_directive_only_dry_run_changes_nothing(fake_cfg):
+    client = FakeClientWithCreate()
+    ticket = {"id": 7, "tags": ["repo:x"], "status": "open", "created_by": 9,
+              "description": '/ticket task "x"'}
+    rt.process(fake_cfg, client, ticket, dry_run=True)
+    assert client.created == [] and client.updates == [] and client.comments_added == []

@@ -141,7 +141,14 @@ next sweep:
   sitting in the body isn't re-filed every sweep. A malformed directive is reported in
   that comment once, not repeatedly.
 - **Default assignee:** the person who wrote the directive (so you can find the ticket
-  you asked for); `--assign <user_id>` overrides.
+  you asked for). `--assign <user_id>` overrides, and takes a **numeric user id** — a
+  username (e.g. `admin`) can't be resolved here because the resolver runs as a
+  non-admin bot. Omit `--assign` to assign the new ticket to yourself.
+- **Pure filing requests skip planning:** if a bot-assigned ticket's body is *only*
+  `/ticket` line(s), there's nothing to implement — the resolver files the directive(s)
+  and hands the ticket back to you (`in_review`) instead of spending an agent run
+  planning it. Put `/ticket` in a comment (or alongside real content) if you want the
+  host ticket worked on too.
 
 ## Running it
 

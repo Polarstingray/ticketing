@@ -234,9 +234,18 @@ def _directive_parser() -> _DirectiveParser:
     p.add_argument("--priority", default="medium", choices=file_ticket.PRIORITIES)
     p.add_argument("--description", default="")
     p.add_argument("--tag", action="append")
-    p.add_argument("--assign", type=int)
+    p.add_argument("--assign", type=file_ticket.user_id)
     p.add_argument("--code-block", action="append", dest="code_block")
     return p
+
+
+def body_is_directive_only(ticket: dict) -> bool:
+    """True when the ticket description is nothing but `/ticket` directive line(s)
+    (and whitespace) — i.e. a pure filing request with no real work to plan."""
+    nonempty = [l.strip() for l in (ticket.get("description") or "").splitlines() if l.strip()]
+    return bool(nonempty) and all(
+        l == "/ticket" or l.startswith("/ticket ") for l in nonempty
+    )
 
 
 def directive_key(line: str) -> str:
@@ -592,10 +601,19 @@ def run_opencode(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path)
         return False, f"opencode error: {name}"
     result_text = (state.get("final") or "".join(state.get("texts") or [])).strip()
     if not state.get("stopped") and not result_text:
-        # No text/stop event — likely a schema change. Surface it rather than
-        # reporting a silent success.
-        logger.warning("opencode produced no text/stop event (rc=%s) — schema drift?", rc)
-        return rc == 0, result_text or f"opencode exited {rc} with no result"
+        # opencode exited without a stop event AND without any assistant output.
+        # This is what a swallowed provider error looks like: e.g. Gemini returns
+        # a 503 "model overloaded", opencode logs it internally but still exits 0.
+        # Treat it as a failure — otherwise do_implement commits the empty tree and
+        # misreports it as the agent having "produced no code changes". (A genuine
+        # success always carries a stop event; this only fires on the broken case.)
+        logger.warning("opencode produced no output (rc=%s, no stop event) — likely a "
+                       "provider error; see ~/.local/share/opencode/log", rc)
+        return False, (
+            f"opencode produced no output (exited {rc} with no stop event). The "
+            "model/provider call likely failed — e.g. an overloaded-model 503. "
+            "Check the opencode logs under ~/.local/share/opencode/log."
+        )
     return rc == 0, result_text
 
 
@@ -806,6 +824,26 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
           f"#{ticket['id']}: posted plan, handed back to user {ticket['created_by']}")
 
 
+_FILED_RE = re.compile(r"created ticket #(\d+)")
+
+
+def filed_tickets_in_log(log_path: Path) -> list[int]:
+    """Ticket ids that file_ticket.py reported creating during a run — it prints
+    `created ticket #<id>`, which lands in the agent's captured tool output. Lets
+    an implement run that filed tickets but changed no code be reported as a
+    success instead of a misleading 'produced no code changes'."""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    seen: list[int] = []
+    for m in _FILED_RE.finditer(text):
+        tid = int(m.group(1))
+        if tid not in seen:
+            seen.append(tid)
+    return seen
+
+
 def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                  plan: str | None, reviewer_notes: str | None = None) -> None:
     set_state(client, ticket, [TAG_IMPLEMENTING])
@@ -844,6 +882,20 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
              "commit", "-m", f"Resolve Stingray #{ticket['id']}: {ticket['title']}"])
         ahead = run(["git", "-C", str(wt), "rev-list", "--count", f"{base_ref}..HEAD"])[1].strip()
         if ahead in ("", "0"):
+            # No diff — but if the run's whole job was to file Stingray ticket(s)
+            # via file_ticket.py, that's a success, not a failure. Detect the
+            # tickets it filed and hand this one back as done instead of looking
+            # like the agent did nothing.
+            filed = filed_tickets_in_log(log_path)
+            if filed:
+                ids = ", ".join(f"#{i}" for i in filed)
+                client.add_comment(ticket["id"],
+                    f"{IMPL_MARKER} — no code changes were needed; filed {ids}.\n\n{summary}")
+                set_state(client, ticket, [], status="in_review",
+                          assigned_to=ticket["created_by"])
+                phase("filed-no-code", ticket,
+                      f"#{ticket['id']}: filed {ids}, no code changes — handed back")
+                return
             fail(client, ticket, f"{agent_label} produced no code changes for this ticket.",
                  reimplementable=True)
             return
@@ -963,6 +1015,19 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     # plan/implement dispatch — filing a follow-up ticket is independent of this
     # ticket's own workflow state.
     handle_ticket_directives(cfg, client, ticket, comments, repo, dry_run)
+
+    # A ticket whose body is *only* a `/ticket` directive is a pure filing
+    # request — there's nothing to plan or implement. File it (above), then hand
+    # it back to the author instead of spending an agent run planning it.
+    if body_is_directive_only(ticket):
+        if dry_run:
+            log(f"#{tid}: directive-only ticket — would file and hand back (no plan)")
+            return
+        author = ticket.get("created_by")
+        if author and author != cfg.bot_user_id:
+            set_state(client, ticket, [], status="in_review", assigned_to=author)
+        log(f"#{tid}: directive-only ticket — filed, handed back to {author} (no plan)")
+        return
 
     last = latest_human(comments, cfg.bot_user_id)
     cmd = (last.get("body") or "").strip().lower() if last else ""
