@@ -37,6 +37,18 @@ TYPES = ("code_review", "task")
 PRIORITIES = ("low", "medium", "high", "critical")
 
 
+def user_id(value: str) -> int:
+    """argparse type for --assign: a numeric user id. A username like 'admin'
+    can't be resolved here (the resolver is a non-admin bot), so fail with an
+    actionable message instead of argparse's opaque 'invalid int value'."""
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"needs a numeric user id (got {value!r}); omit --assign to assign to yourself"
+        )
+
+
 def parse_code_block(spec: str, root: Path) -> dict:
     """Turn a `PATH:LANGUAGE:START-END` spec into a ticket code_block, reading the
     exact lines off disk so their content never has to be escaped by hand."""
@@ -111,7 +123,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--description", default="", help="ticket body")
     p.add_argument("--priority", default="medium", choices=PRIORITIES, help="default: medium")
     p.add_argument("--tag", action="append", metavar="TAG", help="repeatable")
-    p.add_argument("--assign", type=int, metavar="USER_ID", help="assign to this user id")
+    p.add_argument("--assign", type=user_id, metavar="USER_ID", help="assign to this user id")
     p.add_argument(
         "--code-block", action="append", dest="code_block", metavar="PATH:LANG:START-END",
         help="repeatable; reads the lines from disk (code_review only)",
