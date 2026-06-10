@@ -148,6 +148,45 @@ def test_implement_prompt_includes_reviewer_notes(tmp_path):
     assert "THE PLAN" in prompt
 
 
+def test_implement_prompt_includes_file_hints(tmp_path):
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "models.py").write_text("x = 1\n")
+    (tmp_path / "config.py").write_text("y = 2\n")
+    plan = ("Edit backend/models.py to add a column, then update config.py. "
+            "Do not touch nonexistent/ghost.py.")
+    prompt = rt.implement_prompt(
+        {"id": 1, "title": "t", "description": "d"}, tmp_path, plan=plan)
+    assert "Likely-relevant files" in prompt
+    assert "- backend/models.py" in prompt
+    assert "- config.py" in prompt
+    # the hallucinated path is filtered out because it doesn't exist on disk
+    assert "ghost.py" not in prompt.split("Likely-relevant files")[1]
+
+
+def test_files_mentioned_in_plan_filters_to_existing(tmp_path):
+    (tmp_path / "real.py").write_text("pass\n")
+    found = rt._files_mentioned_in_plan(
+        "Touch real.py and ./real.py again, but not missing.py", tmp_path)
+    assert found == ["real.py"]  # deduped (incl. ./ prefix) and existence-filtered
+
+
+# --- per-phase model selection ------------------------------------------
+def test_model_for_falls_back_to_agent_model():
+    cfg = SimpleNamespace(agent_model="base")
+    assert rt.model_for(cfg, "plan") == "base"
+    assert rt.model_for(cfg, "implement") == "base"
+    assert rt.model_for(cfg, "review") == "base"
+
+
+def test_model_for_picks_per_phase():
+    cfg = SimpleNamespace(
+        agent_model="base", agent_plan_model="cheap",
+        agent_implement_model="strong", agent_review_model="")
+    assert rt.model_for(cfg, "plan") == "cheap"
+    assert rt.model_for(cfg, "implement") == "strong"
+    assert rt.model_for(cfg, "review") == "base"  # blank override falls back
+
+
 # --- A1: secret redaction ------------------------------------------------
 def test_redact_removes_api_key_and_tokens():
     audit.register_secret("sk_supersecret_value_001")
@@ -261,6 +300,47 @@ def test_opencode_event_parses_tool_and_final_text():
     # the final answer is the text from the step that ends with reason=stop
     assert state["final"] == "all done"
     assert state["stopped"] is True
+
+
+def test_opencode_event_accumulates_tokens():
+    state = {}
+    finish = {"type": "step_finish", "part": {
+        "type": "step-finish", "reason": "stop",
+        "tokens": {"input": 100, "output": 20, "cache": {"read": 5, "write": 3}},
+        "cost": 0.01}}
+    rt._opencode_event(logging.getLogger("resolver.octok"), json.dumps(finish), state)
+    rt._opencode_event(logging.getLogger("resolver.octok"), json.dumps(finish), state)
+    assert state["tokens"] == {"input": 200, "output": 40, "cache_read": 10, "cache_write": 6}
+    assert state["cost"] == pytest.approx(0.02)
+
+
+def test_claude_result_emits_token_usage():
+    logger = logging.getLogger("resolver.toktest")
+    logger.setLevel(logging.INFO)
+    cap = _Capture()
+    logger.handlers = [cap]
+    logger.propagate = False
+    rt._emit_token_usage(logger, "claude", "plan", {
+        "input_tokens": 1234, "output_tokens": 56,
+        "cache_read_tokens": 7, "cache_write_tokens": 8, "cost_usd": 0.042})
+    rec = [r.audit for r in cap.records if getattr(r, "audit", {}).get("kind") == "token_usage"]
+    assert len(rec) == 1
+    assert rec[0]["agent"] == "claude"
+    assert rec[0]["mode"] == "plan"
+    assert rec[0]["input_tokens"] == 1234
+    assert rec[0]["cost_usd"] == pytest.approx(0.042)
+
+
+def test_emit_token_usage_defaults_missing_to_zero():
+    logger = logging.getLogger("resolver.tokzero")
+    logger.setLevel(logging.INFO)
+    cap = _Capture()
+    logger.handlers = [cap]
+    logger.propagate = False
+    rt._emit_token_usage(logger, "opencode", "implement", {})
+    rec = [r.audit for r in cap.records if getattr(r, "audit", {}).get("kind") == "token_usage"][0]
+    assert rec["input_tokens"] == 0
+    assert rec["cost_usd"] == 0.0
 
 
 def test_opencode_event_records_error():
