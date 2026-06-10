@@ -91,6 +91,26 @@ comment:
 - `/approve` — implement the plan.
 - `/revise <notes>` — re-plan with your notes.
 
+## Reviewing code (review mode)
+
+A ticket of **type `code_review`** assigned to the bot is *reviewed*, not planned/
+implemented: the resolver runs the agent **read-only**, reviews the code, and posts its
+findings (issues / risks / suggestions, grouped by severity) as a `🔎 Code review`
+comment — no PR, no edits — then hands the ticket back to you. This is how a bot
+resolves a review request another bot (or you) filed.
+
+- **What it reviews:** the ticket's `code_blocks` if present, otherwise it explores the
+  repo (selected by the `repo:<name>` tag) to find the code your description refers to —
+  so you can just file *"Review program installation in repman"* without attaching code.
+- **Reviewed once:** a re-swept review ticket isn't re-reviewed unless a human comment
+  says `/review`.
+- **Also fix it:** add the **`fix`** tag to a `code_review` ticket and, after reviewing,
+  the resolver treats its findings as a plan and routes into the normal `/approve` →
+  implement → PR gate (or applies them straight away if the ticket is also `dangerous`).
+  Without `fix`, review mode is strictly findings-only.
+
+View a review transcript with `./logs.py <id> --review`.
+
 ## Filing tickets from a run
 
 When a resolver needs to file its *own* Stingray ticket — a review request for the
@@ -226,11 +246,15 @@ bot user.
    STINGRAY_API_KEY=<gemini-bot's own key>   # not the admin key
    AGENT_BIN=/home/you/.local/bin/opencode   # absolute path for cron's thin PATH
    AGENT_MODEL=google/gemini-2.5-flash       # provider/model
+   AGENT_FALLBACK_MODEL=google/gemini-2.5-pro  # escalate to this on a transient 503
    # plan phase uses opencode's read-only `plan` agent; implement uses `build`.
    # Override only if you've defined custom opencode agents:
    # OPENCODE_PLAN_AGENT=plan
    # OPENCODE_BUILD_AGENT=build
    ```
+   Pick a model that's actually good at agentic tool-calling: `gemini-2.5-flash`
+   or stronger. `gemini-2.5-flash-lite` stalls on multi-step edits (≈148s/step,
+   the loop dies with no changes) and is a poor fit for the implement phase.
 4. **Add a second cron line** under its *own* `flock` lock, selecting the env file:
    ```cron
    */10 * * * * /usr/bin/flock -n /tmp/stingray-resolver-gemini.lock \
@@ -249,6 +273,17 @@ Each resolver only sweeps its own bot's queue, so the two never collide.
 > cannot edit files or run shell — the same two-gate guarantee Claude gets. The
 > implement phase uses the unrestricted `build` agent; isolation comes from the
 > per-ticket worktree + the `PROJECTS_ROOT` allowlist.
+
+> **Worktree anchoring:** the runner passes `--dir <worktree>` to `opencode run`.
+> Without it opencode roots in its *global* project (`$HOME`) rather than the
+> per-ticket checkout, so the agent explores/edits the wrong tree and the implement
+> diff comes back empty ("produced no code changes").
+
+> **Transient-failure handling:** Gemini sometimes returns an overloaded-model 503
+> that opencode swallows (exits 0 with no output). The runner detects that, retries
+> the primary model once with backoff, then escalates to `AGENT_FALLBACK_MODEL`
+> for that run, so one provider blip doesn't burn a whole ticket attempt. Each
+> attempt keeps its own `…-try<N>.log`.
 
 ## Logging & audit trail
 

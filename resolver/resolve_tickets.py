@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import select
 import shlex
@@ -44,14 +45,17 @@ CLAUDE_PREFIX = "claude:"
 TAG_PLANNING = "claude:planning"            # plan run in flight
 TAG_AWAIT_PLAN = "claude:awaiting-plan-approval"
 TAG_IMPLEMENTING = "claude:implementing"    # implement run in flight
+TAG_REVIEWING = "claude:reviewing"          # code-review run in flight
 TAG_AWAIT_PR = "claude:awaiting-pr-review"
 TAG_DANGEROUS = "dangerous"
+TAG_FIX = "fix"                             # on a code_review ticket: also apply fixes
 REPO_TAG_PREFIX = "repo:"
 
 PLAN_MARKER = "📋 **Proposed plan**"
 IMPL_MARKER = "✅ **Implemented**"
 FAIL_MARKER = "⚠️ Resolver could not complete"
 FILED_MARKER = "🎫 Filed from `/ticket`"
+REVIEW_MARKER = "🔎 **Code review**"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Per-event audit truncation, set from config at sweep start (see main()).
@@ -199,11 +203,18 @@ def recent_failures(comments: list[dict], bot_id: int) -> int:
         if c.get("author") != bot_id:
             continue
         body = c.get("body") or ""
-        if PLAN_MARKER in body or IMPL_MARKER in body:
+        if PLAN_MARKER in body or IMPL_MARKER in body or REVIEW_MARKER in body:
             break  # a successful phase resets the streak
         if FAIL_MARKER in body:
             n += 1
     return n
+
+
+def already_reviewed(comments: list[dict], bot_id: int) -> bool:
+    """True if the resolver has already posted a code review on this ticket — so a
+    re-swept code_review ticket isn't re-reviewed unless a `/review` asks for it."""
+    return any(c.get("author") == bot_id and REVIEW_MARKER in (c.get("body") or "")
+               for c in comments)
 
 
 # --- /ticket directive ---------------------------------------------------
@@ -463,12 +474,12 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
     cmd = [cfg.agent_bin, "-p", prompt, "--output-format", "stream-json", "--verbose"]
     if cfg.agent_model:
         cmd += ["--model", cfg.agent_model]
-    if mode == "plan":
-        # Read-only exploration. We deliberately do NOT use --permission-mode
-        # plan: headless, that routes the plan through ExitPlanMode (which can't
-        # be approved non-interactively), so the plan text never reaches the
-        # result. Granting only read tools and asking for the plan as the final
-        # message captures it cleanly while guaranteeing no edits.
+    if mode in ("plan", "review"):
+        # Read-only exploration (planning or code review). We deliberately do NOT
+        # use --permission-mode plan: headless, that routes the plan through
+        # ExitPlanMode (which can't be approved non-interactively), so the text
+        # never reaches the result. Granting only read tools and asking for the
+        # output as the final message captures it cleanly while guaranteeing no edits.
         cmd += ["--permission-mode", "default", "--allowedTools", "Read", "Glob", "Grep"]
     else:
         cmd += ["--permission-mode", "acceptEdits"]
@@ -565,20 +576,71 @@ def _opencode_event(logger, line: str, state: dict) -> None:
         state["error"] = evt.get("error") or {"name": "unknown"}
 
 
-def run_opencode(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
-    """Run headless opencode (`opencode run ... --format json`), auditing each tool
-    call as an `agent_tool` event and teeing the raw JSONL to `log_path`.
+# Provider failures opencode swallows are worth retrying (with backoff, then a
+# stronger model); auth/permission/usage errors are not. Match on the error event
+# name — the swallowed-503 shape (clean exit, no stop event, no text) is handled
+# separately below and is always treated as retryable.
+_RETRYABLE_ERR = re.compile(
+    r"overload|unavailable|exhaust|rate.?limit|throttl|deadline|timeout|"
+    r"\b429\b|\b500\b|\b502\b|\b503\b|\b504\b", re.I)
 
-    mode is 'plan' (read-only: the permission-restricted `plan` agent, with no
-    --dangerously-skip-permissions, so it cannot edit/run bash) or 'implement'
-    (the unrestricted `build` agent with permissions auto-approved so edits run
-    headlessly — isolation comes from the per-ticket worktree + PROJECTS_ROOT
-    allowlist, same rationale as Claude's broad Bash allowlist). Returns
-    (ok, result_text)."""
-    cmd = [cfg.agent_bin, "run", prompt, "--format", "json"]
-    if cfg.agent_model:
-        cmd += ["--model", cfg.agent_model]
-    if mode == "plan":
+
+_API_ERR_PATTERNS = re.compile(
+    r"HTTP status code|RESOURCE_EXHAUSTED|model overloaded|rate limit|quota exceeded|unavailable|temporary error",
+    re.I
+)
+
+def _search_log_for_api_errors(log_path: Path, n: int = 15) -> str:
+    """Searches the log for common API error patterns and returns relevant lines,
+    falling back to the log tail if no specific errors are found."""
+    try:
+        content = log_path.read_text("utf-8", errors="ignore")
+        error_lines = [line.strip() for line in content.splitlines() if _API_ERR_PATTERNS.search(line)]
+        if error_lines:
+            # Return a limited number of unique error lines
+            unique_error_lines = []
+            for line in reversed(error_lines): # Prefer more recent errors
+                if line not in unique_error_lines and len(unique_error_lines) < n:
+                    unique_error_lines.append(line)
+            return "\n".join(reversed(unique_error_lines)) # Present in chronological order
+    except OSError:
+        pass
+    return _log_tail(log_path, n=n)
+
+def _log_tail(log_path: Path, n: int = 15) -> str:
+    """Last `n` non-empty lines of an opencode log, so a swallowed provider error
+    can be surfaced into the ticket failure comment instead of only pointing the
+    reader at ~/.local/share/opencode/log."""
+    try:
+        lines = [ln for ln in log_path.read_text("utf-8", errors="ignore").splitlines()
+                 if ln.strip()]
+    except OSError:
+        return ""
+    return "\n".join(lines[-n:])
+
+
+def _run_opencode_once(cfg: Config, prompt: str, cwd: Path, mode: str,
+                       log_path: Path, model: str) -> tuple[bool, str, bool, list[str]]:
+    """One headless opencode run (`opencode run ... --format json`), auditing each
+    tool call as an `agent_tool` event and teeing the raw JSONL to `log_path`.
+
+    Anchors opencode to the worktree with `--dir` — it otherwise roots in its
+    *global* project (`/home/penguin`), not the per-ticket checkout, so edits land
+    outside the worktree and the diff comes back empty. mode is 'plan'/'review'
+    (the permission-restricted `plan` agent, no --dangerously-skip-permissions, so
+    it cannot edit/run bash) or 'implement' (the unrestricted `build` agent with
+    permissions auto-approved so edits run headlessly — isolation comes from the
+    worktree + PROJECTS_ROOT allowlist, same rationale as Claude's broad Bash
+    allowlist).
+
+    Returns (ok, result_text, retryable, cmd). `retryable` is True only for transient
+    provider failures (swallowed 503 / overload) where a backoff-then-retry — and
+    a model escalation — is worth it; it is False for launch failures, timeouts
+    (the budget was already spent), non-transient errors (auth), and successes."""
+    cmd = [cfg.agent_bin, "run", prompt, "--format", "json", "--dir", str(cwd)]
+    if model:
+        cmd += ["--model", model]
+    if mode in ("plan", "review"):
         cmd += ["--agent", cfg.opencode_plan_agent]
     else:
         cmd += ["--agent", cfg.opencode_build_agent, "--dangerously-skip-permissions"]
@@ -592,29 +654,74 @@ def run_opencode(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path)
         category="opencode", label=mode,
     )
     if launch_err is not None:
-        return False, f"Could not launch opencode ({cmd[0]}): {launch_err}"
+        return False, f"Could not launch opencode ({cmd[0]}): {launch_err}", False, cmd
     if timed_out:
-        return False, f"opencode timed out after {timeout}s."
+        return False, f"opencode timed out after {timeout}s.", False, cmd
     if state.get("error"):
         err = state["error"]
         name = err.get("name") if isinstance(err, dict) else err
-        return False, f"opencode error: {name}"
+        return False, f"opencode error: {name}", bool(_RETRYABLE_ERR.search(str(name))), cmd
     result_text = (state.get("final") or "".join(state.get("texts") or [])).strip()
     if not state.get("stopped") and not result_text:
         # opencode exited without a stop event AND without any assistant output.
         # This is what a swallowed provider error looks like: e.g. Gemini returns
         # a 503 "model overloaded", opencode logs it internally but still exits 0.
-        # Treat it as a failure — otherwise do_implement commits the empty tree and
-        # misreports it as the agent having "produced no code changes". (A genuine
-        # success always carries a stop event; this only fires on the broken case.)
-        logger.warning("opencode produced no output (rc=%s, no stop event) — likely a "
-                       "provider error; see ~/.local/share/opencode/log", rc)
-        return False, (
-            f"opencode produced no output (exited {rc} with no stop event). The "
-            "model/provider call likely failed — e.g. an overloaded-model 503. "
-            "Check the opencode logs under ~/.local/share/opencode/log."
+        # Treat it as a (retryable) failure — otherwise do_implement commits the
+        # empty tree and misreports it as the agent having "produced no code
+        # changes". (A genuine success always carries a stop event; this only fires
+        # on the broken case.)
+        logger.warning("opencode produced no output (rc=%s, no stop event) on %s — "
+                       "likely a provider error", rc, model or "default model")
+        # Use targeted search for API errors, or fall back to generic tail
+        log_summary = _search_log_for_api_errors(log_path)
+        msg = (f"opencode produced no output (exited {rc} with no stop event). The "
+               "model/provider call likely failed — e.g. an overloaded-model 503.")
+        msg += (f"\n\nRelevant log entries:\n```\n{log_summary}\n```" if log_summary else
+                " Check the opencode logs under ~/.local/share/opencode/log.")
+        return False, msg, True, cmd
+    return rc == 0, result_text, False, cmd
+
+
+def run_opencode(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
+    """Drive opencode with retry + model fallback so one overloaded-model blip
+    doesn't burn a whole ticket attempt: run the primary model, retry it once on a
+    transient provider failure (swallowed 503 / overload) with backoff, then
+    escalate to cfg.agent_fallback_model if one is configured. Non-retryable
+    failures (launch error, timeout, auth) and successes return immediately.
+    Returns (ok, result_text)."""
+    logger = audit.get_logger()
+    primary = cfg.agent_model
+    models = [primary, primary]  # primary, then one retry of the primary
+    if cfg.agent_fallback_model and cfg.agent_fallback_model != primary:
+        models.append(cfg.agent_fallback_model)
+
+    for i, model in enumerate(models):
+        # Attempt 1 uses the caller's log path (so the common single-attempt case
+        # is unchanged and downstream filed_tickets_in_log() reads it directly);
+        # retries write their own files so each run's raw log is preserved.
+        attempt_log = log_path if i == 0 else log_path.with_name(
+            f"{log_path.stem}-try{i + 1}{log_path.suffix}")
+        ok, text, retryable, cmd = _run_opencode_once(cfg, prompt, cwd, mode, attempt_log, model)
+        if ok or not retryable or i == len(models) - 1:
+            # Point the caller's log path at the attempt we're returning — it reads
+            # filed tickets / output from log_path.
+            if attempt_log != log_path:
+                try:
+                    log_path.write_bytes(attempt_log.read_bytes())
+                except OSError:
+                    pass
+            return ok, text
+        nxt = models[i + 1]
+        delay = min(2.0 * (2 ** i), 20.0) + random.uniform(0, 2.0)
+        audit.audit_event(
+            logger, "subprocess",
+            f"opencode ({mode}) transient failure on {model or 'default'}; retrying "
+            f"with {nxt or 'default'} after {delay:.1f}s",
+            level=logging.WARNING, category="opencode", label=mode,
+            failed_model=model, next_model=nxt, argv=cmd, log_file=str(attempt_log)
         )
-    return rc == 0, result_text
+        time.sleep(delay)
+    return False, ""  # unreachable: the final attempt always returns above
 
 
 class ClaudeRunner(agents.AgentRunner):
@@ -794,6 +901,35 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
     return "\n".join(x for x in p if x is not None)
 
 
+def review_prompt(ticket: dict, repo: Path, want_fix: bool) -> str:
+    p = [
+        f"You are performing a CODE REVIEW for Stingray ticket #{ticket['id']} in the "
+        f"repository at {repo}.",
+        "",
+        f"Title: {ticket['title']}",
+        f"Priority: {ticket.get('priority')}",
+        "Description:",
+        ticket.get("description") or "(none)",
+    ]
+    if ticket.get("code_blocks"):
+        p += [render_code_blocks(ticket), "",
+              "Review the code at the locations above (read the surrounding code for context)."]
+    else:
+        p += ["", "Explore the repository (read-only) to locate the code this ticket refers "
+              "to, then review it."]
+    p += [
+        "",
+        "Produce a thorough code review: correctness bugs, security issues, edge cases,",
+        "and concrete improvement suggestions. Group findings by severity (blocker /",
+        "major / minor / nit) and cite `file:line`. If the code is sound, say so plainly.",
+        "You have READ-ONLY access — do NOT edit files. OUTPUT THE REVIEW AS YOUR FINAL MESSAGE.",
+    ]
+    if want_fix:
+        p += ["", "An engineer will apply your recommended fixes after this review, so make "
+              "the actionable changes specific (file, location, what to change)."]
+    return "\n".join(x for x in p if x is not None)
+
+
 # --- phase handlers ------------------------------------------------------
 def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             revise_notes: str | None) -> None:
@@ -905,6 +1041,47 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                 summary, stat, origin=origin, pr_ok=pr_ok)
     finally:
         remove_worktree(repo, wt)
+
+
+def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
+              want_fix: bool) -> None:
+    """Resolve a `code_review` ticket by actually reviewing it (read-only) and
+    posting findings — no PR, no edits. With the `fix` tag, the findings double as
+    a plan and the ticket routes into the normal implement gate."""
+    set_state(client, ticket, [TAG_REVIEWING])
+    agent_label = agents.get_runner(cfg.agent).label
+    client.add_comment(ticket["id"], f"🔎 {agent_label} is reviewing this — read-only, "
+        "this can take a few minutes. I'll post the findings and reassign it back to you.")
+    phase("reviewing", ticket, f"#{ticket['id']}: reviewing"
+          + (" (+fix)" if want_fix else ""))
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    log_path = cfg.logs_dir / f"ticket-{ticket['id']}-review-{ts}.log"
+    ok, result = run_agent(cfg, review_prompt(ticket, repo, want_fix), repo, "review", log_path)
+    if not ok:
+        fail(client, ticket, f"Review failed.\n\n```\n{tail(result)}\n```")
+        return
+
+    if not want_fix:
+        # Findings-only: post the review and hand the ticket back to the reporter.
+        client.add_comment(ticket["id"], f"{REVIEW_MARKER} (Stingray resolver)\n\n{result}")
+        set_state(client, ticket, [], status="in_review", assigned_to=ticket["created_by"])
+        phase("reviewed", ticket, f"#{ticket['id']}: posted review, handed back to "
+              f"user {ticket['created_by']}")
+        return
+
+    # `fix` requested: the findings are the plan. Tagged `dangerous` skips the gate
+    # and applies them straight away; otherwise hand back for an explicit /approve.
+    body = (f"{PLAN_MARKER} (code review + fix)\n\n{result}\n\n---\n"
+            "Reply with `/approve` (and re-assign this ticket to me) to apply these "
+            "fixes as a PR, or `/revise <notes>` to adjust.")
+    client.add_comment(ticket["id"], body)
+    if TAG_DANGEROUS in ticket.get("tags", []):
+        do_implement(cfg, client, ticket, repo, plan=result)
+        return
+    set_state(client, ticket, [TAG_AWAIT_PLAN], status="in_review",
+              assigned_to=ticket["created_by"])
+    phase("awaiting-plan-approval", ticket,
+          f"#{ticket['id']}: posted review, awaiting /approve to fix")
 
 
 def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summary, stat,
@@ -1032,6 +1209,11 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     last = latest_human(comments, cfg.bot_user_id)
     cmd = (last.get("body") or "").strip().lower() if last else ""
 
+    # A code_review-type ticket is *reviewed* (read-only findings), not planned/
+    # implemented. The `fix` tag opts into also applying the fixes after review.
+    is_review = ticket.get("type") == "code_review"
+    want_fix = TAG_FIX in ticket.get("tags", [])
+
     if TAG_AWAIT_PLAN in tags:
         if cmd.startswith("/approve"):
             plan = find_approved_plan(comments, cfg.bot_user_id)
@@ -1051,8 +1233,17 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
             action, kw = "skip", {}
     elif TAG_PLANNING in tags:
         action, kw = "replan", {"revise_notes": None}   # retry after a crashed plan run
-    elif TAG_IMPLEMENTING in tags or dangerous:
+    elif TAG_REVIEWING in tags:
+        action, kw = "review", {"want_fix": want_fix}   # retry after a crashed review run
+    elif TAG_IMPLEMENTING in tags or (dangerous and not is_review):
         action, kw = "implement", {"plan": find_approved_plan(comments, cfg.bot_user_id)}
+    elif is_review:
+        # Review a fresh code_review ticket; don't re-review an already-reviewed
+        # one unless a `/review` comment explicitly asks for another pass.
+        if already_reviewed(comments, cfg.bot_user_id) and not cmd.startswith("/review"):
+            action, kw = "skip", {}
+        else:
+            action, kw = "review", {"want_fix": want_fix}
     else:
         action, kw = "plan", {"revise_notes": None}
 
@@ -1063,7 +1254,7 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     # Attempt cap (B3): a ticket that keeps failing the same phase shouldn't be
     # auto-retried forever, burning tokens on every cron tick. Once the streak of
     # recent failures hits the cap, hand it to a human and leave the bot's queue.
-    if cfg.max_attempts > 0 and action in ("plan", "replan", "implement", "rework"):
+    if cfg.max_attempts > 0 and action in ("plan", "replan", "implement", "rework", "review"):
         failures = recent_failures(comments, cfg.bot_user_id)
         if failures >= cfg.max_attempts:
             give_up(client, ticket, failures)
@@ -1073,6 +1264,8 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
         do_plan(cfg, client, ticket, repo, kw["revise_notes"])
     elif action == "replan":
         do_plan(cfg, client, ticket, repo, kw["revise_notes"])
+    elif action == "review":
+        do_review(cfg, client, ticket, repo, kw["want_fix"])
     elif action in ("implement", "rework"):
         do_implement(cfg, client, ticket, repo, kw.get("plan"), kw.get("reviewer_notes"))
     elif action == "nudge":

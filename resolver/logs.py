@@ -9,6 +9,7 @@ the log back out of the tarball transparently.
   ./logs.py              list recent runs, newest first
   ./logs.py 42           print ticket 42's latest *implement* log
   ./logs.py 42 --plan    print ticket 42's latest *plan* log
+  ./logs.py 42 --review  print ticket 42's latest *review* log
   ./logs.py 42 --all     list every run for ticket 42
   ./logs.py 42 -f        follow the newest matching log (a run in progress)
 """
@@ -28,13 +29,13 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_LOGS_DIR = HERE / "logs"
 
 # ticket-<id>-<phase>-<YYYYMMDD-HHMMSS>.log
-_LOG_RE = re.compile(r"^ticket-(\d+)-(plan|implement)-(\d{8}-\d{6})\.log$")
+_LOG_RE = re.compile(r"^ticket-(\d+)-(plan|implement|review)-(\d{8}-\d{6})\.log$")
 
 
 @dataclass
 class LogRef:
     ticket: int
-    phase: str            # "plan" | "implement"
+    phase: str            # "plan" | "implement" | "review"
     ts: str               # raw YYYYMMDD-HHMMSS (sorts chronologically)
     name: str             # the file's basename
     path: Path | None = None        # set for a loose file
@@ -136,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="View resolver per-ticket logs")
     ap.add_argument("ticket", nargs="?", type=int, help="ticket id to show")
     ap.add_argument("--plan", action="store_true", help="show the plan log (default: implement)")
+    ap.add_argument("--review", action="store_true", help="show the code-review log")
     ap.add_argument("--all", action="store_true", help="list every run for the ticket")
     ap.add_argument("-f", "--follow", action="store_true", help="follow the newest matching log")
     ap.add_argument("--logs-dir", type=Path, default=DEFAULT_LOGS_DIR,
@@ -151,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.ticket is None or args.all:
         return _list(logs_dir, args.ticket)
 
-    phase = "plan" if args.plan else "implement"
+    phase = "review" if args.review else "plan" if args.plan else "implement"
     refs = collect_logs(logs_dir, ticket=args.ticket, phase=phase)
     if not refs:
         print(f"no {phase} log for ticket {args.ticket} in {logs_dir}", file=sys.stderr)

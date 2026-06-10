@@ -94,6 +94,7 @@ class Config:
     # --- agent invocation (agent-neutral; legacy CLAUDE_* names still honored) ---
     agent_bin: str
     agent_model: str
+    agent_fallback_model: str
     implement_tools: str
     agent_timeout: int
     agent_implement_timeout: int
@@ -145,6 +146,11 @@ class Config:
             # CLAUDE_* names still work so existing Claude resolvers need no change.
             agent_bin=_env("AGENT_BIN", "CLAUDE_BIN", default="claude"),
             agent_model=_env("AGENT_MODEL", "CLAUDE_MODEL"),
+            # opencode-only: a stronger model to escalate to after the primary
+            # fails a run with a transient provider error (overloaded/503). Empty
+            # disables escalation (the primary is still retried once). Ignored by
+            # the Claude runner.
+            agent_fallback_model=_env("AGENT_FALLBACK_MODEL", default=""),
             implement_tools=_env(
                 "AGENT_IMPLEMENT_TOOLS", "CLAUDE_IMPLEMENT_TOOLS",
                 # Broad Bash so the agent can run tests/build in the worktree;
