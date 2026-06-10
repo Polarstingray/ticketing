@@ -212,3 +212,13 @@ Auto-merge is never done — Claude only opens the PR; you approve and merge.
   Edit/Write/Bash), so it cannot change anything; the implement phase gets the
   tools in `CLAUDE_IMPLEMENT_TOOLS`.
 - **Least-privilege bot:** a `member` user that can only act on its own tickets.
+- **Reserved control tags:** the bot drives its workflow through control tags
+  (`claude:*`, `repo:*`, `dangerous`, `fix`). The **backend** restricts setting
+  these to admins and the resolver bot, so an ordinary user can't hijack the
+  automation (re-point a repo, force an "implement & open PR" phase, or strip
+  the `dangerous` gate) via the UI or their own API key. For this to recognize
+  the bot, set **`RESOLVER_BOT_USER_ID` in the backend's environment** to the
+  bot's user id (the same id the resolver uses) — otherwise only admins can
+  manage these tags and the bot's `set_state` transitions will be rejected.
+  (Alternatively, promote the bot to `admin` and leave `RESOLVER_BOT_USER_ID`
+  unset on the backend; the env-var approach keeps the bot least-privilege.)
