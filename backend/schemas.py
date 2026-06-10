@@ -4,7 +4,14 @@ from typing import Annotated, List, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer
 
-from models import TicketPriority, TicketStatus, TicketType, UserRole
+from models import (
+    NotificationChannel,
+    NotificationType,
+    TicketPriority,
+    TicketStatus,
+    TicketType,
+    UserRole,
+)
 
 # --- Datetime serialization --------------------------------------------------
 # DB datetimes are stored as UTC but come back naive (SQLite has no tz type, and
@@ -178,6 +185,24 @@ class UnreadCount(BaseModel):
 class BulkDeleteRequest(BaseModel):
     ids: List[int] = Field(default_factory=list)
     all: bool = False
+
+
+# --- Notification preferences ------------------------------------------------
+
+class NotificationPreferenceItem(BaseModel):
+    """One toggle in the settings matrix: (type, channel) -> enabled."""
+    type: NotificationType
+    channel: NotificationChannel
+    enabled: bool
+
+
+class NotificationPreferences(BaseModel):
+    """The full per-user matrix (every type x channel), defaults filled in."""
+    items: List[NotificationPreferenceItem]
+
+
+class NotificationPreferencesUpdate(BaseModel):
+    items: List[NotificationPreferenceItem] = Field(default_factory=list)
 
 
 # --- Pagination --------------------------------------------------------------

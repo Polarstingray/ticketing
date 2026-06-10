@@ -135,7 +135,7 @@ def create_ticket(
     # Notify admins of the new ticket, and the assignee (if any, and not the author).
     notify_new_ticket_admins(background, db, ticket, user)
     if assignee is not None:
-        notify_assignment(background, ticket, assignee, user)
+        notify_assignment(background, db, ticket, assignee, user)
     return ticket
 
 
@@ -213,7 +213,7 @@ def update_ticket(
 
     # Notify a newly-assigned (non-self) user.
     if new_assignee is not None and old_assigned_to != new_assignee.id:
-        notify_assignment(background, ticket, new_assignee, user)
+        notify_assignment(background, db, ticket, new_assignee, user)
     return ticket
 
 
