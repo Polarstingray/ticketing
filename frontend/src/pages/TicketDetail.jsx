@@ -5,12 +5,16 @@ import { useAuth } from "../auth/AuthContext";
 import { PriorityBadge, StatusBadge, TypeBadge } from "../components/Badges";
 import CodeBlockViewer from "../components/CodeBlockViewer";
 import {
+  AGENT_PHASE_LABELS,
   PRIORITIES,
   PRIORITY_LABELS,
   STATUSES,
   STATUS_LABELS,
   describeActivity,
   formatDate,
+  formatTokens,
+  formatUsd,
+  totalTokens,
 } from "../constants";
 import styles from "../styles/TicketDetail.module.css";
 
@@ -23,6 +27,7 @@ export default function TicketDetail() {
   const [users, setUsers] = useState([]);
   const [comments, setComments] = useState([]);
   const [activity, setActivity] = useState([]);
+  const [agentRuns, setAgentRuns] = useState([]);
   const [commentBody, setCommentBody] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -35,14 +40,16 @@ export default function TicketDetail() {
   async function load() {
     setLoading(true);
     try {
-      const [t, c, a] = await Promise.all([
+      const [t, c, a, runs] = await Promise.all([
         api.getTicket(id),
         api.listComments(id),
         api.listActivity(id),
+        api.listAgentRuns(id),
       ]);
       setTicket(t);
       setComments(c);
       setActivity(a);
+      setAgentRuns(runs);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -148,6 +155,18 @@ export default function TicketDetail() {
           <StatusBadge status={ticket.status} />
           <PriorityBadge priority={ticket.priority} />
           {ticket.archived && <span className={styles.tag}>Archived</span>}
+          {agentRuns.length > 0 && (
+            <span
+              className={styles.costBadge}
+              title={`${formatTokens(
+                agentRuns.reduce((sum, r) => sum + totalTokens(r), 0)
+              )} tokens across ${agentRuns.length} agent run${
+                agentRuns.length === 1 ? "" : "s"
+              }`}
+            >
+              🤖 {formatUsd(agentRuns.reduce((sum, r) => sum + (r.cost_usd || 0), 0))}
+            </span>
+          )}
           {ticket.tags?.map((t) => (
             <span key={t} className={styles.tag}>
               {t}
@@ -209,6 +228,48 @@ export default function TicketDetail() {
                     <strong>{userName(a.actor)}</strong> {describeActivity(a)}
                   </span>
                   <span className={styles.activityDate}>{formatDate(a.created_at)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className={styles.section}>
+          <h2>Agent runs</h2>
+          {agentRuns.length === 0 ? (
+            <div className="muted">No agent runs yet.</div>
+          ) : (
+            <ul className={styles.runs}>
+              {agentRuns.map((r) => (
+                <li key={r.id} className={styles.runItem}>
+                  <span className={styles.runPhase}>
+                    {AGENT_PHASE_LABELS[r.phase] ?? r.phase}
+                  </span>
+                  <span
+                    className={`${styles.runStatus} ${
+                      r.status === "failed" ? styles.runFailed : styles.runOk
+                    }`}
+                  >
+                    {r.status}
+                  </span>
+                  <span className={styles.runMeta}>
+                    {r.agent}
+                    {r.model ? ` · ${r.model}` : ""}
+                  </span>
+                  <span
+                    className={styles.runTokens}
+                    title={`in ${formatTokens(r.input_tokens)} · out ${formatTokens(
+                      r.output_tokens
+                    )} · cache read ${formatTokens(
+                      r.cache_read_tokens
+                    )} · cache write ${formatTokens(r.cache_write_tokens)}`}
+                  >
+                    {formatTokens(totalTokens(r))} tok
+                  </span>
+                  <span className={styles.runCost}>{formatUsd(r.cost_usd)}</span>
+                  <span className={styles.runDate}>
+                    {formatDate(r.started_at || r.finished_at)}
+                  </span>
                 </li>
               ))}
             </ul>

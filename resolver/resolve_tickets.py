@@ -16,6 +16,7 @@ See actions only:     python resolve_tickets.py --dry-run
 from __future__ import annotations
 
 import argparse
+import contextvars
 import json
 import logging
 import os
@@ -230,6 +231,11 @@ def _claude_event(logger, ticket_id, line: str, result: dict) -> None:
         return
     etype = evt.get("type")
     if etype == "assistant":
+        # Remember the model the agent actually used (the terminal result event
+        # doesn't carry it); first one wins.
+        model = (evt.get("message", {}) or {}).get("model")
+        if model and not result.get("model"):
+            result["model"] = model
         for block in (evt.get("message", {}) or {}).get("content", []) or []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "?")
@@ -241,6 +247,41 @@ def _claude_event(logger, ticket_id, line: str, result: dict) -> None:
                 )
     elif etype == "result":
         result.update(evt)
+
+
+# Per-run usage collector. run_agent_tracked sets this to a dict before invoking
+# the agent; _emit_token_usage fills it in so the phase handler can POST the usage
+# as an AgentRun. The sweep is sequential, so a contextvar is a safe handoff.
+_RUN_USAGE: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "run_usage", default=None
+)
+
+
+def _normalize_claude_usage(result: dict) -> dict:
+    """Pull normalized token usage + cost out of Claude's terminal `result`
+    event (its `usage` block + `total_cost_usd`). Missing fields => 0."""
+    usage = result.get("usage") or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+        "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+        "cost_usd": float(result.get("total_cost_usd") or 0.0),
+        "model": result.get("model") or "",
+    }
+
+
+def _emit_token_usage(logger, agent: str, mode: str, usage: dict) -> None:
+    """Record normalized per-phase token usage to the JSONL audit log (the source
+    of truth) and, if a run collector is active (see run_agent_tracked), stash it
+    so the phase handler can POST it to the backend as an AgentRun."""
+    audit.audit_event(
+        logger, "token_usage", f"{agent} ({mode}) token usage",
+        level=logging.INFO, category=agent, mode=mode, agent=agent, **usage,
+    )
+    sink = _RUN_USAGE.get()
+    if sink is not None:
+        sink.update({**usage, "agent": agent})
 
 
 def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
@@ -319,6 +360,10 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
         duration_ms=round((time.monotonic() - start) * 1000), timed_out=timed_out or None,
     )
 
+    # Record token usage for every outcome (a timeout leaves `result` empty -> a
+    # zero-usage record, which still makes the attempt visible downstream).
+    _emit_token_usage(logger, "claude", mode, _normalize_claude_usage(result))
+
     if timed_out:
         return False, f"Claude timed out after {timeout}s."
     result_text = (result.get("result") or "").strip()
@@ -351,6 +396,47 @@ def run_agent(cfg: Config, prompt: str, cwd: Path, mode: str,
               log_path: Path) -> tuple[bool, str]:
     """Dispatch one plan/implement phase to the configured agent runner."""
     return agents.get_runner(cfg.agent).run(cfg, prompt, cwd, mode, log_path)
+
+
+def run_agent_tracked(cfg: Config, client: StingrayClient, ticket: dict, prompt: str,
+                      cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
+    """Run one phase, then POST its token usage/cost to the backend as an
+    AgentRun so the otherwise-invisible resolver work shows up on the ticket.
+
+    The usage is known deep inside the agent runner (at the _emit_token_usage
+    call); we bridge it out via the _RUN_USAGE contextvar. POSTing must never
+    break resolution, so any failure here is swallowed (the JSONL audit log
+    remains the source of truth, and the resolver still works against an old
+    backend that lacks the endpoint)."""
+    started = datetime.now(timezone.utc)
+    collected: dict = {}
+    token = _RUN_USAGE.set(collected)
+    try:
+        ok, text = run_agent(cfg, prompt, cwd, mode, log_path)
+    finally:
+        _RUN_USAGE.reset(token)
+    try:
+        client.create_agent_run(
+            ticket["id"],
+            agent=collected.get("agent") or cfg.agent,
+            phase=mode,
+            model=collected.get("model") or getattr(cfg, "claude_model", "") or "",
+            input_tokens=collected.get("input_tokens", 0),
+            output_tokens=collected.get("output_tokens", 0),
+            cache_read_tokens=collected.get("cache_read_tokens", 0),
+            cache_write_tokens=collected.get("cache_write_tokens", 0),
+            cost_usd=collected.get("cost_usd", 0.0),
+            status="succeeded" if ok else "failed",
+            started_at=started.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        audit.audit_event(
+            audit.get_logger(), "agent_run_post_failed",
+            f"#{ticket['id']}: failed to POST agent run ({mode})",
+            level=logging.WARNING, phase=mode,
+        )
+    return ok, text
 
 
 # --- git / worktree ------------------------------------------------------
@@ -498,7 +584,8 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     phase("planning", ticket, f"#{ticket['id']}: planning ({'revise' if revise_notes else 'fresh'})")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{ts}.log"
-    ok, result = run_agent(cfg, plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
+    ok, result = run_agent_tracked(cfg, client, ticket,
+                                   plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
     if not ok:
         fail(client, ticket, f"Planning failed.\n\n```\n{tail(result)}\n```")
         return
@@ -533,8 +620,9 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     try:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         log_path = cfg.logs_dir / f"ticket-{ticket['id']}-implement-{ts}.log"
-        ok, summary = run_agent(cfg, implement_prompt(ticket, wt, plan, reviewer_notes),
-                                wt, "implement", log_path)
+        ok, summary = run_agent_tracked(cfg, client, ticket,
+                                        implement_prompt(ticket, wt, plan, reviewer_notes),
+                                        wt, "implement", log_path)
         if not ok:
             # An approved plan exists — hand back re-implementable so a timeout
             # doesn't throw the plan away and re-plan from scratch on retry.

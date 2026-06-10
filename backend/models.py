@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -51,6 +52,17 @@ class TicketPriority(str, enum.Enum):
 class NotificationType(str, enum.Enum):
     assigned = "assigned"
     commented = "commented"
+
+
+class AgentPhase(str, enum.Enum):
+    plan = "plan"
+    implement = "implement"
+    review = "review"
+
+
+class AgentRunStatus(str, enum.Enum):
+    succeeded = "succeeded"
+    failed = "failed"
 
 
 # --- Models ------------------------------------------------------------------
@@ -126,6 +138,35 @@ class Ticket(Base):
     activities = relationship(
         "Activity", cascade="all, delete-orphan"
     )
+    agent_runs = relationship(
+        "AgentRun", cascade="all, delete-orphan"
+    )
+
+
+class AgentRun(Base):
+    """One resolver phase (plan|implement|review) executed by an agent, with the
+    token usage and cost it consumed. Lets the app surface the otherwise-invisible
+    resolver work as an auditable, costed timeline per ticket.
+
+    Mirrors the per-phase `token_usage` audit event the resolver writes to its
+    JSONL log — this is the durable, app-visible copy of the same fact.
+    """
+    __tablename__ = "agent_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False, index=True)
+    agent = Column(String, nullable=False)        # "claude" | "opencode"
+    phase = Column(String, nullable=False)        # "plan" | "implement" | "review"
+    model = Column(String, nullable=False, default="")
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cache_read_tokens = Column(Integer, nullable=False, default=0)
+    cache_write_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd = Column(Float, nullable=False, default=0.0)
+    status = Column(String, nullable=False, default=AgentRunStatus.succeeded.value)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, default=utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class Comment(Base):

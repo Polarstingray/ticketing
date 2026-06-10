@@ -1,6 +1,6 @@
 """Pydantic request/response schemas."""
 from datetime import datetime, timezone
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer
 
@@ -144,6 +144,48 @@ class ActivityOut(BaseModel):
     actor: Optional[int] = Field(default=None, validation_alias="actor_id")
     action: str
     detail: Optional[dict] = None
+    created_at: UTCDateTime
+
+
+# --- Agent runs --------------------------------------------------------------
+# Allowed vocabularies are constrained via Literal so the resolver (or any caller)
+# can't write garbage phase/agent/status values — bad input is rejected with 422.
+
+AgentName = Literal["claude", "opencode"]
+AgentPhaseName = Literal["plan", "implement", "review"]
+AgentRunStatusName = Literal["succeeded", "failed"]
+
+
+class AgentRunCreate(BaseModel):
+    agent: AgentName
+    phase: AgentPhaseName
+    model: str = ""
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cache_read_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0)
+    status: AgentRunStatusName = "succeeded"
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+class AgentRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    ticket_id: int
+    agent: str
+    phase: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    cost_usd: float
+    status: str
+    started_at: Optional[UTCDateTime] = None
+    finished_at: UTCDateTime
     created_at: UTCDateTime
 
 
