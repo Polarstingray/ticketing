@@ -374,7 +374,13 @@ Auto-merge is never done — Claude only opens the PR; you approve and merge.
 - **Repo allowlist:** every target is `realpath`-resolved and must live inside
   `PROJECTS_ROOT`; traversal/symlink escapes are rejected (`config.py`).
 - **Isolated worktrees:** edits happen in `resolver/work/ticket-<id>`, removed
-  after each run; your main checkout and branch are untouched.
+  after each run; your main checkout and branch are untouched. The implement run
+  is *anchored* to the worktree (cwd/`--dir`), approved-plan paths are reanchored
+  from the main checkout to the worktree, and the runner warns if a run dirties the
+  main checkout. Note this is anchoring, **not** a hard sandbox: the implement
+  phase allows broad `Bash`, so a sufficiently determined/confused agent could still
+  `cd` elsewhere. For untrusted inputs, run the resolver as a least-privileged user
+  (or in a container) whose filesystem write access is limited to the repo.
 - **Read-only planning:** the plan phase grants only `Read/Glob/Grep` (no
   Edit/Write/Bash), so it cannot change anything; the implement phase gets the
   tools in `CLAUDE_IMPLEMENT_TOOLS`.
