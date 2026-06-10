@@ -170,6 +170,42 @@ def test_files_mentioned_in_plan_filters_to_existing(tmp_path):
     assert found == ["real.py"]  # deduped (incl. ./ prefix) and existence-filtered
 
 
+def test_files_mentioned_in_plan_skips_absolute(tmp_path):
+    (tmp_path / "real.py").write_text("pass\n")
+    # The absolute path exists on disk but must NOT be offered as a hint — a hint has
+    # to be worktree-relative so the implement agent stays inside the sandbox.
+    plan = f"Edit {tmp_path / 'real.py'} and also real.py"
+    assert rt._files_mentioned_in_plan(plan, tmp_path) == ["real.py"]
+
+
+def test_implement_prompt_reanchors_absolute_plan_paths(tmp_path):
+    main_repo = tmp_path / "ticketing"
+    wt = tmp_path / "ticketing" / "resolver" / "work" / "ticket-7"
+    plan = f"Edit {main_repo}/resolver/resolve_tickets.py to add the flag."
+    prompt = rt.implement_prompt(
+        {"id": 7, "title": "t", "description": "d"}, wt, plan=plan, main_repo=main_repo)
+    assert f"{wt}/resolver/resolve_tickets.py" in prompt
+    assert f"{main_repo}/resolver/resolve_tickets.py" not in prompt
+
+
+def test_reanchor_respects_path_boundary(tmp_path):
+    main_repo = Path("/home/u/repo")
+    wt = Path("/wt/ticket-1")
+    # "/home/u/repo/x" is rewritten; the sibling "/home/u/repo-backup/y" is left alone.
+    text = "edit /home/u/repo/x.py but not /home/u/repo-backup/y.py"
+    out = rt._reanchor(text, main_repo, wt)
+    assert "/wt/ticket-1/x.py" in out
+    assert "/home/u/repo-backup/y.py" in out
+
+
+def test_implement_prompt_main_repo_optional(tmp_path):
+    # Without main_repo, the plan text is passed through untouched (back-compat).
+    plan = f"Edit {tmp_path}/resolver/x.py"
+    prompt = rt.implement_prompt(
+        {"id": 1, "title": "t", "description": "d"}, tmp_path, plan=plan)
+    assert f"{tmp_path}/resolver/x.py" in prompt
+
+
 # --- per-phase model selection ------------------------------------------
 def test_model_for_falls_back_to_agent_model():
     cfg = SimpleNamespace(agent_model="base")
