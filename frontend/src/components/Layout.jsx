@@ -46,6 +46,9 @@ export default function Layout() {
           <NavLink to="/profile" className={linkClass}>
             Profile
           </NavLink>
+          <NavLink to="/settings" className={linkClass}>
+            Settings
+          </NavLink>
         </nav>
         <div className={styles.userbox}>
           <span className={styles.username}>{user?.display_name}</span>

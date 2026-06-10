@@ -12,6 +12,7 @@ from typing import Iterable, List
 
 from sqlalchemy.orm import Session
 
+from inbox import should_notify
 from models import Ticket, User, UserRole
 
 log = logging.getLogger("stingray.notifications")
@@ -79,9 +80,12 @@ def _ticket_link(ticket: Ticket) -> str:
 
 # --- High-level notifications ------------------------------------------------
 
-def notify_assignment(background, ticket: Ticket, assignee: User, actor: User) -> None:
+def notify_assignment(background, db: Session, ticket: Ticket, assignee: User, actor: User) -> None:
     """Email the assignee that a ticket was assigned to them."""
     if assignee is None or actor is not None and assignee.id == actor.id:
+        return
+    # Per-user email opt-out (default-on when no preference row exists).
+    if not should_notify(db, assignee.id, "assigned", channel="email"):
         return
     actor_name = actor.display_name if actor else "Someone"
     subject = f"You were assigned ticket #{ticket.id}: {ticket.title}"

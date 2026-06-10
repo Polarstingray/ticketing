@@ -84,6 +84,11 @@ export const api = {
   bulkDeleteNotifications: (ids) =>
     request("POST", "/notifications/bulk_delete", { ids }),
 
+  // Notification preferences (the settings panel). Both return the full matrix
+  // { items: [{ type, channel, enabled }] }.
+  getNotificationPreferences: () => request("GET", "/preferences"),
+  updateNotificationPreferences: (items) => request("PUT", "/preferences", { items }),
+
   listUsers: () => request("GET", "/users"),
   createUser: (body) => request("POST", "/users", body),
   updateUser: (id, body) => request("PATCH", `/users/${id}`, body),
