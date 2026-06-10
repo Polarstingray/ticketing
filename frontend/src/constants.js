@@ -22,6 +22,19 @@ export const TYPE_LABELS = {
   task: "Task",
 };
 
+// Reserved/control tags drive the resolver bot's automation (mirrors
+// backend/control_tags.py). Regular users can see but not edit these; the
+// backend is the real trust boundary and rejects attempts to set them.
+const RESERVED_TAG_PREFIXES = ["claude:", "repo:"];
+const RESERVED_TAG_EXACT = new Set(["dangerous", "fix"]);
+
+export function isReservedTag(tag) {
+  return (
+    RESERVED_TAG_EXACT.has(tag) ||
+    RESERVED_TAG_PREFIXES.some((p) => tag.startsWith(p))
+  );
+}
+
 // Human-readable predicate for an activity entry (the actor name is prepended by
 // the caller). `detail` shape depends on the action — see backend activity.py.
 export function describeActivity(entry) {
@@ -43,6 +56,12 @@ export function describeActivity(entry) {
       }`;
     case "commented":
       return "commented";
+    case "tags_changed": {
+      const parts = [];
+      if (d.added?.length) parts.push(`added ${d.added.join(", ")}`);
+      if (d.removed?.length) parts.push(`removed ${d.removed.join(", ")}`);
+      return parts.length ? `${parts.join(" and ")}` : "changed tags";
+    }
     default:
       return entry.action.replace(/_/g, " ");
   }
