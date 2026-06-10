@@ -17,7 +17,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from models import Notification, Ticket, User
+from models import Notification, NotificationPreference, Ticket, User
 
 
 def should_notify(
@@ -26,13 +26,25 @@ def should_notify(
     type: str,
     channel: str = "in_app",
 ) -> bool:
-    """Gate for whether a recipient should receive a notification of ``type``.
+    """Gate for whether a recipient should receive a notification of ``type`` on
+    ``channel``.
 
-    Currently always True. Future settings panel: consult a
-    ``NotificationPreference`` table keyed by (user_id, type, channel), treating a
-    missing row as enabled.
+    Consults the ``NotificationPreference`` table keyed by (user_id, type,
+    channel). Preferences are sparse and default-on: a missing row means enabled,
+    so only explicit opt-outs ever suppress a notification.
     """
-    return True
+    pref = (
+        db.query(NotificationPreference)
+        .filter(
+            NotificationPreference.user_id == user_id,
+            NotificationPreference.type == type,
+            NotificationPreference.channel == channel,
+        )
+        .first()
+    )
+    if pref is None:
+        return True
+    return pref.enabled
 
 
 def create_notification(

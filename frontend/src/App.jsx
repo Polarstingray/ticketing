@@ -8,6 +8,7 @@ import TicketDetail from "./pages/TicketDetail";
 import AdminUsers from "./pages/AdminUsers";
 import Notifications from "./pages/Notifications";
 import Profile from "./pages/Profile";
+import Settings from "./pages/Settings";
 
 function Protected({ children, adminOnly = false }) {
   const { user, loading } = useAuth();
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/tickets/:id" element={<TicketDetail />} />
         <Route path="/notifications" element={<Notifications />} />
         <Route path="/profile" element={<Profile />} />
+        <Route path="/settings" element={<Settings />} />
         <Route
           path="/admin/users"
           element={
