@@ -143,7 +143,8 @@ def audit_event(logger: logging.Logger, kind: str, message: str,
                 level: int = logging.INFO, **fields: Any) -> None:
     """Emit one structured audit line (→ JSONL) plus a human-readable line.
 
-    `kind` is the event class: 'subprocess' | 'api' | 'agent_tool' | 'phase'.
+    `kind` is the event class: 'subprocess' | 'api' | 'agent_tool' | 'phase' |
+    'token_usage'.
     """
     logger.log(level, message, extra={"audit": {"kind": kind, **fields}})
 

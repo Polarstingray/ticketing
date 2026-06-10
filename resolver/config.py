@@ -94,6 +94,11 @@ class Config:
     # --- agent invocation (agent-neutral; legacy CLAUDE_* names still honored) ---
     agent_bin: str
     agent_model: str
+    # Optional per-phase model overrides; each falls back to agent_model when blank.
+    # Lets the read-only plan/review phases run on a cheaper model than implement.
+    agent_plan_model: str
+    agent_implement_model: str
+    agent_review_model: str
     agent_fallback_model: str
     implement_tools: str
     agent_timeout: int
@@ -146,6 +151,13 @@ class Config:
             # CLAUDE_* names still work so existing Claude resolvers need no change.
             agent_bin=_env("AGENT_BIN", "CLAUDE_BIN", default="claude"),
             agent_model=_env("AGENT_MODEL", "CLAUDE_MODEL"),
+            # Per-phase model overrides. Each is empty by default and falls back to
+            # AGENT_MODEL (in model_for), so behavior is unchanged until one is set.
+            # Use them to run the read-only plan/review phases on a cheaper model and
+            # reserve the strongest model for implement.
+            agent_plan_model=_env("AGENT_PLAN_MODEL", default=""),
+            agent_implement_model=_env("AGENT_IMPLEMENT_MODEL", default=""),
+            agent_review_model=_env("AGENT_REVIEW_MODEL", default=""),
             # opencode-only: a stronger model to escalate to after the primary
             # fails a run with a transient provider error (overloaded/503). Empty
             # disables escalation (the primary is still retried once). Ignored by

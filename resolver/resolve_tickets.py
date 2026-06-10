@@ -466,14 +466,46 @@ def _claude_event(logger, ticket_id, line: str, result: dict) -> None:
         result.update(evt)
 
 
+def _emit_token_usage(logger, agent: str, mode: str, usage: dict) -> None:
+    """Record one phase's token usage as a `token_usage` audit event so cost can be
+    measured per agent/phase from the JSONL (no return-signature change needed).
+    `usage` carries the canonical fields; missing ones default to 0 so absence is
+    visible (and flags provider schema drift) rather than silently dropped."""
+    i = int(usage.get("input_tokens") or 0)
+    o = int(usage.get("output_tokens") or 0)
+    cr = int(usage.get("cache_read_tokens") or 0)
+    cw = int(usage.get("cache_write_tokens") or 0)
+    cost = float(usage.get("cost_usd") or 0.0)
+    audit.audit_event(
+        logger, "token_usage",
+        f"{agent} {mode}: in={i} out={o} cache_r={cr} cache_w={cw} cost=${cost:.4f}",
+        level=logging.INFO, agent=agent, mode=mode,
+        input_tokens=i, output_tokens=o,
+        cache_read_tokens=cr, cache_write_tokens=cw, cost_usd=cost,
+    )
+
+
+def model_for(cfg, mode: str) -> str:
+    """The model to use for `mode` ('plan'|'implement'|'review'): the per-phase
+    override if set, else the shared AGENT_MODEL. Read via getattr so a partial cfg
+    (the test SimpleNamespace, future runner templates) can't break."""
+    per = {
+        "plan": getattr(cfg, "agent_plan_model", ""),
+        "implement": getattr(cfg, "agent_implement_model", ""),
+        "review": getattr(cfg, "agent_review_model", ""),
+    }
+    return (per.get(mode) or "").strip() or (getattr(cfg, "agent_model", "") or "")
+
+
 def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
     """Run headless Claude, streaming its output so every tool call (Read/Write/
     Edit/Bash/...) is recorded as an `agent_tool` audit event. The raw stream is
     teed verbatim to `log_path`. mode is 'plan' (read-only) or 'implement'.
     Returns (ok, result_text)."""
     cmd = [cfg.agent_bin, "-p", prompt, "--output-format", "stream-json", "--verbose"]
-    if cfg.agent_model:
-        cmd += ["--model", cfg.agent_model]
+    model = model_for(cfg, mode)
+    if model:
+        cmd += ["--model", model]
     if mode in ("plan", "review"):
         # Read-only exploration (planning or code review). We deliberately do NOT
         # use --permission-mode plan: headless, that routes the plan through
@@ -506,6 +538,14 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
         # rather than reporting a silent success.
         logger.warning("claude produced no result event (rc=%s) — output schema drift?", rc)
         return rc == 0, result_text or f"claude exited {rc} with no result event"
+    u = result.get("usage") or {}
+    _emit_token_usage(logger, "claude", mode, {
+        "input_tokens": u.get("input_tokens"),
+        "output_tokens": u.get("output_tokens"),
+        "cache_write_tokens": u.get("cache_creation_input_tokens"),
+        "cache_read_tokens": u.get("cache_read_input_tokens"),
+        "cost_usd": result.get("total_cost_usd"),
+    })
     if result.get("is_error") or result.get("subtype") not in (None, "success"):
         return False, result_text or f"claude error (subtype={result.get('subtype')})"
     return rc == 0, result_text
@@ -572,6 +612,19 @@ def _opencode_event(logger, line: str, state: dict) -> None:
         if (part.get("reason") or evt.get("reason")) == "stop":
             state["stopped"] = True
             state["final"] = "".join(state.get("step_texts") or state.get("texts") or [])
+        # opencode emits one step_finish per step with per-step token/cost in
+        # `part.tokens` ({input, output, cache:{read,write}}) and `part.cost`;
+        # accumulate across steps. The schema is unverified in-tree (see the parser
+        # docstring), so read defensively — absent fields stay 0.
+        tok = part.get("tokens") or {}
+        cache = tok.get("cache") or {}
+        acc = state.setdefault(
+            "tokens", {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+        acc["input"] += int(tok.get("input") or 0)
+        acc["output"] += int(tok.get("output") or 0)
+        acc["cache_read"] += int(cache.get("read") or 0)
+        acc["cache_write"] += int(cache.get("write") or 0)
+        state["cost"] = state.get("cost", 0.0) + float(part.get("cost") or 0.0)
     elif etype == "error":
         state["error"] = evt.get("error") or {"name": "unknown"}
 
@@ -679,6 +732,14 @@ def _run_opencode_once(cfg: Config, prompt: str, cwd: Path, mode: str,
         msg += (f"\n\nRelevant log entries:\n```\n{log_summary}\n```" if log_summary else
                 " Check the opencode logs under ~/.local/share/opencode/log.")
         return False, msg, True, cmd
+    tok = state.get("tokens") or {}
+    _emit_token_usage(logger, "opencode", mode, {
+        "input_tokens": tok.get("input"),
+        "output_tokens": tok.get("output"),
+        "cache_read_tokens": tok.get("cache_read"),
+        "cache_write_tokens": tok.get("cache_write"),
+        "cost_usd": state.get("cost"),
+    })
     return rc == 0, result_text, False, cmd
 
 
@@ -690,7 +751,7 @@ def run_opencode(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path)
     failures (launch error, timeout, auth) and successes return immediately.
     Returns (ok, result_text)."""
     logger = audit.get_logger()
-    primary = cfg.agent_model
+    primary = model_for(cfg, mode)
     models = [primary, primary]  # primary, then one retry of the primary
     if cfg.agent_fallback_model and cfg.agent_fallback_model != primary:
         models.append(cfg.agent_fallback_model)
@@ -823,6 +884,33 @@ def remove_worktree(repo: Path, wt: Path) -> None:
 
 
 # --- prompts -------------------------------------------------------------
+# Path-like tokens in plan text: either something containing a slash and an
+# extension, or a bare filename with a known source extension.
+_PLAN_PATH = re.compile(
+    r"(?<![\w/.])("
+    r"[\w.\-/]+/[\w.\-]+\.\w+"
+    r"|[\w.\-]+\.(?:py|jsx?|tsx?|css|html?|md|json|ya?ml|toml|cfg|ini|sh|sql|env)"
+    r")")
+
+
+def _files_mentioned_in_plan(plan: str, repo: Path, limit: int = 20) -> list[str]:
+    """Repo-relative paths named in the approved plan that actually exist under
+    `repo`. The existence filter is the safety guard — it keeps a hallucinated or
+    illustrative path from misdirecting the implement agent. Order-preserving, deduped."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _PLAN_PATH.finditer(plan or ""):
+        rel = m.group(1).lstrip("./")
+        if not rel or rel in seen:
+            continue
+        if (repo / rel).exists():
+            seen.add(rel)
+            out.append(rel)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
     p = [
         f"You are resolving Stingray ticket #{ticket['id']} in the repository at {repo}.",
@@ -881,6 +969,11 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
     ]
     if plan:
         p += ["Implement this APPROVED plan:", "", plan, ""]
+        hints = _files_mentioned_in_plan(plan, repo)
+        if hints:
+            p += ["Likely-relevant files (named in the approved plan — start here, but",
+                  "verify against the actual code):",
+                  *(f"- {h}" for h in hints), ""]
     if reviewer_notes:
         p += [
             "A reviewer looked at your existing PR branch and requested these "
