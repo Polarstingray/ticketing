@@ -11,6 +11,7 @@ from database import get_db
 from inbox import create_notification
 from models import (
     Activity,
+    AgentRun,
     Ticket,
     TicketPriority,
     TicketStatus,
@@ -21,6 +22,8 @@ from models import (
 from notifications import notify_assignment, notify_new_ticket_admins
 from schemas import (
     ActivityOut,
+    AgentRunCreate,
+    AgentRunOut,
     PaginatedTickets,
     TicketCreate,
     TicketOut,
@@ -242,6 +245,68 @@ def list_activity(
         db.query(Activity)
         .filter(Activity.ticket_id == ticket_id)
         .order_by(Activity.created_at.asc(), Activity.id.asc())
+        .all()
+    )
+
+
+@router.post(
+    "/{ticket_id}/agent-runs",
+    response_model=AgentRunOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_agent_run(
+    ticket_id: int,
+    payload: AgentRunCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Record one resolver phase (its model, token usage, cost, status).
+
+    Posted by the resolver (authenticating as the claude-bot via X-API-Key) as it
+    finishes each phase. We gate on `can_modify_ticket`: during a run the bot is
+    the ticket's assignee, so it passes; a random member who can't touch the
+    ticket can't forge runs against it. (Admins also pass, which is fine for
+    backfills/manual entry.)
+    """
+    ticket = _get_ticket_or_404(ticket_id, db)
+    if not can_modify_ticket(user, ticket):
+        raise HTTPException(status_code=403, detail="Not permitted to modify this ticket")
+
+    run = AgentRun(
+        ticket_id=ticket.id,
+        agent=payload.agent,
+        phase=payload.phase,
+        model=payload.model,
+        input_tokens=payload.input_tokens,
+        output_tokens=payload.output_tokens,
+        cache_read_tokens=payload.cache_read_tokens,
+        cache_write_tokens=payload.cache_write_tokens,
+        cost_usd=payload.cost_usd,
+        status=payload.status,
+        started_at=payload.started_at,
+        # Default the completion time server-side if the caller omits it.
+        finished_at=payload.finished_at or utcnow(),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@router.get("/{ticket_id}/agent-runs", response_model=list[AgentRunOut])
+def list_agent_runs(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ticket = _get_ticket_or_404(ticket_id, db)
+    # 404 (not 403) so non-members can't probe ticket existence — same as get_ticket.
+    if not can_view_ticket(user, ticket):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
+    return (
+        db.query(AgentRun)
+        .filter(AgentRun.ticket_id == ticket_id)
+        .order_by(AgentRun.started_at.asc().nullslast(), AgentRun.id.asc())
         .all()
     )
 

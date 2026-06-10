@@ -53,10 +53,21 @@ def _migrate_archived(engine: Engine) -> None:
     _add_column(engine, "tickets", "archived", "BOOLEAN NOT NULL DEFAULT 0")
 
 
+def _migrate_agent_runs(engine: Engine) -> None:
+    """agent_runs table — added with resolver token-usage surfacing (#56).
+
+    A brand-new table, so `create_all` already builds it on a fresh DB; this
+    step backfills it on a database that predates the model. `checkfirst=True`
+    makes it a no-op when the table already exists (idempotent)."""
+    from models import AgentRun
+    AgentRun.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
     _migrate_archived,
+    _migrate_agent_runs,
 ]
 
 
