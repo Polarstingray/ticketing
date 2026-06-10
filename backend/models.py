@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -51,6 +52,13 @@ class TicketPriority(str, enum.Enum):
 class NotificationType(str, enum.Enum):
     assigned = "assigned"
     commented = "commented"
+
+
+class NotificationChannel(str, enum.Enum):
+    """Where a notification is delivered. ``in_app`` is the bell/inbox;
+    ``email`` is the SMTP path in ``notifications.py``."""
+    in_app = "in_app"
+    email = "email"
 
 
 # --- Models ------------------------------------------------------------------
@@ -166,6 +174,26 @@ class Notification(Base):
     comment_id = Column(Integer, nullable=True)
     read = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class NotificationPreference(Base):
+    """A single user's opt-out for one (type, channel) pair.
+
+    Rows are sparse and default-on: the absence of a row means "enabled", so we
+    only ever store explicit overrides. ``inbox.should_notify`` consults this
+    table — a missing row, or ``enabled=True``, lets the notification through.
+    The unique constraint keeps it to at most one row per (user, type, channel).
+    """
+    __tablename__ = "notification_preferences"
+    __table_args__ = (
+        UniqueConstraint("user_id", "type", "channel", name="uq_notif_pref"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(String, nullable=False)     # NotificationType value
+    channel = Column(String, nullable=False)  # NotificationChannel value
+    enabled = Column(Boolean, nullable=False, default=True)
 
 
 class Activity(Base):

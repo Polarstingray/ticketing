@@ -1,0 +1,60 @@
+.wrap {
+  max-width: 620px;
+}
+.wrap h1 {
+  font-size: 20px;
+  margin: 0 0 18px;
+}
+.h2 {
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 12px 0 16px;
+}
+.grid th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.grid th.channel {
+  text-align: center;
+}
+.grid td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.grid td.toggle {
+  text-align: center;
+}
+.grid input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.typeName {
+  font-weight: 500;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.actions button {
+  width: auto;
+}
+.saved {
+  color: #4ade80;
+  font-size: 13px;
+}
