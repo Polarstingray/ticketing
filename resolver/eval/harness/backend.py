@@ -95,6 +95,10 @@ def start_backend(db_path: Path, python: str | None = None) -> BackendHandle:
 
     env = dict(os.environ)
     env["DATABASE_PATH"] = str(db_path)
+    # The backend recognizes the resolver bot by id (control_tags.RESOLVER_BOT_USER_ID,
+    # read from ITS env) to let it manage reserved claude:*/repo: tags. Without this the
+    # bot's state-machine PATCHes are rejected 422 and nothing ever plans.
+    env["RESOLVER_BOT_USER_ID"] = str(bot_id)
     # Keep the dev defaults (the startup security checks only bite when APP_ENV looks
     # like prod or COOKIE_SECURE=true); we want neither here.
     env.pop("APP_ENV", None)

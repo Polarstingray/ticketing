@@ -65,7 +65,16 @@ def _git(repo: Path, *args: str) -> None:
 
 
 def seed_repo(src: Path, dst: Path) -> None:
-    """Copy a fixture repo into the sandbox and make it a git repo with one commit."""
+    """Copy a fixture repo into the sandbox and make it a git repo with one commit and a
+    local bare `origin`.
+
+    The origin matters: with no remote, the resolver's resolve_base() falls back to the
+    symbolic ref "HEAD", so its post-implement ahead-count becomes `HEAD..HEAD` (always 0)
+    and a correct change is misreported as "no code changes". Real targets always have an
+    origin (origin/main is a stable base), so we mirror that. The origin is a plain local
+    bare repo — `gh pr create` against it fails fast and the resolver falls back to its
+    "pushed to a local branch" path, which is exactly what we score off.
+    """
     if dst.exists():
         return
     shutil.copytree(src, dst)
@@ -73,6 +82,12 @@ def seed_repo(src: Path, dst: Path) -> None:
     _git(dst, "-c", "user.name=eval", "-c", "user.email=eval@eval.local", "add", "-A")
     _git(dst, "-c", "user.name=eval", "-c", "user.email=eval@eval.local",
          "commit", "-q", "-m", "fixture baseline")
+    bare = dst.parent / f"{dst.name}.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(dst), str(bare)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _git(dst, "remote", "add", "origin", str(bare))
+    _git(dst, "fetch", "-q", "origin")          # populates refs/remotes/origin/main
+    _git(dst, "remote", "set-head", "origin", "main")
 
 
 def write_env_file(path: Path, *, base_url: str, bot_key: str, bot_id: int,
