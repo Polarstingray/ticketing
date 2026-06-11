@@ -87,6 +87,8 @@ export default function Profile() {
 
       <div className="card" style={{ marginBottom: 18 }}>
         <dl className={styles.info}>
+          <dt>User ID</dt>
+          <dd>{user.id}</dd>
           <dt>Display name</dt>
           <dd>{user.display_name}</dd>
           <dt>Username</dt>
