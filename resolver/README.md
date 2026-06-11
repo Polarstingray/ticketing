@@ -302,6 +302,28 @@ ticket carries the `code_blocks`. Set `REVIEW_API_URL` / `REVIEW_API_KEY` /
 Mistral, OpenRouter) and reviews run as a single chat completion instead of the
 opencode agent loop, sidestepping the loop's fragility. Unset = review via the agent.
 
+## Verification gate (optional)
+
+The implement phase trusts the agent to run tests. To verify independently, set
+`VERIFY_COMMAND` — a shell command the resolver runs **in the worktree** after the
+implement run. If it fails, the resolver feeds the output back and re-invokes the agent
+to repair, in-process, up to `VERIFY_MAX_RETRIES` times (default 1). If it still fails,
+the PR / hand-back is published anyway but prefixed with a **⚠️ Tests failing** banner
+(in both the comment and PR body) so a human takes over — work is never discarded. Blank
+`VERIFY_COMMAND` = gate off (publish as soon as there's a diff). `VERIFY_TIMEOUT`
+(default 900s) bounds each run.
+
+> **Worktree-env gotcha:** the gate runs in a fresh `git worktree`, which does **not**
+> contain gitignored artifacts like `.venv` or `node_modules`. Make the command
+> self-contained — an absolute interpreter path, `uv run`, or a venv bootstrap. A
+> command that can't find its environment just fails verification and surfaces as a
+> flagged publish. Example:
+> `VERIFY_COMMAND=cd backend && /abs/.venv/bin/pytest -q --rootdir=$PWD -p no:cacheprovider`
+>
+> A repair run is a full agent run, so each retry costs tokens/time; the default of 1
+> keeps it bounded. Repair runs are subject to the same worktree-escape hard-stop as the
+> first run.
+
 > **Read-only safety:** the plan phase runs opencode's permission-restricted
 > `plan` agent and does **not** pass `--dangerously-skip-permissions`, so it
 > cannot edit files or run shell — the same two-gate guarantee Claude gets. The

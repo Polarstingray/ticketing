@@ -60,6 +60,7 @@ FAIL_MARKER = "⚠️ Resolver could not complete"
 FILED_MARKER = "🎫 Filed from `/ticket`"
 REVIEW_MARKER = "🔎 **Code review**"
 ESCALATE_MARKER = "⤴️ **Routed to Claude**"
+VERIFY_FAIL_MARKER = "⚠️ **Tests failing**"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Per-event audit truncation, set from config at sweep start (see main()).
@@ -1257,7 +1258,8 @@ def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
 
 def implement_prompt(ticket: dict, repo: Path, plan: str | None,
                      reviewer_notes: str | None = None,
-                     main_repo: "Path | None" = None) -> str:
+                     main_repo: "Path | None" = None,
+                     verify_feedback: str | None = None) -> str:
     # The plan/reviewer notes were written against the main checkout and carry its
     # absolute paths; reanchor them to this worktree so the agent doesn't follow
     # them out of the sandbox and edit the real tree. main_repo defaults to None
@@ -1324,6 +1326,18 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
             "changes — address them on top of the work already on the branch:",
             "",
             reviewer_notes,
+            "",
+        ]
+    if verify_feedback:
+        # A repair pass: the agent's own edits are already in this working tree, but the
+        # resolver's verification command failed. Frame it accordingly so the agent fixes
+        # what's there rather than re-implementing from scratch.
+        p += [
+            "Your previous changes are ALREADY APPLIED in this working tree, but the "
+            "automated verification command FAILED with the output below. Fix the "
+            "failures without changing unrelated behavior, then stop:",
+            "",
+            verify_feedback,
             "",
         ]
     p += [
@@ -1437,6 +1451,21 @@ def filed_tickets_in_log(log_path: Path) -> list[int]:
     return seen
 
 
+def _run_verify(cfg: Config, wt: Path) -> tuple[bool, str]:
+    """Run the configured VERIFY_COMMAND as a shell command in the worktree to confirm
+    the implement run's changes pass. Unlike run() (argv, no shell) this is shell=True
+    because the command is an operator-supplied string (e.g. `cd backend && pytest`).
+    Returns (passed, output_tail) with stdout+stderr combined."""
+    try:
+        proc = subprocess.run(
+            cfg.verify_command, shell=True, cwd=str(wt),
+            capture_output=True, text=True, timeout=cfg.verify_timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"verification timed out after {cfg.verify_timeout}s"
+    output = (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode == 0, tail(output)
+
+
 def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                  plan: str | None, reviewer_notes: str | None = None) -> None:
     set_state(client, ticket, [TAG_IMPLEMENTING])
@@ -1480,6 +1509,55 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             fail(client, ticket, f"Implementation failed.\n\n```\n{tail(summary)}\n```",
                  reimplementable=True)
             return
+
+        # Verification gate: independently confirm the agent's changes pass before
+        # publishing. On failure, re-invoke the agent in the SAME worktree with the test
+        # output up to verify_max_retries times; if it still fails, publish anyway but
+        # prepend a loud banner so a human takes over (work is never discarded). The gate
+        # is off when verify_command is empty (legacy publish-on-diff behavior).
+        verify_banner = ""
+        if cfg.verify_command:
+            tid = ticket["id"]
+            for attempt in range(cfg.verify_max_retries + 1):
+                passed, vout = _run_verify(cfg, wt)
+                if passed:
+                    phase("verify-passed", ticket, f"#{tid}: verification passed")
+                    break
+                if attempt < cfg.verify_max_retries:
+                    phase("verify-retry", ticket,
+                          f"#{tid}: verification failed, repair attempt {attempt + 1}")
+                    rts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                    rlog = cfg.logs_dir / f"ticket-{tid}-implement-repair{attempt + 1}-{rts}.log"
+                    ok, summary = run_agent_tracked(
+                        cfg, client, ticket,
+                        implement_prompt(ticket, wt, plan, reviewer_notes,
+                                         main_repo=repo, verify_feedback=vout),
+                        wt, "implement", rlog)
+                    # A repair run can escape the worktree too — re-check against the
+                    # pre-run snapshot and hard-fail just like the first run.
+                    escaped = _tracked_dirty(repo) - dirty_before
+                    if escaped:
+                        _handle_escape(repo, escaped, ticket)
+                        fail(client, ticket,
+                             f"{agent_label} escaped its worktree during a verification "
+                             "repair run; aborting without publishing.",
+                             reimplementable=True)
+                        return
+                    if not ok:
+                        fail(client, ticket,
+                             f"Verification repair run failed.\n\n```\n{tail(summary)}\n```",
+                             reimplementable=True)
+                        return
+                else:
+                    verify_banner = (
+                        f"{VERIFY_FAIL_MARKER} — the verification command "
+                        f"`{cfg.verify_command}` still fails after "
+                        f"{cfg.verify_max_retries} repair attempt(s). A human should "
+                        f"review before merging.\n\n```\n{vout}\n```\n\n")
+                    phase("verify-failed-published", ticket,
+                          f"#{tid}: tests still failing after repairs — publishing flagged")
+        if verify_banner:
+            summary = verify_banner + summary
 
         run(["git", "-C", str(wt), "add", "-A"])
         # Set the committer identity explicitly: on a host with no global git

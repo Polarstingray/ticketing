@@ -306,6 +306,143 @@ def test_do_implement_hard_fails_on_worktree_escape(fake_cfg, monkeypatch, tmp_p
     assert "escaped its worktree" in failed["msg"]
 
 
+# --- verification gate ---------------------------------------------------
+def test_run_verify_maps_returncode_and_timeout(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.verify_command = "pytest -q"
+    calls = {}
+
+    class _Proc:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    def fake_sub(cmd, **kw):
+        calls.update(cmd=cmd, kw=kw)
+        return _Proc(0, "ok\n")
+
+    monkeypatch.setattr(rt.subprocess, "run", fake_sub)
+    passed, out = rt._run_verify(fake_cfg, tmp_path)
+    assert passed is True and "ok" in out
+    assert calls["cmd"] == "pytest -q"
+    assert calls["kw"]["shell"] is True and calls["kw"]["cwd"] == str(tmp_path)
+
+    monkeypatch.setattr(rt.subprocess, "run", lambda cmd, **kw: _Proc(1, "", "boom\n"))
+    passed, out = rt._run_verify(fake_cfg, tmp_path)
+    assert passed is False and "boom" in out
+
+    def raise_timeout(cmd, **kw):
+        raise rt.subprocess.TimeoutExpired(cmd, fake_cfg.verify_timeout)
+
+    monkeypatch.setattr(rt.subprocess, "run", raise_timeout)
+    passed, out = rt._run_verify(fake_cfg, tmp_path)
+    assert passed is False and "timed out" in out
+
+
+def _impl_harness(fake_cfg, monkeypatch, tmp_path, agent_results, verify_results):
+    """Wire do_implement's externals for the verify-gate tests. `agent_results` is an
+    iterator of (ok, summary) for successive run_agent_tracked calls; `verify_results`
+    an iterator of (passed, output) for successive _run_verify calls. Returns dicts
+    recording the agent prompts, the publish summary, and any fail() call."""
+    wt = tmp_path / "wt"
+    monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "has_origin", lambda repo: False)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # never escapes
+    monkeypatch.setattr(rt, "_run_verify", lambda cfg, wt: next(verify_results))
+
+    rec = {"prompts": []}
+
+    def fake_agent(cfg, client, ticket, prompt, *a, **k):
+        rec["prompts"].append(prompt)
+        return next(agent_results)
+
+    monkeypatch.setattr(rt, "run_agent_tracked", fake_agent)
+    # commit/diff plumbing: report one commit ahead so it isn't the "no changes" branch.
+    monkeypatch.setattr(rt, "run",
+                        lambda cmd, cwd=None, timeout=None: (0, "1") if "rev-list" in cmd else (0, ""))
+    monkeypatch.setattr(rt, "publish",
+                        lambda cfg, cl, t, repo, wt, br, base, bb, summary, stat, **k:
+                        rec.update(published=summary))
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: rec.update(failed=(msg, k)))
+    return rec
+
+
+def test_do_implement_gate_disabled_publishes_directly(fake_cfg, monkeypatch, tmp_path):
+    # verify_command empty (default) → gate skipped, _run_verify never called.
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "did it")]), verify_results=iter([]))
+    # _impl_harness wires _run_verify to an iterator; harden the assertion by replacing
+    # it with a guard that fails loudly if the disabled gate ever calls it.
+    monkeypatch.setattr(rt, "_run_verify",
+                        lambda *a, **k: pytest.fail("gate must not run when disabled"))
+    ticket = {"id": 1, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert rec["published"] == "did it"
+    assert rt.VERIFY_FAIL_MARKER not in rec["published"]
+
+
+def test_do_implement_verify_passes_first_try(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.verify_command = "pytest"
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "did it")]),
+                        verify_results=iter([(True, "")]))
+    ticket = {"id": 2, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert rec["published"] == "did it"
+    assert len(rec["prompts"]) == 1            # no repair run
+    assert "failed" not in rec
+
+
+def test_do_implement_verify_fail_then_pass(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.verify_command = "pytest"
+    fake_cfg.verify_max_retries = 1
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "first"), (True, "repaired")]),
+                        verify_results=iter([(False, "ASSERT boom"), (True, "")]))
+    ticket = {"id": 3, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert len(rec["prompts"]) == 2                     # one repair run happened
+    assert "ASSERT boom" in rec["prompts"][1]           # failure fed back to the agent
+    assert "ALREADY APPLIED" in rec["prompts"][1]       # repair framing
+    assert rt.VERIFY_FAIL_MARKER not in rec["published"]  # ended green
+    assert "failed" not in rec
+
+
+def test_do_implement_verify_exhausted_publishes_flagged(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.verify_command = "pytest"
+    fake_cfg.verify_max_retries = 1
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "first"), (True, "second")]),
+                        verify_results=iter([(False, "boom1"), (False, "boom2")]))
+    ticket = {"id": 4, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert len(rec["prompts"]) == 2                  # initial + one repair, then give up
+    assert rt.VERIFY_FAIL_MARKER in rec["published"]  # flagged, but still published
+    assert "boom2" in rec["published"]
+    assert "failed" not in rec                        # publish-flagged, not a hard fail
+
+
+def test_do_implement_repair_escape_hard_fails(fake_cfg, monkeypatch, tmp_path):
+    # A repair run that escapes the worktree must hard-fail, not publish.
+    fake_cfg.verify_command = "pytest"
+    fake_cfg.verify_max_retries = 1
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "first"), (True, "repair")]),
+                        verify_results=iter([(False, "boom")]))
+    # Override _tracked_dirty: clean before + after initial run, dirty after the repair.
+    snaps = iter([set(), set(), {" M backend/x.py"}])
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: next(snaps))
+    monkeypatch.setattr(rt, "_handle_escape", lambda repo, escaped, ticket: True)
+    monkeypatch.setattr(rt, "publish", lambda *a, **k: pytest.fail("must not publish after escape"))
+    ticket = {"id": 5, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert rec["failed"][1].get("reimplementable") is True
+    assert "escaped its worktree" in rec["failed"][0]
+
+
 # --- per-phase model selection ------------------------------------------
 def test_model_for_falls_back_to_agent_model():
     cfg = SimpleNamespace(agent_model="base")
