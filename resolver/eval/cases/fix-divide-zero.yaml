@@ -1,0 +1,22 @@
+id: fix-divide-zero
+title: "divide() should raise ValueError on division by zero"
+description: |
+  `calc.divide(a, b)` currently raises a bare `ZeroDivisionError` when `b == 0`. Change
+  it to raise a `ValueError` with a clear message (e.g. "cannot divide by zero") instead.
+  Normal division must keep working unchanged.
+type: task
+priority: medium
+repo: sandbox
+acceptance:
+  command: "python -m pytest tests/test_acceptance.py -q"
+  files:
+    tests/test_acceptance.py: |
+      import pytest
+      from calc import divide
+
+      def test_divide_normal():
+          assert divide(6, 2) == 3
+
+      def test_divide_by_zero_raises_value_error():
+          with pytest.raises(ValueError):
+              divide(1, 0)

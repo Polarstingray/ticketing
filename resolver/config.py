@@ -112,6 +112,13 @@ class Config:
     agent_plan_model: str
     agent_implement_model: str
     agent_review_model: str
+    # Difficulty-routed implement tiers: when the plan self-assesses an `easy`/`hard`
+    # ticket, the implement phase swaps to these instead of agent_implement_model.
+    # Blank = no swap (fall back to agent_implement_model -> agent_model), so routing
+    # is opt-in. `hard` only swaps when escalation is disabled; otherwise hard tickets
+    # escalate to escalate_to_user_id. See parse_difficulty / do_implement.
+    agent_implement_model_easy: str
+    agent_implement_model_hard: str
     agent_fallback_model: str
     # Ordered list of models to try after the primary before giving up (and handing
     # the ticket back / to another resolver). Parsed from AGENT_FALLBACK_MODELS
@@ -163,6 +170,21 @@ class Config:
     review_api_url: str
     review_api_key: str
     review_api_model: str
+    # --- free-resolver: plan-critique gate -------------------------------------
+    # When all three are set, a cheap chat-completion model vets each freshly
+    # produced plan before the human sees it (see run_critique). On a REVISE verdict
+    # the planner is re-invoked with the critique notes, up to critique_max_revisions
+    # times. Empty disables the gate. Same OpenAI-compatible shape as review_api_*.
+    critique_api_url: str
+    critique_api_key: str
+    critique_api_model: str
+    critique_max_revisions: int
+    # Verification gate: a shell command the resolver runs in the worktree after an
+    # implement run to confirm the agent's changes actually pass. Empty disables the
+    # gate (implement publishes as soon as there's a diff, the legacy behavior).
+    verify_command: str
+    verify_timeout: int
+    verify_max_retries: int
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
@@ -197,6 +219,9 @@ class Config:
             agent_plan_model=_env("AGENT_PLAN_MODEL", default=""),
             agent_implement_model=_env("AGENT_IMPLEMENT_MODEL", default=""),
             agent_review_model=_env("AGENT_REVIEW_MODEL", default=""),
+            # Difficulty-routed implement tiers (blank = no swap). See do_implement.
+            agent_implement_model_easy=_env("AGENT_IMPLEMENT_MODEL_EASY", default=""),
+            agent_implement_model_hard=_env("AGENT_IMPLEMENT_MODEL_HARD", default=""),
             # opencode-only: a stronger model to escalate to after the primary
             # fails a run with a transient provider error (overloaded/503). Empty
             # disables escalation. Ignored by the Claude runner. Kept for back-compat;
@@ -280,6 +305,21 @@ class Config:
             review_api_url=_env("REVIEW_API_URL", default=""),
             review_api_key=_env("REVIEW_API_KEY", default=""),
             review_api_model=_env("REVIEW_API_MODEL", default=""),
+            # Plan-critique gate (direct OpenAI-compatible chat completion). All three
+            # set ⇒ gate on; a REVISE verdict re-plans up to CRITIQUE_MAX_REVISIONS times.
+            critique_api_url=_env("CRITIQUE_API_URL", default=""),
+            critique_api_key=_env("CRITIQUE_API_KEY", default=""),
+            critique_api_model=_env("CRITIQUE_API_MODEL", default=""),
+            critique_max_revisions=int(os.environ.get("CRITIQUE_MAX_REVISIONS", "1")),
+            # Verification gate. VERIFY_COMMAND is a shell string run in the worktree
+            # (e.g. `cd backend && .venv/bin/pytest -q`); empty disables the gate. Note
+            # the worktree is a FRESH checkout with no gitignored .venv/node_modules, so
+            # the command must be self-contained. On failure the resolver re-invokes the
+            # implement agent with the output up to VERIFY_MAX_RETRIES times, then
+            # publishes flagged.
+            verify_command=_env("VERIFY_COMMAND", default=""),
+            verify_timeout=int(os.environ.get("VERIFY_TIMEOUT", "900")),
+            verify_max_retries=int(os.environ.get("VERIFY_MAX_RETRIES", "1")),
         )
         cfg.logs_dir.mkdir(exist_ok=True)
         if not cfg.projects_root.is_dir():

@@ -302,6 +302,49 @@ ticket carries the `code_blocks`. Set `REVIEW_API_URL` / `REVIEW_API_KEY` /
 Mistral, OpenRouter) and reviews run as a single chat completion instead of the
 opencode agent loop, sidestepping the loop's fragility. Unset = review via the agent.
 
+## Plan-critique gate (optional)
+
+The plan phase trusts the planner to produce a complete, implementable plan; a weak plan
+(wrong files, vague steps, a misread requirement) isn't caught until the expensive
+implement run has already burned a strong model on it. Set `CRITIQUE_API_URL` /
+`CRITIQUE_API_KEY` / `CRITIQUE_API_MODEL` (any OpenAI-compatible `/chat/completions`
+endpoint — point it at a cheap, fast model) and a **cheap model vets each freshly
+produced plan before the human sees it**. It answers `VERDICT: APPROVE` or
+`VERDICT: REVISE`; on REVISE the planner is re-invoked with the critique's notes, up to
+`CRITIQUE_MAX_REVISIONS` times (default 1), and the verdict is appended to the plan
+comment so the reviewer sees it. It runs **inside the plan phase**, before the
+`/approve` hand-back — no extra ticket state.
+
+It is **fail-open**: a quota'd, flaky, or unparseable critique never blocks a plan that
+was actually produced (the resolver proceeds with the plan it has). Blank `CRITIQUE_API_*`
+= gate off (plans go straight to the human — the legacy behavior). Each REVISE costs an
+extra (cheap) critique call plus a full re-plan agent run, so keep `CRITIQUE_MAX_REVISIONS`
+small. The critique's token usage is recorded both as a `token_usage` audit event and as
+a first-class `AgentRun` (`agent=critique-api`, `phase=plan-critique`), so its cost shows
+on the ticket like any other phase.
+
+## Verification gate (optional)
+
+The implement phase trusts the agent to run tests. To verify independently, set
+`VERIFY_COMMAND` — a shell command the resolver runs **in the worktree** after the
+implement run. If it fails, the resolver feeds the output back and re-invokes the agent
+to repair, in-process, up to `VERIFY_MAX_RETRIES` times (default 1). If it still fails,
+the PR / hand-back is published anyway but prefixed with a **⚠️ Tests failing** banner
+(in both the comment and PR body) so a human takes over — work is never discarded. Blank
+`VERIFY_COMMAND` = gate off (publish as soon as there's a diff). `VERIFY_TIMEOUT`
+(default 900s) bounds each run.
+
+> **Worktree-env gotcha:** the gate runs in a fresh `git worktree`, which does **not**
+> contain gitignored artifacts like `.venv` or `node_modules`. Make the command
+> self-contained — an absolute interpreter path, `uv run`, or a venv bootstrap. A
+> command that can't find its environment just fails verification and surfaces as a
+> flagged publish. Example:
+> `VERIFY_COMMAND=cd backend && /abs/.venv/bin/pytest -q --rootdir=$PWD -p no:cacheprovider`
+>
+> A repair run is a full agent run, so each retry costs tokens/time; the default of 1
+> keeps it bounded. Repair runs are subject to the same worktree-escape hard-stop as the
+> first run.
+
 > **Read-only safety:** the plan phase runs opencode's permission-restricted
 > `plan` agent and does **not** pass `--dangerously-skip-permissions`, so it
 > cannot edit files or run shell — the same two-gate guarantee Claude gets. The

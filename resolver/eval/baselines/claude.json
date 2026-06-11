@@ -1,0 +1,67 @@
+{
+  "generated_at": "2026-06-11T07:18:04.448718+00:00",
+  "meta": {
+    "agent": "claude",
+    "model": "",
+    "cases": 3
+  },
+  "summary": {
+    "cases": 3,
+    "produced": 3,
+    "passed": 3,
+    "pass_rate": 1.0,
+    "total_cost_usd": 1.052372,
+    "total_tokens": 566069,
+    "mean_wall_s": 398.0
+  },
+  "cases": [
+    {
+      "id": "add-average",
+      "ticket_id": 1,
+      "outcome": "produced",
+      "accept_pass": true,
+      "n_runs": 2,
+      "tokens": 187173,
+      "cost_usd": 0.309262,
+      "phases": [
+        "plan:succeeded",
+        "implement:succeeded"
+      ],
+      "wall_s": 397.9,
+      "branch": "claude/ticket-1",
+      "accept_output": "..                                                                       [100%]\n2 passed in 0.02s\n"
+    },
+    {
+      "id": "add-multiply",
+      "ticket_id": 2,
+      "outcome": "produced",
+      "accept_pass": true,
+      "n_runs": 2,
+      "tokens": 196564,
+      "cost_usd": 0.443165,
+      "phases": [
+        "plan:succeeded",
+        "implement:succeeded"
+      ],
+      "wall_s": 397.3,
+      "branch": "claude/ticket-2",
+      "accept_output": ".                                                                        [100%]\n1 passed in 0.02s\n"
+    },
+    {
+      "id": "fix-divide-zero",
+      "ticket_id": 3,
+      "outcome": "produced",
+      "accept_pass": true,
+      "n_runs": 2,
+      "tokens": 182332,
+      "cost_usd": 0.299945,
+      "phases": [
+        "plan:succeeded",
+        "implement:succeeded"
+      ],
+      "wall_s": 398.8,
+      "branch": "claude/ticket-3",
+      "accept_output": "..                                                                       [100%]\n2 passed in 0.02s\n"
+    }
+  ]
+}

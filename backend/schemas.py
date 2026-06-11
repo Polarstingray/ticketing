@@ -206,8 +206,10 @@ class ActivityOut(BaseModel):
 # Allowed vocabularies are constrained via Literal so the resolver (or any caller)
 # can't write garbage phase/agent/status values — bad input is rejected with 422.
 
-AgentName = Literal["claude", "opencode"]
-AgentPhaseName = Literal["plan", "implement", "review"]
+# "review-api"/"critique-api" are the direct chat-completion backends (no agent loop):
+# single-shot reviews and the plan-critique gate. They POST runs like the agents do.
+AgentName = Literal["claude", "opencode", "review-api", "critique-api"]
+AgentPhaseName = Literal["plan", "implement", "review", "plan-critique"]
 AgentRunStatusName = Literal["succeeded", "failed"]
 
 
