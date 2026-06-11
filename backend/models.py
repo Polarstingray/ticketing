@@ -163,8 +163,8 @@ class AgentRun(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False, index=True)
-    agent = Column(String, nullable=False)        # "claude" | "opencode"
-    phase = Column(String, nullable=False)        # "plan" | "implement" | "review"
+    agent = Column(String, nullable=False)        # claude | opencode | review-api | critique-api
+    phase = Column(String, nullable=False)        # plan | implement | review | plan-critique
     model = Column(String, nullable=False, default="")
     input_tokens = Column(Integer, nullable=False, default=0)
     output_tokens = Column(Integer, nullable=False, default=0)
