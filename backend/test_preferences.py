@@ -4,9 +4,12 @@ Covers: the default-on matrix returned by GET; PUT upserting opt-outs and
 pruning rows that return to the default; that the table only ever stores explicit
 overrides; that should_notify gates the in-app path; and per-user scoping.
 """
+from types import SimpleNamespace
+
 from inbox import should_notify
 from database import SessionLocal
-from models import NotificationPreference
+from models import NotificationPreference, Ticket, User
+from notifications import notify_comment_email
 
 
 def _hdr(key):
@@ -117,6 +120,75 @@ def test_in_app_notification_suppressed_when_opted_out(client, admin_key, make_u
     _create_ticket(client, admin_key, title="Silent", assigned_to=u.id)
     data = client.get("/notifications", headers=_hdr(u.key)).json()
     assert all(n["ticket_title"] != "Silent" for n in data["items"])
+
+
+class _RecordingBackground:
+    """Stand-in for FastAPI's BackgroundTasks that records add_task calls."""
+
+    def __init__(self):
+        self.tasks = []
+
+    def add_task(self, func, *args, **kwargs):
+        self.tasks.append((func, args, kwargs))
+
+
+def test_comment_email_suppressed_when_opted_out(client, make_user):
+    actor = make_user()
+    recipient = make_user()
+    # recipient opts out of email for new comments.
+    client.put("/preferences", headers=_hdr(recipient.key),
+               json={"items": [{"type": "commented", "channel": "email", "enabled": False}]})
+
+    db = SessionLocal()
+    try:
+        # The unit-level gate is what notify_comment_email consults.
+        assert should_notify(db, recipient.id, "commented", "email") is False
+
+        actor_user = db.query(User).filter(User.id == actor.id).first()
+        ticket = Ticket(
+            type="task", title="Emailed?", created_by=recipient.id,
+            assigned_to=None, priority="medium", status="open",
+        )
+        db.add(ticket)
+        db.flush()
+        comment = SimpleNamespace(id=1, body="hi")
+
+        bg = _RecordingBackground()
+        notify_comment_email(bg, db, ticket, comment, actor_user)
+        # recipient is opted out -> no email task scheduled.
+        assert bg.tasks == []
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_comment_email_scheduled_when_opted_in(client, make_user):
+    actor = make_user()
+    recipient = make_user()  # default-on, no preference rows.
+
+    db = SessionLocal()
+    try:
+        assert should_notify(db, recipient.id, "commented", "email") is True
+
+        actor_user = db.query(User).filter(User.id == actor.id).first()
+        ticket = Ticket(
+            type="task", title="Emailed?", created_by=recipient.id,
+            assigned_to=None, priority="medium", status="open",
+        )
+        db.add(ticket)
+        db.flush()
+        comment = SimpleNamespace(id=1, body="hi")
+
+        bg = _RecordingBackground()
+        notify_comment_email(bg, db, ticket, comment, actor_user)
+        # One email task for the opted-in recipient.
+        assert len(bg.tasks) == 1
+        func, args, _ = bg.tasks[0]
+        # args = (to_list, subject, body)
+        assert args[0] == [recipient.username + "@example.com"]
+    finally:
+        db.rollback()
+        db.close()
 
 
 def test_preferences_are_per_user(client, make_user):

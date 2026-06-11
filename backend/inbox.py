@@ -8,10 +8,10 @@ the notification and the change it describes succeed or fail together.
 Each notification snapshots the ticket title and actor name onto the row, so the
 inbox renders standalone and the entry survives deletion of the ticket or actor.
 
-``should_notify`` is the seam for a future notification-settings panel: every
-notification flows through it. It currently always returns ``True``; once a
-``NotificationPreference`` table exists it can consult per-user/type/channel
-preferences (default-on when no row exists) without touching any event site.
+``should_notify`` is the seam for the notification-settings panel: every
+notification flows through it. It consults the ``NotificationPreference`` table
+for per-user/type/channel opt-outs (default-on when no row exists), so event
+sites stay oblivious to preferences.
 """
 from typing import Optional
 
