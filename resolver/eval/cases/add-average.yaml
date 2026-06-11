@@ -1,0 +1,21 @@
+id: add-average
+title: "Add an average() helper to calc"
+description: |
+  Add an `average(numbers)` function to `calc.py` that returns the arithmetic mean of a
+  list of numbers. An empty list should return 0 (not raise). Leave the existing
+  functions unchanged.
+type: task
+priority: low
+repo: sandbox
+acceptance:
+  command: "python -m pytest tests/test_acceptance.py -q"
+  files:
+    tests/test_acceptance.py: |
+      from calc import average
+
+      def test_average():
+          assert average([2, 4, 6]) == 4
+          assert average([10]) == 10
+
+      def test_average_empty():
+          assert average([]) == 0

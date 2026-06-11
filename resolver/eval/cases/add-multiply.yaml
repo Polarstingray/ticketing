@@ -1,0 +1,21 @@
+id: add-multiply
+title: "Add a multiply() function to calc"
+description: |
+  Add a `multiply(a, b)` function to `calc.py` that returns the product of its two
+  arguments. Keep the existing functions unchanged.
+type: task
+priority: medium
+repo: sandbox
+# The acceptance test is OWNED BY THE HARNESS (the agent never sees it). It is written
+# into the scoring worktree before the command runs, so the score is independent of any
+# test the agent may have written.
+acceptance:
+  command: "python -m pytest tests/test_acceptance.py -q"
+  files:
+    tests/test_acceptance.py: |
+      from calc import multiply
+
+      def test_multiply():
+          assert multiply(3, 4) == 12
+          assert multiply(-2, 5) == -10
+          assert multiply(0, 99) == 0
