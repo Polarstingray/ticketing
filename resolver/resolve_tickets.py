@@ -1054,11 +1054,17 @@ def ref_exists(repo: Path, ref: str) -> bool:
 def resolve_base(repo: Path) -> tuple[str, str]:
     """Determine where to branch the fix from and what the PR base branch is.
 
-    Returns (base_ref, base_branch): `base_ref` is a ref guaranteed to exist
+    Returns (base_ref, base_branch): `base_ref` is a commit-ish guaranteed to exist
     (so `git worktree add` can't fail with 'invalid reference'); `base_branch`
     is the branch name a PR should target. We never assume `origin/<x>` exists —
     origin/HEAD is often unset, and the local checkout may be on a feature branch
-    that was never pushed."""
+    that was never pushed.
+
+    The local fallback is the *resolved SHA* of HEAD, NOT the symbolic ref "HEAD":
+    do_implement later measures progress with `{base_ref}..HEAD` run *inside the
+    worktree*, where the symbolic "HEAD" would resolve to the new commit on both
+    sides (HEAD..HEAD == 0) and a real change would be misreported as "no changes".
+    A pinned SHA keeps the range well-defined for origin-less / local-only repos."""
     remote_default = None
     rc, out = run(["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
     if rc == 0 and out.strip():
@@ -1069,9 +1075,14 @@ def resolve_base(repo: Path) -> tuple[str, str]:
                 remote_default = cand
                 break
 
-    # Branch from the remote default tip when we have it (clean PR base),
-    # otherwise from the local checkout's HEAD, which always exists.
-    base_ref = f"origin/{remote_default}" if remote_default and ref_exists(repo, f"origin/{remote_default}") else "HEAD"
+    # Branch from the remote default tip when we have it (clean PR base), otherwise
+    # from the local checkout's HEAD pinned to its SHA so the branch point is a stable
+    # commit, not a symbolic ref that moves with the new commit.
+    if remote_default and ref_exists(repo, f"origin/{remote_default}"):
+        base_ref = f"origin/{remote_default}"
+    else:
+        rc, sha = run(["git", "-C", str(repo), "rev-parse", "HEAD"])
+        base_ref = sha.strip() if rc == 0 and sha.strip() else "HEAD"
     rc, cur = run(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"])
     base_branch = remote_default or (cur.strip() if rc == 0 and cur.strip() else "main")
     return base_ref, base_branch
