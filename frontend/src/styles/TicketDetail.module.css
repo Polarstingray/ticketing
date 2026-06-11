@@ -34,6 +34,68 @@
   border-radius: 4px;
   padding: 1px 6px;
 }
+.costBadge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: default;
+}
+
+/* System (reserved) tags: visible but read-only — managed by the resolver. */
+.systemTag {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--surface-2),
+    var(--surface-2) 4px,
+    var(--surface) 4px,
+    var(--surface) 8px
+  );
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: default;
+}
+
+/* User-editable free tags rendered as removable chips. */
+.editableTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px 1px 6px;
+}
+.tagRemove {
+  width: auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.tagRemove:hover {
+  color: var(--text);
+}
+.tagInput {
+  width: 90px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+}
 
 .description {
   white-space: pre-wrap;
@@ -127,6 +189,66 @@
   font-weight: 600;
 }
 .activityDate {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.runs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.runItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.runPhase {
+  font-weight: 600;
+  color: var(--text);
+  min-width: 72px;
+}
+.runStatus {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+}
+.runOk {
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+.runFailed {
+  color: #b4232a;
+  border-color: #b4232a55;
+  background: #b4232a14;
+}
+.runMeta {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-dim);
+}
+.runTokens {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.runCost {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.runDate {
   flex-shrink: 0;
   font-size: 12px;
   color: var(--text-dim);

@@ -61,6 +61,7 @@ export const api = {
   updateTicket: (id, body) => request("PATCH", `/tickets/${id}`, body),
   deleteTicket: (id) => request("DELETE", `/tickets/${id}`),
   listActivity: (id) => request("GET", `/tickets/${id}/activity`),
+  listAgentRuns: (id) => request("GET", `/tickets/${id}/agent-runs`),
   archiveTicket: (id) => request("POST", `/tickets/${id}/archive`),
   unarchiveTicket: (id) => request("POST", `/tickets/${id}/unarchive`),
 
@@ -83,6 +84,11 @@ export const api = {
   deleteNotification: (id) => request("DELETE", `/notifications/${id}`),
   bulkDeleteNotifications: (ids) =>
     request("POST", "/notifications/bulk_delete", { ids }),
+
+  // Notification preferences (the settings panel). Both return the full matrix
+  // { items: [{ type, channel, enabled }] }.
+  getNotificationPreferences: () => request("GET", "/preferences"),
+  updateNotificationPreferences: (items) => request("PUT", "/preferences", { items }),
 
   listUsers: () => request("GET", "/users"),
   createUser: (body) => request("POST", "/users", body),
