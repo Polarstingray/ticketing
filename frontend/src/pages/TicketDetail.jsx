@@ -14,6 +14,7 @@ import {
   formatDate,
   formatTokens,
   formatUsd,
+  isReservedTag,
   totalTokens,
 } from "../constants";
 import styles from "../styles/TicketDetail.module.css";
@@ -29,6 +30,7 @@ export default function TicketDetail() {
   const [activity, setActivity] = useState([]);
   const [agentRuns, setAgentRuns] = useState([]);
   const [commentBody, setCommentBody] = useState("");
+  const [tagInput, setTagInput] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -94,6 +96,37 @@ export default function TicketDetail() {
     } catch (e) {
       setError(e.message);
     }
+  }
+
+  // Only free (non-reserved) tags are user-editable. Reserved control tags
+  // (claude:*, repo:*, dangerous, fix) are shown read-only; the backend
+  // preserves them and rejects any attempt to set them, so we patch with the
+  // free tags only.
+  const freeTags = (ticket?.tags ?? []).filter((t) => !isReservedTag(t));
+  const reservedTags = (ticket?.tags ?? []).filter(isReservedTag);
+
+  function saveFreeTags(next) {
+    // Dedupe while preserving order.
+    const deduped = [...new Set(next)];
+    patch({ tags: deduped });
+  }
+
+  function addTagsFromInput() {
+    const parts = tagInput
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setTagInput("");
+    if (parts.length === 0) return;
+    if (parts.some(isReservedTag)) {
+      setError("Reserved tags (claude:*, repo:*, dangerous, fix) can't be set here.");
+      return;
+    }
+    saveFreeTags([...freeTags, ...parts]);
+  }
+
+  function removeTag(tag) {
+    saveFreeTags(freeTags.filter((t) => t !== tag));
   }
 
   async function submitComment(e) {
@@ -167,11 +200,45 @@ export default function TicketDetail() {
               🤖 {formatUsd(agentRuns.reduce((sum, r) => sum + (r.cost_usd || 0), 0))}
             </span>
           )}
-          {ticket.tags?.map((t) => (
-            <span key={t} className={styles.tag}>
+          {reservedTags.map((t) => (
+            <span key={t} className={styles.systemTag} title="System tag — managed by automation">
               {t}
             </span>
           ))}
+          {canModify
+            ? freeTags.map((t) => (
+                <span key={t} className={styles.editableTag}>
+                  {t}
+                  <button
+                    type="button"
+                    className={styles.tagRemove}
+                    aria-label={`Remove tag ${t}`}
+                    onClick={() => removeTag(t)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))
+            : freeTags.map((t) => (
+                <span key={t} className={styles.tag}>
+                  {t}
+                </span>
+              ))}
+          {canModify && (
+            <input
+              className={styles.tagInput}
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === ",") {
+                  e.preventDefault();
+                  addTagsFromInput();
+                }
+              }}
+              onBlur={addTagsFromInput}
+              placeholder="Add tag…"
+            />
+          )}
         </div>
 
         {ticket.description && (

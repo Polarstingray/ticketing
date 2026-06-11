@@ -138,3 +138,126 @@ def test_member_can_view_assigned_ticket(client, admin_key, make_user):
 def test_unauthenticated_request_rejected(client):
     assert client.get("/tickets").status_code == 401
     assert client.get("/tickets", headers={"X-API-Key": "sk_not-a-real-key"}).status_code == 401
+
+
+# --- Tags: editing & reserved-tag security (#58) -----------------------------
+
+def _tags(t):
+    return set(t["tags"])
+
+
+def test_member_can_edit_free_tags_on_own_ticket(client, make_user):
+    member = make_user()
+    t = _create(client, member.key, tags=["bug"])
+    r = client.patch(
+        f"/tickets/{t['id']}", json={"tags": ["bug", "urgent"]},
+        headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"bug", "urgent"}
+
+    # Removing a free tag works too.
+    r = client.patch(
+        f"/tickets/{t['id']}", json={"tags": ["urgent"]},
+        headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 200
+    assert _tags(r.json()) == {"urgent"}
+
+    act = client.get(f"/tickets/{t['id']}/activity", headers={"X-API-Key": member.key})
+    assert "tags_changed" in [a["action"] for a in act.json()]
+
+
+def test_member_cannot_set_reserved_tags_on_create(client, make_user):
+    member = make_user()
+    for bad in ("claude:planning", "repo:secret", "dangerous", "fix"):
+        r = client.post(
+            "/tickets", json={"type": "task", "title": "x", "tags": [bad]},
+            headers={"X-API-Key": member.key},
+        )
+        assert r.status_code == 422, f"{bad}: {r.text}"
+
+
+def test_member_cannot_set_reserved_tags_on_update(client, make_user):
+    member = make_user()
+    t = _create(client, member.key, tags=["bug"])
+    for bad in ("claude:implementing", "repo:x", "dangerous", "fix"):
+        r = client.patch(
+            f"/tickets/{t['id']}", json={"tags": ["bug", bad]},
+            headers={"X-API-Key": member.key},
+        )
+        assert r.status_code == 422, f"{bad}: {r.text}"
+    # The ticket's tags are unchanged.
+    cur = client.get(f"/tickets/{t['id']}", headers={"X-API-Key": member.key})
+    assert _tags(cur.json()) == {"bug"}
+
+
+def test_existing_reserved_tags_preserved_when_member_edits_free_tags(client, admin_key, make_user):
+    member = make_user()
+    t = _create(client, member.key, tags=["bug"])
+    # Admin sets reserved control tags.
+    r = client.patch(
+        f"/tickets/{t['id']}", json={"tags": ["bug", "claude:planning", "repo:app", "dangerous"]},
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"bug", "claude:planning", "repo:app", "dangerous"}
+
+    # Member edits free tags; reserved tags survive untouched even though the
+    # member's payload omits them.
+    r = client.patch(
+        f"/tickets/{t['id']}", json={"tags": ["feature"]},
+        headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"feature", "claude:planning", "repo:app", "dangerous"}
+
+
+def test_admin_can_set_reserved_tags(client, admin_key):
+    t = _create(client, admin_key)
+    r = client.patch(
+        f"/tickets/{t['id']}", json={"tags": ["claude:awaiting-pr-review", "repo:app"]},
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"claude:awaiting-pr-review", "repo:app"}
+
+
+def test_resolver_bot_can_set_reserved_tags(client, make_user, monkeypatch):
+    """A non-admin user whose id == RESOLVER_BOT_USER_ID may transition control
+    tags — this is what keeps the resolver's set_state working."""
+    import control_tags
+    bot = make_user()
+    monkeypatch.setattr(control_tags, "RESOLVER_BOT_USER_ID", bot.id)
+    t = _create(client, bot.key, tags=["repo:app", "claude:planning"])
+    assert _tags(t) == {"repo:app", "claude:planning"}
+    r = client.patch(
+        f"/tickets/{t['id']}", json={"tags": ["repo:app", "claude:implementing"]},
+        headers={"X-API-Key": bot.key},
+    )
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"repo:app", "claude:implementing"}
+
+
+def test_tag_validation_rejects_bad_payloads(client, admin_key):
+    t = _create(client, admin_key)
+    # Too many tags.
+    r = client.patch(f"/tickets/{t['id']}", json={"tags": [f"t{i}" for i in range(31)]},
+                     headers={"X-API-Key": admin_key})
+    assert r.status_code == 422
+    # Over-length tag.
+    r = client.patch(f"/tickets/{t['id']}", json={"tags": ["x" * 51]},
+                     headers={"X-API-Key": admin_key})
+    assert r.status_code == 422
+    # Control character / newline (prompt-injection vector).
+    r = client.patch(f"/tickets/{t['id']}", json={"tags": ["evil\ntag"]},
+                     headers={"X-API-Key": admin_key})
+    assert r.status_code == 422
+
+
+def test_non_member_cannot_edit_tags(client, admin_key, make_user):
+    t = _create(client, admin_key, title="secret")
+    member = make_user()
+    r = client.patch(f"/tickets/{t['id']}", json={"tags": ["x"]},
+                     headers={"X-API-Key": member.key})
+    assert r.status_code == 403
