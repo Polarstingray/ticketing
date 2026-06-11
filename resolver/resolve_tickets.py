@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import contextvars
+import copy
 import hashlib
 import json
 import logging
@@ -60,6 +61,7 @@ FAIL_MARKER = "⚠️ Resolver could not complete"
 FILED_MARKER = "🎫 Filed from `/ticket`"
 REVIEW_MARKER = "🔎 **Code review**"
 ESCALATE_MARKER = "⤴️ **Routed to Claude**"
+VERIFY_FAIL_MARKER = "⚠️ **Tests failing**"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Per-event audit truncation, set from config at sweep start (see main()).
@@ -1053,11 +1055,17 @@ def ref_exists(repo: Path, ref: str) -> bool:
 def resolve_base(repo: Path) -> tuple[str, str]:
     """Determine where to branch the fix from and what the PR base branch is.
 
-    Returns (base_ref, base_branch): `base_ref` is a ref guaranteed to exist
+    Returns (base_ref, base_branch): `base_ref` is a commit-ish guaranteed to exist
     (so `git worktree add` can't fail with 'invalid reference'); `base_branch`
     is the branch name a PR should target. We never assume `origin/<x>` exists —
     origin/HEAD is often unset, and the local checkout may be on a feature branch
-    that was never pushed."""
+    that was never pushed.
+
+    The local fallback is the *resolved SHA* of HEAD, NOT the symbolic ref "HEAD":
+    do_implement later measures progress with `{base_ref}..HEAD` run *inside the
+    worktree*, where the symbolic "HEAD" would resolve to the new commit on both
+    sides (HEAD..HEAD == 0) and a real change would be misreported as "no changes".
+    A pinned SHA keeps the range well-defined for origin-less / local-only repos."""
     remote_default = None
     rc, out = run(["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
     if rc == 0 and out.strip():
@@ -1068,9 +1076,14 @@ def resolve_base(repo: Path) -> tuple[str, str]:
                 remote_default = cand
                 break
 
-    # Branch from the remote default tip when we have it (clean PR base),
-    # otherwise from the local checkout's HEAD, which always exists.
-    base_ref = f"origin/{remote_default}" if remote_default and ref_exists(repo, f"origin/{remote_default}") else "HEAD"
+    # Branch from the remote default tip when we have it (clean PR base), otherwise
+    # from the local checkout's HEAD pinned to its SHA so the branch point is a stable
+    # commit, not a symbolic ref that moves with the new commit.
+    if remote_default and ref_exists(repo, f"origin/{remote_default}"):
+        base_ref = f"origin/{remote_default}"
+    else:
+        rc, sha = run(["git", "-C", str(repo), "rev-parse", "HEAD"])
+        base_ref = sha.strip() if rc == 0 and sha.strip() else "HEAD"
     rc, cur = run(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"])
     base_branch = remote_default or (cur.strip() if rc == 0 and cur.strip() else "main")
     return base_ref, base_branch
@@ -1112,6 +1125,47 @@ def _tracked_dirty(repo: Path) -> set[str]:
     return {ln for ln in out.splitlines() if ln.strip()}
 
 
+def _porcelain_path(line: str) -> str | None:
+    """Extract the working-tree path from a `git status --porcelain` line, or None if it
+    can't be parsed cleanly. Handles the two-char `XY ` status prefix, the `orig -> new`
+    rename/copy form (returns the new path), and the surrounding quotes git adds for
+    names with unusual characters."""
+    if len(line) < 4:
+        return None
+    path = line[3:]
+    if " -> " in path:  # rename/copy — the destination is what's now on disk
+        path = path.split(" -> ", 1)[1]
+    path = path.strip()
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+    return path or None
+
+
+def _handle_escape(repo: Path, escaped: set[str], ticket: dict) -> bool:
+    """An implement run dirtied the MAIN checkout — a worktree escape. Loudly audit it and
+    best-effort revert ONLY the newly-dirtied paths (those in `escaped`, which already
+    excludes the pre-run dirty state via set difference) so the user's pre-existing
+    uncommitted work is never touched. A path that can't be parsed is left for manual
+    cleanup rather than risking a wrong `checkout`. Returns True (escape handled)."""
+    logger = audit.get_logger()
+    logger.warning("#%s: implement run modified the MAIN checkout %s (likely a "
+                   "worktree escape): %s", ticket["id"], repo, sorted(escaped))
+    audit.audit_event(
+        logger, "phase",
+        f"#{ticket['id']}: WARNING — implement dirtied the main checkout "
+        f"(worktree escape?): {sorted(escaped)}",
+        level=logging.WARNING, category="implement",
+        main_repo=str(repo), changed=sorted(escaped))
+    for line in sorted(escaped):
+        path = _porcelain_path(line)
+        if not path:
+            logger.warning("#%s: could not parse escaped path from %r; leaving it for "
+                           "manual cleanup", ticket["id"], line)
+            continue
+        run(["git", "-C", str(repo), "checkout", "--", path])
+    return True
+
+
 # --- prompts -------------------------------------------------------------
 # Path-like tokens in plan text: either something containing a slash and an
 # extension, or a bare filename with a known source extension.
@@ -1138,6 +1192,31 @@ def _reanchor(text: str | None, main_repo: "Path | None", wt: Path) -> str | Non
     # filename-continuation char ([\w.-]), so `<repo>` and `<repo>/sub` are rewritten
     # but a sibling like `<repo>-backup` is left intact.
     return re.sub(re.escape(str(main_repo)) + r"(?![\w.\-])", str(wt), text)
+
+
+def _strip_residual_abs_paths(text: str | None, allowed_root: "Path | None") -> str | None:
+    """Reduce any *absolute* path token that points OUTSIDE `allowed_root` to its bare
+    basename. Run this AFTER `_reanchor`: main-checkout paths have already been remapped
+    to absolute paths under the worktree (`allowed_root`) — those are kept verbatim. What
+    remains absolute and outside the worktree points elsewhere (a sibling checkout, /tmp,
+    /etc, a hallucinated tree); collapsing it to the filename keeps the agent's intent —
+    the file to find *inside* its working dir — while removing the out-of-sandbox anchor
+    it could otherwise follow. Relative paths are always left untouched."""
+    if not text:
+        return text
+    root = str(allowed_root) if allowed_root else None
+
+    def _repl(m: "re.Match") -> str:
+        token = m.group(1)
+        if not os.path.isabs(token):
+            return token
+        # Keep absolutes that live under the worktree (boundary check avoids matching a
+        # sibling like `<root>-backup`); neutralize everything else.
+        if root and (token == root or token.startswith(root + os.sep)):
+            return token
+        return os.path.basename(token)
+
+    return _PLAN_PATH.sub(_repl, text)
 
 
 def _files_mentioned_in_plan(plan: str, repo: Path, limit: int = 20) -> list[str]:
@@ -1182,6 +1261,12 @@ def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
         "Refer to files by their repo-relative path (e.g. `resolver/foo.py`), NOT by",
         "absolute path — the implementation runs in a separate checkout, so absolute",
         "paths from this exploration would point at the wrong tree.",
+        "",
+        "End your plan with exactly these two lines (used to route the implementation):",
+        "DIFFICULTY: easy|medium|hard",
+        "FILES: <number of files you expect to change>",
+        "where easy = a single small/localized change, medium = a few files of",
+        "straightforward work, hard = cross-cutting, many files, ambiguous, or risky.",
     ]
     if revise_notes:
         p += ["", "The reviewer requested changes to your previous plan:",
@@ -1191,13 +1276,22 @@ def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
 
 def implement_prompt(ticket: dict, repo: Path, plan: str | None,
                      reviewer_notes: str | None = None,
-                     main_repo: "Path | None" = None) -> str:
+                     main_repo: "Path | None" = None,
+                     verify_feedback: str | None = None) -> str:
     # The plan/reviewer notes were written against the main checkout and carry its
     # absolute paths; reanchor them to this worktree so the agent doesn't follow
     # them out of the sandbox and edit the real tree. main_repo defaults to None
     # (no rewrite) to keep the prompt-builder unit tests' call shape working.
+    # Reanchor first (remap main-checkout paths into the worktree), THEN reduce any
+    # still-absolute path to its basename — order matters, so `<repo>/sub/f.py` becomes
+    # `<wt>/sub/f.py` rather than being flattened to `f.py`. Both steps are gated on
+    # main_repo: it's always set in real runs; main_repo=None is the prompt-builder
+    # unit-test call shape, which passes text through untouched for back-compat.
     plan = _reanchor(plan, main_repo, repo)
     reviewer_notes = _reanchor(reviewer_notes, main_repo, repo)
+    if main_repo:
+        plan = _strip_residual_abs_paths(plan, repo)
+        reviewer_notes = _strip_residual_abs_paths(reviewer_notes, repo)
     p = [
         f"You are resolving Stingray ticket #{ticket['id']}.",
         f"Your working directory is a dedicated checkout at {repo} — work there and",
@@ -1207,8 +1301,9 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         "do NOT just print code or describe the edits in your reply. A run that ends",
         "without actually modifying any files is treated as a failure.",
         f"IMPORTANT: every file you read, edit, or run MUST live under {repo}. Never",
-        "edit files outside it. If any path in the plan below points elsewhere (e.g. an",
-        "absolute path to a different checkout), remap it under your working directory.",
+        "edit files outside it. The plan below has already been confined to this working",
+        "directory, so any absolute path you find yourself reaching for is out of scope —",
+        "resolve it to a path under your working directory instead of following it.",
         "",
         "Constraints for this automated run (no human is watching the terminal,",
         "and the run is killed at a hard time limit):",
@@ -1249,6 +1344,18 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
             "changes — address them on top of the work already on the branch:",
             "",
             reviewer_notes,
+            "",
+        ]
+    if verify_feedback:
+        # A repair pass: the agent's own edits are already in this working tree, but the
+        # resolver's verification command failed. Frame it accordingly so the agent fixes
+        # what's there rather than re-implementing from scratch.
+        p += [
+            "Your previous changes are ALREADY APPLIED in this working tree, but the "
+            "automated verification command FAILED with the output below. Fix the "
+            "failures without changing unrelated behavior, then stop:",
+            "",
+            verify_feedback,
             "",
         ]
     p += [
@@ -1330,8 +1437,42 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     if not ok:
         fail(client, ticket, f"Planning failed.\n\n```\n{tail(result)}\n```")
         return
+    # Plan-critique gate: a cheap model vets the plan before the human (and the
+    # expensive implement run) sees it. A REVISE verdict re-invokes the planner with
+    # the critique notes, up to critique_max_revisions times. Fail-open throughout — a
+    # flaky/quota'd critique must never block a produced plan.
+    critique_summary = ""
+    if _critique_enabled(cfg):
+        for rev in range(cfg.critique_max_revisions + 1):
+            cts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            c_log = cfg.logs_dir / f"ticket-{ticket['id']}-critique-{cts}.log"
+            ok_c, verdict, notes = run_critique(cfg, client, ticket, result, c_log)
+            if not ok_c:
+                phase("plan-critique-skipped", ticket,
+                      f"#{ticket['id']}: critique unavailable, proceeding with plan")
+                break
+            if verdict == "APPROVE":
+                critique_summary = "🧭 _Plan critique: approved._"
+                phase("plan-critique-approved", ticket, f"#{ticket['id']}: plan approved by critique")
+                break
+            if rev < cfg.critique_max_revisions:
+                phase("plan-critique-revise", ticket,
+                      f"#{ticket['id']}: critique requested revision (attempt {rev + 1})")
+                rts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                r_log = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{rts}.log"
+                ok, result = run_agent_tracked(cfg, client, ticket,
+                    plan_prompt(ticket, repo, notes), repo, "plan", r_log)
+                if not ok:
+                    fail(client, ticket, f"Re-planning after critique failed.\n\n```\n{tail(result)}\n```")
+                    return
+            else:
+                critique_summary = f"🧭 _Plan critique still flags concerns:_\n\n{notes}"
+                phase("plan-critique-flagged", ticket,
+                      f"#{ticket['id']}: critique still flagged after {cfg.critique_max_revisions} revision(s)")
     body = (
-        f"{PLAN_MARKER} (Stingray resolver)\n\n{result}\n\n---\n"
+        f"{PLAN_MARKER} (Stingray resolver)\n\n{result}\n\n"
+        + (f"{critique_summary}\n\n" if critique_summary else "")
+        + "---\n"
         "Reply with `/approve` (and re-assign this ticket to me) to implement, "
         "or `/revise <notes>` to adjust the plan."
     )
@@ -1362,6 +1503,21 @@ def filed_tickets_in_log(log_path: Path) -> list[int]:
     return seen
 
 
+def _run_verify(cfg: Config, wt: Path) -> tuple[bool, str]:
+    """Run the configured VERIFY_COMMAND as a shell command in the worktree to confirm
+    the implement run's changes pass. Unlike run() (argv, no shell) this is shell=True
+    because the command is an operator-supplied string (e.g. `cd backend && pytest`).
+    Returns (passed, output_tail) with stdout+stderr combined."""
+    try:
+        proc = subprocess.run(
+            cfg.verify_command, shell=True, cwd=str(wt),
+            capture_output=True, text=True, timeout=cfg.verify_timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"verification timed out after {cfg.verify_timeout}s"
+    output = (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode == 0, tail(output)
+
+
 def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                  plan: str | None, reviewer_notes: str | None = None) -> None:
     set_state(client, ticket, [TAG_IMPLEMENTING])
@@ -1371,6 +1527,29 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         "back to you when done.")
     phase("implementing", ticket, f"#{ticket['id']}: implementing"
           + (" (rework)" if reviewer_notes else ""))
+
+    # Difficulty routing: the plan self-assessed easy|medium|hard (survives the
+    # /approve round-trip inside the plan comment). A hard ticket goes to the strong
+    # bot when escalation is enabled; otherwise easy/hard swap the implement model
+    # tier for this run. Skip on rework — the human is already iterating in-flight.
+    difficulty = parse_difficulty(plan)
+    if difficulty == "hard" and cfg.escalate_to_user_id and not reviewer_notes:
+        client.add_comment(ticket["id"],
+            f"{ESCALATE_MARKER} — plan assessed hard; reassigning to the Claude resolver.")
+        set_state(client, ticket, [], status="open", assigned_to=cfg.escalate_to_user_id)
+        phase("escalated", ticket,
+              f"#{ticket['id']}: escalated to user {cfg.escalate_to_user_id} (plan assessed hard)")
+        return
+    tier = {"easy": cfg.agent_implement_model_easy,
+            "hard": cfg.agent_implement_model_hard}.get(difficulty, "")
+    # Override the implement model via a per-run cfg copy so model_for picks it up
+    # deep in the runner with no new parameter threaded through run_agent. Blank tier
+    # => unchanged cfg => the default agent_implement_model. Shallow copy keeps the
+    # original cfg untouched for the rest of the sweep.
+    if tier.strip():
+        cfg = copy.copy(cfg)
+        cfg.agent_implement_model = tier
+
     # Compute remote/PR availability once and pass it down (cheaper, consistent).
     origin = has_origin(repo)
     pr_ok = origin and run(["gh", "auth", "status"])[0] == 0
@@ -1390,21 +1569,70 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             wt, "implement", log_path)
         escaped = _tracked_dirty(repo) - dirty_before
         if escaped:
-            logger = audit.get_logger()
-            logger.warning("#%s: implement run modified the MAIN checkout %s (likely a "
-                           "worktree escape): %s", ticket["id"], repo, sorted(escaped))
-            audit.audit_event(
-                logger, "phase",
-                f"#{ticket['id']}: WARNING — implement dirtied the main checkout "
-                f"(worktree escape?): {sorted(escaped)}",
-                level=logging.WARNING, category="implement",
-                main_repo=str(repo), changed=sorted(escaped))
+            # Hard stop: the run reached outside its worktree and touched the real tree.
+            # Revert the damage and abort WITHOUT publishing — never ship a result built
+            # by a run that breached the sandbox, even if the agent reported success.
+            _handle_escape(repo, escaped, ticket)
+            fail(client, ticket,
+                 f"{agent_label} escaped its worktree and modified the main checkout; "
+                 "aborting without publishing.",
+                 reimplementable=True)
+            return
         if not ok:
             # An approved plan exists — hand back re-implementable so a timeout
             # doesn't throw the plan away and re-plan from scratch on retry.
             fail(client, ticket, f"Implementation failed.\n\n```\n{tail(summary)}\n```",
                  reimplementable=True)
             return
+
+        # Verification gate: independently confirm the agent's changes pass before
+        # publishing. On failure, re-invoke the agent in the SAME worktree with the test
+        # output up to verify_max_retries times; if it still fails, publish anyway but
+        # prepend a loud banner so a human takes over (work is never discarded). The gate
+        # is off when verify_command is empty (legacy publish-on-diff behavior).
+        verify_banner = ""
+        if cfg.verify_command:
+            tid = ticket["id"]
+            for attempt in range(cfg.verify_max_retries + 1):
+                passed, vout = _run_verify(cfg, wt)
+                if passed:
+                    phase("verify-passed", ticket, f"#{tid}: verification passed")
+                    break
+                if attempt < cfg.verify_max_retries:
+                    phase("verify-retry", ticket,
+                          f"#{tid}: verification failed, repair attempt {attempt + 1}")
+                    rts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                    rlog = cfg.logs_dir / f"ticket-{tid}-implement-repair{attempt + 1}-{rts}.log"
+                    ok, summary = run_agent_tracked(
+                        cfg, client, ticket,
+                        implement_prompt(ticket, wt, plan, reviewer_notes,
+                                         main_repo=repo, verify_feedback=vout),
+                        wt, "implement", rlog)
+                    # A repair run can escape the worktree too — re-check against the
+                    # pre-run snapshot and hard-fail just like the first run.
+                    escaped = _tracked_dirty(repo) - dirty_before
+                    if escaped:
+                        _handle_escape(repo, escaped, ticket)
+                        fail(client, ticket,
+                             f"{agent_label} escaped its worktree during a verification "
+                             "repair run; aborting without publishing.",
+                             reimplementable=True)
+                        return
+                    if not ok:
+                        fail(client, ticket,
+                             f"Verification repair run failed.\n\n```\n{tail(summary)}\n```",
+                             reimplementable=True)
+                        return
+                else:
+                    verify_banner = (
+                        f"{VERIFY_FAIL_MARKER} — the verification command "
+                        f"`{cfg.verify_command}` still fails after "
+                        f"{cfg.verify_max_retries} repair attempt(s). A human should "
+                        f"review before merging.\n\n```\n{vout}\n```\n\n")
+                    phase("verify-failed-published", ticket,
+                          f"#{tid}: tests still failing after repairs — publishing flagged")
+        if verify_banner:
+            summary = verify_banner + summary
 
         run(["git", "-C", str(wt), "add", "-A"])
         # Set the committer identity explicitly: on a host with no global git
@@ -1448,48 +1676,158 @@ def _single_shot_enabled(cfg) -> bool:
                 and getattr(cfg, "review_api_model", ""))
 
 
+def _chat_completion(url: str, key: str, model: str, prompt: str,
+                     timeout: int, log_path: Path) -> tuple[bool, str, dict]:
+    """One OpenAI-compatible chat completion — no agent loop, no tools. The shared
+    plumbing behind both single_shot_review and run_critique: POST to a
+    `/chat/completions` endpoint (Groq / Mistral / OpenRouter / …), parse
+    `choices[0].message.content`, tee a small transcript to `log_path`, and return
+    (ok, text_or_error, usage). `usage` carries normalized input_tokens/output_tokens
+    (from the response's `usage`) for the caller to emit; it's `{}` on failure."""
+    import requests  # local import: only the single-shot path needs it
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    try:
+        resp = requests.post(url, json=body, headers=headers, timeout=timeout)
+    except requests.RequestException as e:
+        return False, f"chat-completion request failed: {e}", {}
+    # Tee a small transcript so `logs.py <id>` shows the run like an agent run.
+    try:
+        log_path.write_text(f"POST {url} model={model}\n"
+                            f"HTTP {resp.status_code}\n\n{tail(resp.text, 8000)}\n")
+    except OSError:
+        pass
+    if resp.status_code == 429:
+        return False, ("chat-completion quota exceeded (HTTP 429) — the model is "
+                       "rate/quota limited, not unavailable. Use a different model / "
+                       "provider or wait for the quota window to reset."), {}
+    if resp.status_code != 200:
+        return False, f"chat-completion returned HTTP {resp.status_code}: {tail(resp.text, 500)}", {}
+    try:
+        data = resp.json()
+        text = (data["choices"][0]["message"]["content"] or "").strip()
+    except (ValueError, KeyError, IndexError, TypeError) as e:
+        return False, f"could not parse chat-completion response: {e}", {}
+    raw = data.get("usage") or {} if isinstance(data, dict) else {}
+    usage = {"input_tokens": raw.get("prompt_tokens"),
+             "output_tokens": raw.get("completion_tokens")}
+    if not text:
+        return False, "chat-completion returned an empty completion.", usage
+    return True, text, usage
+
+
 def single_shot_review(cfg, prompt: str, log_path: Path) -> tuple[bool, str]:
     """Run a code review as ONE OpenAI-compatible chat completion — no agent loop, no
     tools (the ticket's code_blocks are already in `prompt`). This is the reliable,
     provider-agnostic path for the read-only review case: it works against any
     `/chat/completions` endpoint (Groq / Mistral / OpenRouter / …) and can't get stuck
     in the agent's tool loop. Returns (ok, review_text_or_error)."""
-    import requests  # local import: only the single-shot path needs it
     logger = audit.get_logger()
-    body = {"model": cfg.review_api_model,
-            "messages": [{"role": "user", "content": prompt}]}
-    headers = {"Authorization": f"Bearer {cfg.review_api_key}",
-               "Content-Type": "application/json"}
+    ok, text, usage = _chat_completion(
+        cfg.review_api_url, cfg.review_api_key, cfg.review_api_model, prompt,
+        _phase_timeout(cfg, "review"), log_path)
+    if usage:
+        _emit_token_usage(logger, "review-api", "review", usage)
+    return ok, text
+
+
+def _critique_enabled(cfg) -> bool:
+    """The plan-critique gate runs when a CRITIQUE_API_* endpoint is fully configured;
+    otherwise plans go straight to the human, the legacy behavior."""
+    return bool(getattr(cfg, "critique_api_url", "") and getattr(cfg, "critique_api_key", "")
+                and getattr(cfg, "critique_api_model", ""))
+
+
+_CRITIQUE_VERDICT_RE = re.compile(r"VERDICT:\s*(APPROVE|REVISE)", re.IGNORECASE)
+
+# The planner ends its plan with a `DIFFICULTY:` line (see plan_prompt); the implement
+# phase routes on it. Fail-open to "medium" exactly like the critique verdict above so a
+# missing/garbled line never blocks or misroutes implementation.
+_DIFFICULTY_RE = re.compile(r"^DIFFICULTY:\s*(easy|medium|hard)\b",
+                            re.IGNORECASE | re.MULTILINE)
+
+
+def parse_difficulty(text: str | None) -> str:
+    """The plan's self-assessed difficulty ('easy'|'medium'|'hard'), parsed from the
+    approved-plan comment body. Returns 'medium' when absent/unparseable."""
+    m = _DIFFICULTY_RE.search(text or "")
+    return m.group(1).lower() if m else "medium"
+
+
+def critique_prompt(ticket: dict, plan: str) -> str:
+    """Ask a cheap model to judge whether a proposed plan is concrete enough to hand
+    to the (expensive) implement run."""
+    return "\n".join([
+        "You are a senior engineer reviewing a proposed implementation PLAN before it",
+        "is handed to an automated agent that will write the code. Judge ONLY whether",
+        "the plan is concrete and complete enough to implement correctly — do not write",
+        "any code yourself.",
+        "",
+        f"Ticket #{ticket['id']}: {ticket['title']}",
+        f"Priority: {ticket.get('priority')}",
+        "Description:",
+        ticket.get("description") or "(none)",
+        "",
+        "Check: Does it name the specific files to change? Are the steps actionable",
+        "(not vague hand-waving)? Does it describe how to verify the change? Does it",
+        "appear to misread or skip part of the requirement?",
+        "",
+        "Answer with a FIRST LINE of exactly `VERDICT: APPROVE` or `VERDICT: REVISE`,",
+        "then a few terse bullet points. Use REVISE only for concrete, fixable gaps;",
+        "minor style nits are not grounds to revise.",
+        "",
+        "--- PLAN UNDER REVIEW ---",
+        plan,
+    ])
+
+
+def run_critique(cfg, client: StingrayClient, ticket: dict, plan: str,
+                 log_path: Path) -> tuple[bool, str, str]:
+    """Vet a freshly produced plan with the cheap CRITIQUE_API_* model. Returns
+    (ok, verdict, notes): `ok` is False when the API call failed (caller fails open and
+    proceeds); `verdict` is "APPROVE" or "REVISE". An unparseable verdict defaults to
+    APPROVE — a malformed critique must never block planning.
+
+    Emits a token_usage audit event AND POSTs the run as a first-class AgentRun
+    (agent="critique-api", phase="plan-critique") so the gate's cost shows on the
+    ticket like any other phase. POSTing must never break planning, so a failure is
+    swallowed (the audit log stays the source of truth)."""
+    logger = audit.get_logger()
+    started = datetime.now(timezone.utc)
+    collected: dict = {}
+    token = _RUN_USAGE.set(collected)
     try:
-        resp = requests.post(cfg.review_api_url, json=body, headers=headers,
-                             timeout=_phase_timeout(cfg, "review"))
-    except requests.RequestException as e:
-        return False, f"Review API request failed: {e}"
-    # Tee a small transcript so `logs.py <id>` shows the review run like an agent run.
+        ok, text, usage = _chat_completion(
+            cfg.critique_api_url, cfg.critique_api_key, cfg.critique_api_model,
+            critique_prompt(ticket, plan), _phase_timeout(cfg, "plan"), log_path)
+        if usage:
+            _emit_token_usage(logger, "critique-api", "plan-critique", usage)
+    finally:
+        _RUN_USAGE.reset(token)
     try:
-        log_path.write_text(f"POST {cfg.review_api_url} model={cfg.review_api_model}\n"
-                            f"HTTP {resp.status_code}\n\n{tail(resp.text, 8000)}\n")
-    except OSError:
-        pass
-    if resp.status_code == 429:
-        return False, ("Review API quota exceeded (HTTP 429) — the model is rate/quota "
-                       "limited, not unavailable. Use a different REVIEW_API_MODEL / "
-                       "provider or wait for the quota window to reset.")
-    if resp.status_code != 200:
-        return False, f"Review API returned HTTP {resp.status_code}: {tail(resp.text, 500)}"
-    try:
-        data = resp.json()
-        text = (data["choices"][0]["message"]["content"] or "").strip()
-    except (ValueError, KeyError, IndexError, TypeError) as e:
-        return False, f"Could not parse Review API response: {e}"
-    usage = data.get("usage") or {} if isinstance(data, dict) else {}
-    _emit_token_usage(logger, "review-api", "review", {
-        "input_tokens": usage.get("prompt_tokens"),
-        "output_tokens": usage.get("completion_tokens"),
-    })
-    if not text:
-        return False, "Review API returned an empty completion."
-    return True, text
+        client.create_agent_run(
+            ticket["id"], agent="critique-api", phase="plan-critique",
+            model=cfg.critique_api_model,
+            input_tokens=collected.get("input_tokens", 0),
+            output_tokens=collected.get("output_tokens", 0),
+            cache_read_tokens=collected.get("cache_read_tokens", 0),
+            cache_write_tokens=collected.get("cache_write_tokens", 0),
+            cost_usd=collected.get("cost_usd", 0.0),
+            status="succeeded" if ok else "failed",
+            started_at=started.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        audit.audit_event(
+            audit.get_logger(), "agent_run_post_failed",
+            f"#{ticket['id']}: failed to POST agent run (plan-critique)",
+            level=logging.WARNING, phase="plan-critique",
+        )
+    if not ok:
+        return False, "APPROVE", text
+    m = _CRITIQUE_VERDICT_RE.search(text)
+    verdict = m.group(1).upper() if m else "APPROVE"
+    return True, verdict, text
 
 
 def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | None,

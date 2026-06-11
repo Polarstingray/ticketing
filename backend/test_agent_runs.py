@@ -105,6 +105,22 @@ def test_bad_agent_rejected_422(client, admin_key):
     assert r.status_code == 422
 
 
+def test_chat_completion_backends_accepted(client, admin_key):
+    """The direct chat-completion backends post runs too: single-shot reviews as
+    (review-api, review) and the plan-critique gate as (critique-api, plan-critique).
+    Both must be accepted, not 422'd like the agent loops once were."""
+    t = _create(client, admin_key)
+    for agent, phase in (("review-api", "review"), ("critique-api", "plan-critique")):
+        r = client.post(
+            f"/tickets/{t['id']}/agent-runs",
+            json=_run_payload(agent=agent, phase=phase),
+            headers={"X-API-Key": admin_key},
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["agent"] == agent and body["phase"] == phase
+
+
 def test_post_missing_ticket_404(client, admin_key):
     r = client.post(
         "/tickets/999999/agent-runs",

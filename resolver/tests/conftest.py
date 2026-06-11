@@ -59,12 +59,25 @@ def fake_cfg(tmp_path):
         logs_dir=tmp_path,
         default_repo=None,
         resolve_repo=resolve_repo,
+        # implement model + difficulty-routed tiers (blank = no swap)
+        agent_implement_model="",
+        agent_implement_model_easy="",
+        agent_implement_model_hard="",
         # free-resolver knobs (off by default; individual tests opt in)
         escalate_to_user_id=0,
         escalate_priorities=["high", "critical"],
         review_api_url="",
         review_api_key="",
         review_api_model="",
+        # plan-critique gate (off by default; individual tests opt in)
+        critique_api_url="",
+        critique_api_key="",
+        critique_api_model="",
+        critique_max_revisions=1,
+        # verification gate (off by default; individual tests opt in)
+        verify_command="",
+        verify_timeout=900,
+        verify_max_retries=1,
     )
 
 

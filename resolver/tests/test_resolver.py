@@ -5,6 +5,7 @@ No network, no subprocesses, no real Claude — every external edge is stubbed.
 import json
 import logging
 import os
+import subprocess
 import tarfile
 import time
 from datetime import date
@@ -204,6 +205,383 @@ def test_implement_prompt_main_repo_optional(tmp_path):
     prompt = rt.implement_prompt(
         {"id": 1, "title": "t", "description": "d"}, tmp_path, plan=plan)
     assert f"{tmp_path}/resolver/x.py" in prompt
+
+
+# --- absolute-path neutralization (worktree-escape defense) --------------
+def test_strip_residual_abs_paths_reduces_foreign_absolutes():
+    text = "read /etc/cron.d/job.sh and copy /other/checkout/app/main.py over"
+    out = rt._strip_residual_abs_paths(text, Path("/wt/ticket-1"))
+    assert "/etc/cron.d/job.sh" not in out
+    assert "/other/checkout/app/main.py" not in out
+    assert "job.sh" in out
+    assert "main.py" in out
+
+
+def test_strip_residual_abs_paths_keeps_paths_under_worktree():
+    root = Path("/wt/ticket-1")
+    text = "edit /wt/ticket-1/resolver/x.py but not /wt/ticket-1-backup/y.py"
+    out = rt._strip_residual_abs_paths(text, root)
+    assert "/wt/ticket-1/resolver/x.py" in out   # under the worktree → kept
+    assert "/wt/ticket-1-backup/y.py" not in out  # sibling → neutralized to basename
+    assert "y.py" in out
+
+
+def test_strip_residual_abs_paths_leaves_relative_untouched():
+    text = "edit resolver/foo.py and frontend/src/App.jsx"
+    assert rt._strip_residual_abs_paths(text, Path("/wt/ticket-1")) == text
+
+
+def test_strip_residual_abs_paths_none():
+    assert rt._strip_residual_abs_paths(None, Path("/wt/ticket-1")) is None
+
+
+def test_implement_prompt_reanchors_then_strips_foreign_absolutes(tmp_path):
+    # Composition + order: a main-repo path is reanchored under the worktree (keeping its
+    # subdir), while a foreign absolute path is collapsed to its basename.
+    main_repo = tmp_path / "ticketing"
+    wt = tmp_path / "ticketing" / "resolver" / "work" / "ticket-9"
+    plan = (f"Edit {main_repo}/resolver/resolve_tickets.py, "
+            "then mirror /elsewhere/other/x.py into it.")
+    prompt = rt.implement_prompt(
+        {"id": 9, "title": "t", "description": "d"}, wt, plan=plan, main_repo=main_repo)
+    assert f"{wt}/resolver/resolve_tickets.py" in prompt   # reanchored, subdir intact
+    assert "/elsewhere/other/x.py" not in prompt           # foreign absolute neutralized
+    assert "x.py" in prompt                                # intent preserved as basename
+
+
+# --- worktree-escape: revert + hard fail --------------------------------
+def test_porcelain_path_parses_status_and_rename():
+    assert rt._porcelain_path(" M resolver/x.py") == "resolver/x.py"
+    assert rt._porcelain_path("R  a.py -> b.py") == "b.py"
+    assert rt._porcelain_path('?? "weird name.py"') == "weird name.py"
+    assert rt._porcelain_path("xx") is None  # too short to carry a path
+
+
+def test_handle_escape_reverts_only_parseable_paths(monkeypatch):
+    checkouts = []
+
+    def fake_run(cmd, cwd=None, timeout=None):
+        if "checkout" in cmd:
+            checkouts.append(cmd[-1])  # the path arg
+        return 0, ""
+
+    monkeypatch.setattr(rt, "run", fake_run)
+    repo = Path("/some/repo")
+    escaped = {" M resolver/x.py", "R  a -> b", "x"}  # last is unparseable, must be skipped
+    assert rt._handle_escape(repo, escaped, {"id": 7}) is True
+    assert set(checkouts) == {"resolver/x.py", "b"}
+    assert "x" not in checkouts  # unparseable line left for manual cleanup
+
+
+def test_do_implement_hard_fails_on_worktree_escape(fake_cfg, monkeypatch, tmp_path):
+    # An implement run that dirties the MAIN checkout must revert + fail reimplementable
+    # and NEVER reach publish, even though the agent reported success.
+    wt = tmp_path / "wt"
+    monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "has_origin", lambda repo: False)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "run_agent_tracked", lambda *a, **k: (True, "did the work"))
+
+    # First snapshot (before run) is clean; the post-run snapshot shows a new dirty file.
+    snapshots = iter([set(), {" M backend/models.py"}])
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: next(snapshots))
+
+    handled = {}
+    monkeypatch.setattr(rt, "_handle_escape",
+                        lambda repo, escaped, ticket: handled.update(escaped=escaped) or True)
+    monkeypatch.setattr(rt, "publish", lambda *a, **k: pytest.fail("must not publish after escape"))
+
+    failed = {}
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: failed.update(msg=msg, kw=k))
+
+    client = FakeClient()
+    ticket = {"id": 7, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, tmp_path / "repo", plan="do stuff")
+
+    assert handled["escaped"] == {" M backend/models.py"}
+    assert failed["kw"].get("reimplementable") is True
+    assert "escaped its worktree" in failed["msg"]
+
+
+# --- difficulty routing --------------------------------------------------
+def test_parse_difficulty_variants():
+    assert rt.parse_difficulty("steps\nDIFFICULTY: easy\nFILES: 1") == "easy"
+    assert rt.parse_difficulty("DIFFICULTY: HARD") == "hard"            # case-insensitive
+    assert rt.parse_difficulty(f"{rt.PLAN_MARKER}\n\nplan\n\nDIFFICULTY: medium\nFILES: 3"
+                               "\n\n---\nReply /approve") == "medium"   # mid-body
+    assert rt.parse_difficulty("a plan with no marker line") == "medium"  # fail-open
+    assert rt.parse_difficulty("DIFFICULTY: spicy") == "medium"          # invalid -> fail-open
+    assert rt.parse_difficulty(None) == "medium"
+
+
+def _route_harness(fake_cfg, monkeypatch, tmp_path):
+    """Wire do_implement's externals for routing tests. Records the cfg handed to
+    run_agent_tracked (None if the agent never ran) and every set_state call."""
+    wt = tmp_path / "wt"
+    rec = {"states": [], "agent_cfg": None, "published": False}
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "set_state",
+                        lambda client, ticket, tags, **f: rec["states"].append((tags, f)) or {})
+    monkeypatch.setattr(rt, "has_origin", lambda repo: False)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # never escapes
+
+    def fake_agent(cfg, client, ticket, prompt, *a, **k):
+        rec["agent_cfg"] = cfg
+        return (True, "did it")
+
+    monkeypatch.setattr(rt, "run_agent_tracked", fake_agent)
+    monkeypatch.setattr(rt, "run",
+                        lambda cmd, cwd=None, timeout=None: (0, "1") if "rev-list" in cmd else (0, ""))
+    monkeypatch.setattr(rt, "publish", lambda *a, **k: rec.update(published=True))
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: pytest.fail(f"unexpected fail(): {msg}"))
+    return rec
+
+
+def test_do_implement_easy_routes_cheap_model(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.agent_implement_model = "default-model"
+    fake_cfg.agent_implement_model_easy = "cheap-model"
+    rec = _route_harness(fake_cfg, monkeypatch, tmp_path)
+    ticket = {"id": 1, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo",
+                    plan="steps\nDIFFICULTY: easy\nFILES: 1")
+    assert rec["agent_cfg"].agent_implement_model == "cheap-model"
+    assert fake_cfg.agent_implement_model == "default-model"  # original untouched
+    assert rec["published"]
+
+
+def test_do_implement_hard_escalates_when_enabled(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.escalate_to_user_id = 99
+    rec = _route_harness(fake_cfg, monkeypatch, tmp_path)
+    client = FakeClient()
+    ticket = {"id": 2, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, tmp_path / "repo",
+                    plan="DIFFICULTY: hard\nFILES: 9")
+    assert rec["agent_cfg"] is None  # never implemented here
+    reassign = [f for _, f in rec["states"] if f.get("assigned_to") == 99]
+    assert reassign and reassign[0].get("status") == "open"
+    assert any(rt.ESCALATE_MARKER in body for _, body in client.comments_added)
+
+
+def test_do_implement_hard_swaps_model_when_escalation_off(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.escalate_to_user_id = 0
+    fake_cfg.agent_implement_model_hard = "strong-model"
+    rec = _route_harness(fake_cfg, monkeypatch, tmp_path)
+    ticket = {"id": 3, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo",
+                    plan="DIFFICULTY: hard\nFILES: 9")
+    assert rec["agent_cfg"].agent_implement_model == "strong-model"
+    assert rec["published"]
+
+
+def test_do_implement_rework_does_not_escalate(fake_cfg, monkeypatch, tmp_path):
+    # A human-driven rework (reviewer_notes set) must implement in-place even when the
+    # plan is hard and escalation is enabled — don't bounce in-flight work to another bot.
+    fake_cfg.escalate_to_user_id = 99
+    rec = _route_harness(fake_cfg, monkeypatch, tmp_path)
+    ticket = {"id": 4, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo",
+                    plan="DIFFICULTY: hard\nFILES: 9", reviewer_notes="fix the edge case")
+    assert rec["agent_cfg"] is not None
+    assert not any(f.get("assigned_to") == 99 for _, f in rec["states"])
+    assert rec["published"]
+
+
+# --- verification gate ---------------------------------------------------
+def test_run_verify_maps_returncode_and_timeout(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.verify_command = "pytest -q"
+    calls = {}
+
+    class _Proc:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    def fake_sub(cmd, **kw):
+        calls.update(cmd=cmd, kw=kw)
+        return _Proc(0, "ok\n")
+
+    monkeypatch.setattr(rt.subprocess, "run", fake_sub)
+    passed, out = rt._run_verify(fake_cfg, tmp_path)
+    assert passed is True and "ok" in out
+    assert calls["cmd"] == "pytest -q"
+    assert calls["kw"]["shell"] is True and calls["kw"]["cwd"] == str(tmp_path)
+
+    monkeypatch.setattr(rt.subprocess, "run", lambda cmd, **kw: _Proc(1, "", "boom\n"))
+    passed, out = rt._run_verify(fake_cfg, tmp_path)
+    assert passed is False and "boom" in out
+
+    def raise_timeout(cmd, **kw):
+        raise rt.subprocess.TimeoutExpired(cmd, fake_cfg.verify_timeout)
+
+    monkeypatch.setattr(rt.subprocess, "run", raise_timeout)
+    passed, out = rt._run_verify(fake_cfg, tmp_path)
+    assert passed is False and "timed out" in out
+
+
+def _impl_harness(fake_cfg, monkeypatch, tmp_path, agent_results, verify_results):
+    """Wire do_implement's externals for the verify-gate tests. `agent_results` is an
+    iterator of (ok, summary) for successive run_agent_tracked calls; `verify_results`
+    an iterator of (passed, output) for successive _run_verify calls. Returns dicts
+    recording the agent prompts, the publish summary, and any fail() call."""
+    wt = tmp_path / "wt"
+    monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "has_origin", lambda repo: False)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # never escapes
+    monkeypatch.setattr(rt, "_run_verify", lambda cfg, wt: next(verify_results))
+
+    rec = {"prompts": []}
+
+    def fake_agent(cfg, client, ticket, prompt, *a, **k):
+        rec["prompts"].append(prompt)
+        return next(agent_results)
+
+    monkeypatch.setattr(rt, "run_agent_tracked", fake_agent)
+    # commit/diff plumbing: report one commit ahead so it isn't the "no changes" branch.
+    monkeypatch.setattr(rt, "run",
+                        lambda cmd, cwd=None, timeout=None: (0, "1") if "rev-list" in cmd else (0, ""))
+    monkeypatch.setattr(rt, "publish",
+                        lambda cfg, cl, t, repo, wt, br, base, bb, summary, stat, **k:
+                        rec.update(published=summary))
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: rec.update(failed=(msg, k)))
+    return rec
+
+
+def test_do_implement_gate_disabled_publishes_directly(fake_cfg, monkeypatch, tmp_path):
+    # verify_command empty (default) → gate skipped, _run_verify never called.
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "did it")]), verify_results=iter([]))
+    # _impl_harness wires _run_verify to an iterator; harden the assertion by replacing
+    # it with a guard that fails loudly if the disabled gate ever calls it.
+    monkeypatch.setattr(rt, "_run_verify",
+                        lambda *a, **k: pytest.fail("gate must not run when disabled"))
+    ticket = {"id": 1, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert rec["published"] == "did it"
+    assert rt.VERIFY_FAIL_MARKER not in rec["published"]
+
+
+def test_do_implement_verify_passes_first_try(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.verify_command = "pytest"
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "did it")]),
+                        verify_results=iter([(True, "")]))
+    ticket = {"id": 2, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert rec["published"] == "did it"
+    assert len(rec["prompts"]) == 1            # no repair run
+    assert "failed" not in rec
+
+
+def test_do_implement_verify_fail_then_pass(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.verify_command = "pytest"
+    fake_cfg.verify_max_retries = 1
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "first"), (True, "repaired")]),
+                        verify_results=iter([(False, "ASSERT boom"), (True, "")]))
+    ticket = {"id": 3, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert len(rec["prompts"]) == 2                     # one repair run happened
+    assert "ASSERT boom" in rec["prompts"][1]           # failure fed back to the agent
+    assert "ALREADY APPLIED" in rec["prompts"][1]       # repair framing
+    assert rt.VERIFY_FAIL_MARKER not in rec["published"]  # ended green
+    assert "failed" not in rec
+
+
+def test_do_implement_verify_exhausted_publishes_flagged(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.verify_command = "pytest"
+    fake_cfg.verify_max_retries = 1
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "first"), (True, "second")]),
+                        verify_results=iter([(False, "boom1"), (False, "boom2")]))
+    ticket = {"id": 4, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert len(rec["prompts"]) == 2                  # initial + one repair, then give up
+    assert rt.VERIFY_FAIL_MARKER in rec["published"]  # flagged, but still published
+    assert "boom2" in rec["published"]
+    assert "failed" not in rec                        # publish-flagged, not a hard fail
+
+
+def test_do_implement_repair_escape_hard_fails(fake_cfg, monkeypatch, tmp_path):
+    # A repair run that escapes the worktree must hard-fail, not publish.
+    fake_cfg.verify_command = "pytest"
+    fake_cfg.verify_max_retries = 1
+    rec = _impl_harness(fake_cfg, monkeypatch, tmp_path,
+                        agent_results=iter([(True, "first"), (True, "repair")]),
+                        verify_results=iter([(False, "boom")]))
+    # Override _tracked_dirty: clean before + after initial run, dirty after the repair.
+    snaps = iter([set(), set(), {" M backend/x.py"}])
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: next(snaps))
+    monkeypatch.setattr(rt, "_handle_escape", lambda repo, escaped, ticket: True)
+    monkeypatch.setattr(rt, "publish", lambda *a, **k: pytest.fail("must not publish after escape"))
+    ticket = {"id": 5, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
+    assert rec["failed"][1].get("reimplementable") is True
+    assert "escaped its worktree" in rec["failed"][0]
+
+
+# --- resolve_base: origin-less repos (real git, no network) --------------
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          check=True, capture_output=True, text=True).stdout
+
+def _init_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "f.txt").write_text("hi\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    return repo
+
+
+def test_resolve_base_no_origin_pins_head_sha(tmp_path):
+    repo = _init_repo(tmp_path)
+    base_ref, base_branch = rt.resolve_base(repo)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    # The fix: a stable SHA, not the symbolic "HEAD" (which degenerates in the worktree).
+    assert base_ref == head
+    assert base_ref != "HEAD"
+    assert len(base_ref) == 40 and all(c in "0123456789abcdef" for c in base_ref)
+    assert base_branch == "main"
+
+
+def test_resolve_base_no_origin_ahead_count_is_one_after_commit(tmp_path):
+    # Reproduces the live bug end-to-end: branch from base_ref in a worktree, commit, and
+    # confirm `{base_ref}..HEAD` counts 1 (it was 0 when base_ref was the symbolic "HEAD").
+    repo = _init_repo(tmp_path)
+    base_ref, _ = rt.resolve_base(repo)
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", "-B", "claude/ticket-1", str(wt), base_ref)
+    (wt / "f.txt").write_text("changed\n")
+    _git(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-aqm", "change")
+    ahead = _git(wt, "rev-list", "--count", f"{base_ref}..HEAD").strip()
+    assert ahead == "1"
+    _git(repo, "worktree", "remove", "--force", str(wt))
+
+
+def test_resolve_base_prefers_origin_default(tmp_path):
+    repo = _init_repo(tmp_path)
+    bare = tmp_path / "o.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(repo), str(bare)],
+                   check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "remote", "set-head", "origin", "main")
+    base_ref, base_branch = rt.resolve_base(repo)
+    assert base_ref == "origin/main"
+    assert base_branch == "main"
 
 
 # --- per-phase model selection ------------------------------------------
@@ -868,6 +1246,212 @@ def test_single_shot_review_empty_completion_fails(tmp_path, fake_cfg, monkeypat
                         lambda *a, **k: _FakeResp(200, {"choices": [{"message": {"content": ""}}]}))
     ok, text = rt.single_shot_review(fake_cfg, "review", tmp_path / "r.log")
     assert ok is False and "empty" in text.lower()
+
+
+# --- _chat_completion (shared cheap-completion plumbing) -----------------
+def test_chat_completion_parses_content_and_usage(tmp_path, monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "hello"}}],
+              "usage": {"prompt_tokens": 7, "completion_tokens": 3}}))
+    ok, text, usage = rt._chat_completion("u", "k", "m", "p", 10, tmp_path / "c.log")
+    assert ok is True and text == "hello"
+    assert usage == {"input_tokens": 7, "output_tokens": 3}
+    assert (tmp_path / "c.log").exists()       # transcript teed
+
+
+def test_chat_completion_429_and_non200_fail(tmp_path, monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(429, text="slow down"))
+    ok, text, usage = rt._chat_completion("u", "k", "m", "p", 10, tmp_path / "c.log")
+    assert ok is False and "quota exceeded" in text.lower() and usage == {}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(500, text="boom"))
+    ok, text, _ = rt._chat_completion("u", "k", "m", "p", 10, tmp_path / "c.log")
+    assert ok is False and "HTTP 500" in text
+
+
+def test_chat_completion_request_exception_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("down")))
+    ok, text, usage = rt._chat_completion("u", "k", "m", "p", 10, tmp_path / "c.log")
+    assert ok is False and "request failed" in text and usage == {}
+
+
+def test_single_shot_review_still_works_after_refactor(tmp_path, fake_cfg, monkeypatch):
+    # The refactor must be behavior-preserving: single_shot_review still returns (ok, text).
+    _enable_single_shot(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "LGTM"}}],
+              "usage": {"prompt_tokens": 1, "completion_tokens": 1}}))
+    ok, text = rt.single_shot_review(fake_cfg, "review", tmp_path / "r.log")
+    assert ok is True and text == "LGTM"
+
+
+# --- plan-critique gate --------------------------------------------------
+def _enable_critique(fake_cfg):
+    fake_cfg.critique_api_url = "https://api.groq.com/openai/v1/chat/completions"
+    fake_cfg.critique_api_key = "sk_critique"
+    fake_cfg.critique_api_model = "groq/llama-3.1-8b-instant"
+
+
+def test_critique_prompt_includes_plan_and_title():
+    ticket = {"id": 7, "title": "Add CSV export", "priority": "low", "description": "d"}
+    prompt = rt.critique_prompt(ticket, "STEP 1: edit foo.py")
+    assert "Add CSV export" in prompt and "STEP 1: edit foo.py" in prompt
+    assert "VERDICT: APPROVE" in prompt and "VERDICT: REVISE" in prompt
+
+
+def test_run_critique_revise_with_notes(tmp_path, fake_cfg, monkeypatch):
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "VERDICT: REVISE\n- add a test"}}],
+              "usage": {"prompt_tokens": 5, "completion_tokens": 4}}))
+    client = RunRecordingClient()
+    ok, verdict, notes = rt.run_critique(fake_cfg, client, {"id": 1, "title": "t", "description": "d"},
+                                         "plan", tmp_path / "c.log")
+    assert ok is True and verdict == "REVISE" and "add a test" in notes
+    # the critique is surfaced as a first-class AgentRun
+    assert len(client.runs) == 1
+    tid, fields = client.runs[0]
+    assert tid == 1 and fields["agent"] == "critique-api" and fields["phase"] == "plan-critique"
+    assert fields["model"] == fake_cfg.critique_api_model and fields["status"] == "succeeded"
+    assert fields["input_tokens"] == 5 and fields["output_tokens"] == 4
+
+
+def test_run_critique_approve(tmp_path, fake_cfg, monkeypatch):
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "VERDICT: APPROVE\nlooks complete"}}]}))
+    ok, verdict, _ = rt.run_critique(fake_cfg, RunRecordingClient(),
+                                     {"id": 1, "title": "t", "description": "d"},
+                                     "plan", tmp_path / "c.log")
+    assert ok is True and verdict == "APPROVE"
+
+
+def test_run_critique_unparseable_defaults_approve(tmp_path, fake_cfg, monkeypatch):
+    # A malformed critique must never block planning — fail open to APPROVE.
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "I think the plan is fine, ship it."}}]}))
+    ok, verdict, _ = rt.run_critique(fake_cfg, RunRecordingClient(),
+                                     {"id": 1, "title": "t", "description": "d"},
+                                     "plan", tmp_path / "c.log")
+    assert ok is True and verdict == "APPROVE"
+
+
+def test_run_critique_http_error_reports_not_ok(tmp_path, fake_cfg, monkeypatch):
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(429, text="rate"))
+    client = RunRecordingClient()
+    ok, verdict, _ = rt.run_critique(fake_cfg, client, {"id": 1, "title": "t", "description": "d"},
+                                     "plan", tmp_path / "c.log")
+    assert ok is False and verdict == "APPROVE"   # caller fails open on ok=False
+    # a failed call is still recorded as a failed run (zero usage), so it stays visible
+    assert client.runs and client.runs[0][1]["status"] == "failed"
+
+
+def test_run_critique_agent_run_post_failure_is_swallowed(tmp_path, fake_cfg, monkeypatch):
+    # A backend that 422s/drops the AgentRun POST must not break the critique verdict.
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "VERDICT: APPROVE"}}]}))
+    ok, verdict, _ = rt.run_critique(fake_cfg, RunRecordingClient(raise_on_post=True),
+                                     {"id": 1, "title": "t", "description": "d"},
+                                     "plan", tmp_path / "c.log")
+    assert ok is True and verdict == "APPROVE"
+
+
+def _plan_harness(fake_cfg, monkeypatch, agent_results, critique_results):
+    """Wire do_plan's externals. `agent_results` is an iterator of (ok, plan) for each
+    run_agent_tracked call; `critique_results` an iterator of (ok, verdict, notes) for each
+    run_critique call (None ⇒ critique must never be invoked). Records the agent prompts."""
+    monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    rec = {"prompts": [], "critiqued": []}
+
+    def fake_agent(cfg, client, ticket, prompt, repo, mode, log):
+        rec["prompts"].append(prompt)
+        return next(agent_results)
+
+    monkeypatch.setattr(rt, "run_agent_tracked", fake_agent)
+    if critique_results is None:
+        monkeypatch.setattr(rt, "run_critique",
+                            lambda *a, **k: pytest.fail("critique must not run when disabled"))
+    else:
+        def fake_critique(cfg, client, ticket, plan, log):
+            rec["critiqued"].append(plan)
+            return next(critique_results)
+        monkeypatch.setattr(rt, "run_critique", fake_critique)
+    return rec
+
+
+def _plan_ticket():
+    return {"id": 1, "title": "t", "description": "d", "priority": "low",
+            "tags": [], "created_by": 9}
+
+
+def _plan_body(client):
+    return next(b for _, b in client.comments_added if rt.PLAN_MARKER in b)
+
+
+def test_do_plan_gate_disabled_runs_planner_once(fake_cfg, monkeypatch, tmp_path):
+    # No CRITIQUE_API_* (default) → run_critique never called, plan posted as-is.
+    rec = _plan_harness(fake_cfg, monkeypatch, iter([(True, "PLAN A")]), critique_results=None)
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 1
+    body = _plan_body(client)
+    assert "PLAN A" in body and "🧭" not in body
+
+
+def test_do_plan_critique_approve_notes_approved(fake_cfg, monkeypatch, tmp_path):
+    _enable_critique(fake_cfg)
+    rec = _plan_harness(fake_cfg, monkeypatch, iter([(True, "PLAN A")]),
+                        critique_results=iter([(True, "APPROVE", "good")]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 1 and rec["critiqued"] == ["PLAN A"]
+    assert "approved" in _plan_body(client)
+
+
+def test_do_plan_critique_revise_then_approve_replans(fake_cfg, monkeypatch, tmp_path):
+    _enable_critique(fake_cfg)
+    fake_cfg.critique_max_revisions = 1
+    rec = _plan_harness(fake_cfg, monkeypatch,
+                        iter([(True, "PLAN1"), (True, "PLAN2")]),
+                        critique_results=iter([(True, "REVISE", "- add a test"),
+                                               (True, "APPROVE", "ok")]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 2                  # one re-plan
+    assert "add a test" in rec["prompts"][1]         # critique notes fed to the re-plan
+    body = _plan_body(client)
+    assert "PLAN2" in body and "approved" in body
+
+
+def test_do_plan_critique_exhausted_flags_concerns(fake_cfg, monkeypatch, tmp_path):
+    _enable_critique(fake_cfg)
+    fake_cfg.critique_max_revisions = 1
+    rec = _plan_harness(fake_cfg, monkeypatch,
+                        iter([(True, "PLAN1"), (True, "PLAN2")]),
+                        critique_results=iter([(True, "REVISE", "gap A"),
+                                               (True, "REVISE", "gap B")]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 2
+    body = _plan_body(client)
+    assert "still flags concerns" in body and "gap B" in body and "PLAN2" in body
+
+
+def test_do_plan_critique_error_proceeds_with_plan(fake_cfg, monkeypatch, tmp_path):
+    # run_critique ok=False (quota/flaky) → fail open, publish the original plan, no re-plan.
+    _enable_critique(fake_cfg)
+    rec = _plan_harness(fake_cfg, monkeypatch, iter([(True, "PLAN A")]),
+                        critique_results=iter([(False, "APPROVE", "boom")]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 1
+    body = _plan_body(client)
+    assert "PLAN A" in body and "🧭" not in body     # no verdict line on skip
 
 
 def test_do_review_uses_single_shot_when_configured(fake_cfg, monkeypatch):
