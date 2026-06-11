@@ -302,6 +302,27 @@ ticket carries the `code_blocks`. Set `REVIEW_API_URL` / `REVIEW_API_KEY` /
 Mistral, OpenRouter) and reviews run as a single chat completion instead of the
 opencode agent loop, sidestepping the loop's fragility. Unset = review via the agent.
 
+## Plan-critique gate (optional)
+
+The plan phase trusts the planner to produce a complete, implementable plan; a weak plan
+(wrong files, vague steps, a misread requirement) isn't caught until the expensive
+implement run has already burned a strong model on it. Set `CRITIQUE_API_URL` /
+`CRITIQUE_API_KEY` / `CRITIQUE_API_MODEL` (any OpenAI-compatible `/chat/completions`
+endpoint — point it at a cheap, fast model) and a **cheap model vets each freshly
+produced plan before the human sees it**. It answers `VERDICT: APPROVE` or
+`VERDICT: REVISE`; on REVISE the planner is re-invoked with the critique's notes, up to
+`CRITIQUE_MAX_REVISIONS` times (default 1), and the verdict is appended to the plan
+comment so the reviewer sees it. It runs **inside the plan phase**, before the
+`/approve` hand-back — no extra ticket state.
+
+It is **fail-open**: a quota'd, flaky, or unparseable critique never blocks a plan that
+was actually produced (the resolver proceeds with the plan it has). Blank `CRITIQUE_API_*`
+= gate off (plans go straight to the human — the legacy behavior). Each REVISE costs an
+extra (cheap) critique call plus a full re-plan agent run, so keep `CRITIQUE_MAX_REVISIONS`
+small. The critique's token usage is recorded as a `token_usage` audit event
+(`agent=critique-api`); it is not yet a first-class `AgentRun` (the backend `AgentName`
+enum would need widening — a recommended follow-up).
+
 ## Verification gate (optional)
 
 The implement phase trusts the agent to run tests. To verify independently, set

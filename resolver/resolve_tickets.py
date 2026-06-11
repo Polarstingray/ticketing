@@ -1430,8 +1430,42 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     if not ok:
         fail(client, ticket, f"Planning failed.\n\n```\n{tail(result)}\n```")
         return
+    # Plan-critique gate: a cheap model vets the plan before the human (and the
+    # expensive implement run) sees it. A REVISE verdict re-invokes the planner with
+    # the critique notes, up to critique_max_revisions times. Fail-open throughout — a
+    # flaky/quota'd critique must never block a produced plan.
+    critique_summary = ""
+    if _critique_enabled(cfg):
+        for rev in range(cfg.critique_max_revisions + 1):
+            cts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            c_log = cfg.logs_dir / f"ticket-{ticket['id']}-critique-{cts}.log"
+            ok_c, verdict, notes = run_critique(cfg, ticket, result, c_log)
+            if not ok_c:
+                phase("plan-critique-skipped", ticket,
+                      f"#{ticket['id']}: critique unavailable, proceeding with plan")
+                break
+            if verdict == "APPROVE":
+                critique_summary = "🧭 _Plan critique: approved._"
+                phase("plan-critique-approved", ticket, f"#{ticket['id']}: plan approved by critique")
+                break
+            if rev < cfg.critique_max_revisions:
+                phase("plan-critique-revise", ticket,
+                      f"#{ticket['id']}: critique requested revision (attempt {rev + 1})")
+                rts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                r_log = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{rts}.log"
+                ok, result = run_agent_tracked(cfg, client, ticket,
+                    plan_prompt(ticket, repo, notes), repo, "plan", r_log)
+                if not ok:
+                    fail(client, ticket, f"Re-planning after critique failed.\n\n```\n{tail(result)}\n```")
+                    return
+            else:
+                critique_summary = f"🧭 _Plan critique still flags concerns:_\n\n{notes}"
+                phase("plan-critique-flagged", ticket,
+                      f"#{ticket['id']}: critique still flagged after {cfg.critique_max_revisions} revision(s)")
     body = (
-        f"{PLAN_MARKER} (Stingray resolver)\n\n{result}\n\n---\n"
+        f"{PLAN_MARKER} (Stingray resolver)\n\n{result}\n\n"
+        + (f"{critique_summary}\n\n" if critique_summary else "")
+        + "---\n"
         "Reply with `/approve` (and re-assign this ticket to me) to implement, "
         "or `/revise <notes>` to adjust the plan."
     )
@@ -1612,48 +1646,115 @@ def _single_shot_enabled(cfg) -> bool:
                 and getattr(cfg, "review_api_model", ""))
 
 
+def _chat_completion(url: str, key: str, model: str, prompt: str,
+                     timeout: int, log_path: Path) -> tuple[bool, str, dict]:
+    """One OpenAI-compatible chat completion — no agent loop, no tools. The shared
+    plumbing behind both single_shot_review and run_critique: POST to a
+    `/chat/completions` endpoint (Groq / Mistral / OpenRouter / …), parse
+    `choices[0].message.content`, tee a small transcript to `log_path`, and return
+    (ok, text_or_error, usage). `usage` carries normalized input_tokens/output_tokens
+    (from the response's `usage`) for the caller to emit; it's `{}` on failure."""
+    import requests  # local import: only the single-shot path needs it
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    try:
+        resp = requests.post(url, json=body, headers=headers, timeout=timeout)
+    except requests.RequestException as e:
+        return False, f"chat-completion request failed: {e}", {}
+    # Tee a small transcript so `logs.py <id>` shows the run like an agent run.
+    try:
+        log_path.write_text(f"POST {url} model={model}\n"
+                            f"HTTP {resp.status_code}\n\n{tail(resp.text, 8000)}\n")
+    except OSError:
+        pass
+    if resp.status_code == 429:
+        return False, ("chat-completion quota exceeded (HTTP 429) — the model is "
+                       "rate/quota limited, not unavailable. Use a different model / "
+                       "provider or wait for the quota window to reset."), {}
+    if resp.status_code != 200:
+        return False, f"chat-completion returned HTTP {resp.status_code}: {tail(resp.text, 500)}", {}
+    try:
+        data = resp.json()
+        text = (data["choices"][0]["message"]["content"] or "").strip()
+    except (ValueError, KeyError, IndexError, TypeError) as e:
+        return False, f"could not parse chat-completion response: {e}", {}
+    raw = data.get("usage") or {} if isinstance(data, dict) else {}
+    usage = {"input_tokens": raw.get("prompt_tokens"),
+             "output_tokens": raw.get("completion_tokens")}
+    if not text:
+        return False, "chat-completion returned an empty completion.", usage
+    return True, text, usage
+
+
 def single_shot_review(cfg, prompt: str, log_path: Path) -> tuple[bool, str]:
     """Run a code review as ONE OpenAI-compatible chat completion — no agent loop, no
     tools (the ticket's code_blocks are already in `prompt`). This is the reliable,
     provider-agnostic path for the read-only review case: it works against any
     `/chat/completions` endpoint (Groq / Mistral / OpenRouter / …) and can't get stuck
     in the agent's tool loop. Returns (ok, review_text_or_error)."""
-    import requests  # local import: only the single-shot path needs it
     logger = audit.get_logger()
-    body = {"model": cfg.review_api_model,
-            "messages": [{"role": "user", "content": prompt}]}
-    headers = {"Authorization": f"Bearer {cfg.review_api_key}",
-               "Content-Type": "application/json"}
-    try:
-        resp = requests.post(cfg.review_api_url, json=body, headers=headers,
-                             timeout=_phase_timeout(cfg, "review"))
-    except requests.RequestException as e:
-        return False, f"Review API request failed: {e}"
-    # Tee a small transcript so `logs.py <id>` shows the review run like an agent run.
-    try:
-        log_path.write_text(f"POST {cfg.review_api_url} model={cfg.review_api_model}\n"
-                            f"HTTP {resp.status_code}\n\n{tail(resp.text, 8000)}\n")
-    except OSError:
-        pass
-    if resp.status_code == 429:
-        return False, ("Review API quota exceeded (HTTP 429) — the model is rate/quota "
-                       "limited, not unavailable. Use a different REVIEW_API_MODEL / "
-                       "provider or wait for the quota window to reset.")
-    if resp.status_code != 200:
-        return False, f"Review API returned HTTP {resp.status_code}: {tail(resp.text, 500)}"
-    try:
-        data = resp.json()
-        text = (data["choices"][0]["message"]["content"] or "").strip()
-    except (ValueError, KeyError, IndexError, TypeError) as e:
-        return False, f"Could not parse Review API response: {e}"
-    usage = data.get("usage") or {} if isinstance(data, dict) else {}
-    _emit_token_usage(logger, "review-api", "review", {
-        "input_tokens": usage.get("prompt_tokens"),
-        "output_tokens": usage.get("completion_tokens"),
-    })
-    if not text:
-        return False, "Review API returned an empty completion."
-    return True, text
+    ok, text, usage = _chat_completion(
+        cfg.review_api_url, cfg.review_api_key, cfg.review_api_model, prompt,
+        _phase_timeout(cfg, "review"), log_path)
+    if usage:
+        _emit_token_usage(logger, "review-api", "review", usage)
+    return ok, text
+
+
+def _critique_enabled(cfg) -> bool:
+    """The plan-critique gate runs when a CRITIQUE_API_* endpoint is fully configured;
+    otherwise plans go straight to the human, the legacy behavior."""
+    return bool(getattr(cfg, "critique_api_url", "") and getattr(cfg, "critique_api_key", "")
+                and getattr(cfg, "critique_api_model", ""))
+
+
+_CRITIQUE_VERDICT_RE = re.compile(r"VERDICT:\s*(APPROVE|REVISE)", re.IGNORECASE)
+
+
+def critique_prompt(ticket: dict, plan: str) -> str:
+    """Ask a cheap model to judge whether a proposed plan is concrete enough to hand
+    to the (expensive) implement run."""
+    return "\n".join([
+        "You are a senior engineer reviewing a proposed implementation PLAN before it",
+        "is handed to an automated agent that will write the code. Judge ONLY whether",
+        "the plan is concrete and complete enough to implement correctly — do not write",
+        "any code yourself.",
+        "",
+        f"Ticket #{ticket['id']}: {ticket['title']}",
+        f"Priority: {ticket.get('priority')}",
+        "Description:",
+        ticket.get("description") or "(none)",
+        "",
+        "Check: Does it name the specific files to change? Are the steps actionable",
+        "(not vague hand-waving)? Does it describe how to verify the change? Does it",
+        "appear to misread or skip part of the requirement?",
+        "",
+        "Answer with a FIRST LINE of exactly `VERDICT: APPROVE` or `VERDICT: REVISE`,",
+        "then a few terse bullet points. Use REVISE only for concrete, fixable gaps;",
+        "minor style nits are not grounds to revise.",
+        "",
+        "--- PLAN UNDER REVIEW ---",
+        plan,
+    ])
+
+
+def run_critique(cfg, ticket: dict, plan: str, log_path: Path) -> tuple[bool, str, str]:
+    """Vet a freshly produced plan with the cheap CRITIQUE_API_* model. Returns
+    (ok, verdict, notes): `ok` is False when the API call failed (caller fails open and
+    proceeds); `verdict` is "APPROVE" or "REVISE". An unparseable verdict defaults to
+    APPROVE — a malformed critique must never block planning. Emits a token_usage audit
+    event so the critique's cost is visible in the logs."""
+    logger = audit.get_logger()
+    ok, text, usage = _chat_completion(
+        cfg.critique_api_url, cfg.critique_api_key, cfg.critique_api_model,
+        critique_prompt(ticket, plan), _phase_timeout(cfg, "plan"), log_path)
+    if usage:
+        _emit_token_usage(logger, "critique-api", "plan-critique", usage)
+    if not ok:
+        return False, "APPROVE", text
+    m = _CRITIQUE_VERDICT_RE.search(text)
+    verdict = m.group(1).upper() if m else "APPROVE"
+    return True, verdict, text
 
 
 def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | None,
