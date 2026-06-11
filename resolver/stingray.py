@@ -133,6 +133,14 @@ class StingrayClient:
     def update_ticket(self, ticket_id: int, **fields: Any) -> dict:
         return self._request("PATCH", f"/tickets/{ticket_id}", json=fields).json()
 
+    def create_agent_run(self, ticket_id: int, **fields: Any) -> dict:
+        """Record one resolver phase (agent, phase, model, token usage, cost,
+        status) against a ticket. Datetimes are passed as ISO-8601 strings.
+        Reuses the retry/backoff/audit wrapper."""
+        return self._request(
+            "POST", f"/tickets/{ticket_id}/agent-runs", json=fields
+        ).json()
+
     # --- comments --------------------------------------------------------
     def list_comments(self, ticket_id: int) -> list[dict]:
         return self._request("GET", f"/tickets/{ticket_id}/comments").json()

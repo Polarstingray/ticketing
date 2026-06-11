@@ -16,6 +16,7 @@ See actions only:     python resolve_tickets.py --dry-run
 from __future__ import annotations
 
 import argparse
+import contextvars
 import hashlib
 import json
 import logging
@@ -478,6 +479,11 @@ def _claude_event(logger, ticket_id, line: str, result: dict) -> None:
         return
     etype = evt.get("type")
     if etype == "assistant":
+        # Remember the model the agent actually used (the terminal result event
+        # doesn't carry it); first one wins.
+        model = (evt.get("message", {}) or {}).get("model")
+        if model and not result.get("model"):
+            result["model"] = model
         for block in (evt.get("message", {}) or {}).get("content", []) or []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "?")
@@ -491,23 +497,52 @@ def _claude_event(logger, ticket_id, line: str, result: dict) -> None:
         result.update(evt)
 
 
+# Per-run usage collector. run_agent_tracked sets this to a dict before invoking
+# the agent; _emit_token_usage fills it in so the phase handler can POST the usage
+# as an AgentRun. The sweep is sequential, so a contextvar is a safe handoff.
+_RUN_USAGE: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "run_usage", default=None
+)
+
+
+def _normalize_claude_usage(result: dict) -> dict:
+    """Pull normalized token usage + cost out of Claude's terminal `result`
+    event (its `usage` block + `total_cost_usd`). Missing fields => 0."""
+    usage = result.get("usage") or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+        "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+        "cost_usd": float(result.get("total_cost_usd") or 0.0),
+        "model": result.get("model") or "",
+    }
+
+
 def _emit_token_usage(logger, agent: str, mode: str, usage: dict) -> None:
-    """Record one phase's token usage as a `token_usage` audit event so cost can be
-    measured per agent/phase from the JSONL (no return-signature change needed).
-    `usage` carries the canonical fields; missing ones default to 0 so absence is
-    visible (and flags provider schema drift) rather than silently dropped."""
-    i = int(usage.get("input_tokens") or 0)
-    o = int(usage.get("output_tokens") or 0)
-    cr = int(usage.get("cache_read_tokens") or 0)
-    cw = int(usage.get("cache_write_tokens") or 0)
-    cost = float(usage.get("cost_usd") or 0.0)
+    """Record normalized per-phase token usage to the JSONL audit log (the source
+    of truth) and, if a run collector is active (see run_agent_tracked), stash it
+    so the phase handler can POST it to the backend as an AgentRun.
+
+    The numeric fields are coerced to 0 so a partial/empty `usage` (e.g. a timeout,
+    or a review backend that reports only prompt/completion tokens) still emits a
+    visible zero rather than a missing key; a non-empty `model` is preserved."""
+    norm: dict = {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_read_tokens": int(usage.get("cache_read_tokens") or 0),
+        "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+        "cost_usd": float(usage.get("cost_usd") or 0.0),
+    }
+    if usage.get("model"):
+        norm["model"] = usage["model"]
     audit.audit_event(
-        logger, "token_usage",
-        f"{agent} {mode}: in={i} out={o} cache_r={cr} cache_w={cw} cost=${cost:.4f}",
-        level=logging.INFO, agent=agent, mode=mode,
-        input_tokens=i, output_tokens=o,
-        cache_read_tokens=cr, cache_write_tokens=cw, cost_usd=cost,
+        logger, "token_usage", f"{agent} ({mode}) token usage",
+        level=logging.INFO, category=agent, mode=mode, agent=agent, **norm,
     )
+    sink = _RUN_USAGE.get()
+    if sink is not None:
+        sink.update({**norm, "agent": agent})
 
 
 def model_for(cfg, mode: str) -> str:
@@ -565,6 +600,11 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
     )
     if launch_err is not None:
         return False, f"Could not launch Claude ({cmd[0]}): {launch_err}"
+
+    # Record token usage for every outcome (a timeout leaves `result` empty -> a
+    # zero-usage record, which still makes the attempt visible downstream).
+    _emit_token_usage(logger, "claude", mode, _normalize_claude_usage(result))
+
     if timed_out:
         return False, f"Claude timed out after {timeout}s."
     result_text = (result.get("result") or "").strip()
@@ -960,6 +1000,47 @@ def run_agent(cfg: Config, prompt: str, cwd: Path, mode: str,
     return agents.get_runner(cfg.agent).run(cfg, prompt, cwd, mode, log_path)
 
 
+def run_agent_tracked(cfg: Config, client: StingrayClient, ticket: dict, prompt: str,
+                      cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
+    """Run one phase, then POST its token usage/cost to the backend as an
+    AgentRun so the otherwise-invisible resolver work shows up on the ticket.
+
+    The usage is known deep inside the agent runner (at the _emit_token_usage
+    call); we bridge it out via the _RUN_USAGE contextvar. POSTing must never
+    break resolution, so any failure here is swallowed (the JSONL audit log
+    remains the source of truth, and the resolver still works against an old
+    backend that lacks the endpoint)."""
+    started = datetime.now(timezone.utc)
+    collected: dict = {}
+    token = _RUN_USAGE.set(collected)
+    try:
+        ok, text = run_agent(cfg, prompt, cwd, mode, log_path)
+    finally:
+        _RUN_USAGE.reset(token)
+    try:
+        client.create_agent_run(
+            ticket["id"],
+            agent=collected.get("agent") or cfg.agent,
+            phase=mode,
+            model=collected.get("model") or getattr(cfg, "claude_model", "") or "",
+            input_tokens=collected.get("input_tokens", 0),
+            output_tokens=collected.get("output_tokens", 0),
+            cache_read_tokens=collected.get("cache_read_tokens", 0),
+            cache_write_tokens=collected.get("cache_write_tokens", 0),
+            cost_usd=collected.get("cost_usd", 0.0),
+            status="succeeded" if ok else "failed",
+            started_at=started.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        audit.audit_event(
+            audit.get_logger(), "agent_run_post_failed",
+            f"#{ticket['id']}: failed to POST agent run ({mode})",
+            level=logging.WARNING, phase=mode,
+        )
+    return ok, text
+
+
 # --- git / worktree ------------------------------------------------------
 def has_origin(repo: Path) -> bool:
     return run(["git", "-C", str(repo), "remote", "get-url", "origin"])[0] == 0
@@ -1244,7 +1325,8 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     phase("planning", ticket, f"#{ticket['id']}: planning ({'revise' if revise_notes else 'fresh'})")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{ts}.log"
-    ok, result = run_agent(cfg, plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
+    ok, result = run_agent_tracked(cfg, client, ticket,
+                                   plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
     if not ok:
         fail(client, ticket, f"Planning failed.\n\n```\n{tail(result)}\n```")
         return
@@ -1302,8 +1384,9 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         # Snapshot the MAIN checkout's tracked-file state so we can tell afterwards
         # whether the agent escaped the worktree and edited the real tree.
         dirty_before = _tracked_dirty(repo)
-        ok, summary = run_agent(
-            cfg, implement_prompt(ticket, wt, plan, reviewer_notes, main_repo=repo),
+        ok, summary = run_agent_tracked(
+            cfg, client, ticket,
+            implement_prompt(ticket, wt, plan, reviewer_notes, main_repo=repo),
             wt, "implement", log_path)
         escaped = _tracked_dirty(repo) - dirty_before
         if escaped:
@@ -1441,19 +1524,50 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-review-{ts}.log"
     prompt = review_prompt(ticket, repo, want_fix)
-    if single_shot:
-        # No tools needed — the code_blocks are in the prompt. A direct chat
-        # completion sidesteps the (fragile, quota-burning) agent loop entirely.
-        ok, result = single_shot_review(cfg, prompt, log_path)
-    else:
-        # The agent needs a cwd; a repo-less review reads only the embedded blocks,
-        # so any empty scratch dir will do. Clean it up afterwards.
-        scratch = Path(tempfile.mkdtemp(prefix=f"review-{ticket['id']}-")) if repo is None else None
-        try:
-            ok, result = run_agent(cfg, prompt, repo or scratch, "review", log_path)
-        finally:
-            if scratch is not None:
-                shutil.rmtree(scratch, ignore_errors=True)
+    # Surface the review as an AgentRun too (#56), uniformly for either backend: a
+    # _RUN_USAGE sink collects whatever _emit_token_usage records (single-shot fills
+    # it from the API response; the agent path from its runner) and we POST once.
+    started = datetime.now(timezone.utc)
+    collected: dict = {}
+    usage_token = _RUN_USAGE.set(collected)
+    try:
+        if single_shot:
+            # No tools needed — the code_blocks are in the prompt. A direct chat
+            # completion sidesteps the (fragile, quota-burning) agent loop entirely.
+            ok, result = single_shot_review(cfg, prompt, log_path)
+        else:
+            # The agent needs a cwd; a repo-less review reads only the embedded blocks,
+            # so any empty scratch dir will do. Clean it up afterwards.
+            scratch = Path(tempfile.mkdtemp(prefix=f"review-{ticket['id']}-")) if repo is None else None
+            try:
+                ok, result = run_agent(cfg, prompt, repo or scratch, "review", log_path)
+            finally:
+                if scratch is not None:
+                    shutil.rmtree(scratch, ignore_errors=True)
+    finally:
+        _RUN_USAGE.reset(usage_token)
+    try:
+        client.create_agent_run(
+            ticket["id"],
+            agent=collected.get("agent") or (cfg.review_api_model if single_shot else cfg.agent),
+            phase="review",
+            model=collected.get("model") or (cfg.review_api_model if single_shot
+                                             else model_for(cfg, "review")),
+            input_tokens=collected.get("input_tokens", 0),
+            output_tokens=collected.get("output_tokens", 0),
+            cache_read_tokens=collected.get("cache_read_tokens", 0),
+            cache_write_tokens=collected.get("cache_write_tokens", 0),
+            cost_usd=collected.get("cost_usd", 0.0),
+            status="succeeded" if ok else "failed",
+            started_at=started.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        audit.audit_event(
+            audit.get_logger(), "agent_run_post_failed",
+            f"#{ticket['id']}: failed to POST agent run (review)",
+            level=logging.WARNING, phase="review",
+        )
     if not ok:
         fail(client, ticket, f"Review failed.\n\n```\n{tail(result)}\n```")
         return
