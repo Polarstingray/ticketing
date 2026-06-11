@@ -93,9 +93,6 @@
   color: #4ade80;
   border-color: #22552f;
 }
-.stRevoked {
-  color: var(--text-dim);
-}
 .stExpired {
   color: #fbbf24;
   border-color: #5a4413;

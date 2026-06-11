@@ -16,7 +16,8 @@ export default function Profile() {
 
   async function loadKeys() {
     try {
-      setKeys(await api.listApiKeys(user.id));
+      const data = await api.listApiKeys(user.id);
+      setKeys(data.filter((k) => !k.revoked));
     } catch (e) {
       setError(e.message);
     }
@@ -75,7 +76,6 @@ export default function Profile() {
   }
 
   function keyStatus(k) {
-    if (k.revoked) return { label: "Revoked", cls: styles.stRevoked };
     if (k.expires_at && new Date(k.expires_at) <= new Date())
       return { label: "Expired", cls: styles.stExpired };
     return { label: "Active", cls: styles.stActive };
