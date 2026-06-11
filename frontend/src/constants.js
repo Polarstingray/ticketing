@@ -22,6 +22,34 @@ export const TYPE_LABELS = {
   task: "Task",
 };
 
+// Resolver agent-run phases (see backend AgentRun / resolver _emit_token_usage).
+export const AGENT_PHASE_LABELS = {
+  plan: "Plan",
+  implement: "Implement",
+  review: "Review",
+};
+
+// A run's total token spend (input + output + both cache buckets).
+export function totalTokens(run) {
+  return (
+    (run.input_tokens || 0) +
+    (run.output_tokens || 0) +
+    (run.cache_read_tokens || 0) +
+    (run.cache_write_tokens || 0)
+  );
+}
+
+// Integer count with thousands separators, e.g. 1234567 -> "1,234,567".
+export function formatTokens(n) {
+  return Number(n || 0).toLocaleString();
+}
+
+// USD with enough precision to show fractions of a cent (agent runs are cheap),
+// e.g. 0.0123 -> "$0.0123". Larger sums still read naturally ($12.3456).
+export function formatUsd(n) {
+  return "$" + Number(n || 0).toFixed(4);
+}
+
 // Human-readable predicate for an activity entry (the actor name is prepended by
 // the caller). `detail` shape depends on the action — see backend activity.py.
 export function describeActivity(entry) {

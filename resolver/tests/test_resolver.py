@@ -1392,3 +1392,84 @@ def test_process_directive_only_dry_run_changes_nothing(fake_cfg):
               "description": '/ticket task "x"'}
     rt.process(fake_cfg, client, ticket, dry_run=True)
     assert client.created == [] and client.updates == [] and client.comments_added == []
+
+
+# --- agent-run tracking (#56): POST per-phase usage to the backend ----------
+class RunRecordingClient:
+    """Captures create_agent_run calls; optionally raises to test resilience."""
+
+    def __init__(self, raise_on_post=False):
+        self.runs: list[tuple[int, dict]] = []
+        self.raise_on_post = raise_on_post
+
+    def create_agent_run(self, ticket_id, **fields):
+        self.runs.append((ticket_id, fields))
+        if self.raise_on_post:
+            raise requests.ConnectionError("backend down")
+        return {"id": len(self.runs)}
+
+
+def _tracking_cfg():
+    from types import SimpleNamespace
+    return SimpleNamespace(agent="claude", claude_model="claude-opus-4-8")
+
+
+def test_run_agent_tracked_posts_captured_usage(monkeypatch):
+    """The usage emitted deep inside the runner (via _emit_token_usage) is
+    bridged out and POSTed as a succeeded AgentRun for the phase."""
+    def fake_run_agent(cfg, prompt, cwd, mode, log_path):
+        rt._emit_token_usage(logging.getLogger("resolver"), "claude", mode, {
+            "input_tokens": 1000, "output_tokens": 200,
+            "cache_read_tokens": 50, "cache_write_tokens": 10,
+            "cost_usd": 0.0123, "model": "claude-opus-4-8",
+        })
+        return True, "done"
+
+    monkeypatch.setattr(rt, "run_agent", fake_run_agent)
+    client = RunRecordingClient()
+    ok, text = rt.run_agent_tracked(_tracking_cfg(), client, {"id": 7}, "p",
+                                    None, "plan", None)
+    assert (ok, text) == (True, "done")
+    assert len(client.runs) == 1
+    ticket_id, fields = client.runs[0]
+    assert ticket_id == 7
+    assert fields["phase"] == "plan"
+    assert fields["agent"] == "claude"
+    assert fields["status"] == "succeeded"
+    assert fields["input_tokens"] == 1000
+    assert fields["cost_usd"] == 0.0123
+    assert fields["model"] == "claude-opus-4-8"
+    assert fields["started_at"] and fields["finished_at"]
+
+
+def test_run_agent_tracked_records_failure_with_zero_usage(monkeypatch):
+    """A launch failure emits no usage -> a 'failed' run with zero tokens is
+    still recorded, so the attempt stays visible."""
+    monkeypatch.setattr(rt, "run_agent", lambda *a, **k: (False, "boom"))
+    client = RunRecordingClient()
+    ok, _ = rt.run_agent_tracked(_tracking_cfg(), client, {"id": 9}, "p",
+                                 None, "implement", None)
+    assert ok is False
+    _, fields = client.runs[0]
+    assert fields["phase"] == "implement"
+    assert fields["status"] == "failed"
+    assert fields["input_tokens"] == 0
+    assert fields["cost_usd"] == 0.0
+
+
+def test_run_agent_tracked_swallows_post_failure(monkeypatch):
+    """A failing create_agent_run must never abort the phase."""
+    monkeypatch.setattr(rt, "run_agent", lambda *a, **k: (True, "ok"))
+    client = RunRecordingClient(raise_on_post=True)
+    ok, text = rt.run_agent_tracked(_tracking_cfg(), client, {"id": 3}, "p",
+                                    None, "review", None)
+    assert (ok, text) == (True, "ok")  # phase result preserved despite POST error
+
+
+def test_emit_token_usage_noop_without_collector():
+    """Outside a tracked run (no contextvar set), _emit_token_usage just audits
+    and doesn't raise."""
+    rt._emit_token_usage(logging.getLogger("resolver"), "claude", "plan", {
+        "input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0,
+        "cache_write_tokens": 0, "cost_usd": 0.0, "model": "",
+    })
