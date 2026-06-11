@@ -44,12 +44,12 @@ from stingray import StingrayClient
 HERE = Path(__file__).resolve().parent
 
 # --- tag conventions -----------------------------------------------------
-CLAUDE_PREFIX = "claude:"
-TAG_PLANNING = "claude:planning"            # plan run in flight
-TAG_AWAIT_PLAN = "claude:awaiting-plan-approval"
-TAG_IMPLEMENTING = "claude:implementing"    # implement run in flight
-TAG_REVIEWING = "claude:reviewing"          # code-review run in flight
-TAG_AWAIT_PR = "claude:awaiting-pr-review"
+RESOLVER_PREFIX = "resolver:"
+TAG_PLANNING = "resolver:planning"            # plan run in flight
+TAG_AWAIT_PLAN = "resolver:awaiting-plan-approval"
+TAG_IMPLEMENTING = "resolver:implementing"    # implement run in flight
+TAG_REVIEWING = "resolver:reviewing"          # code-review run in flight
+TAG_AWAIT_PR = "resolver:awaiting-pr-review"
 TAG_DANGEROUS = "dangerous"
 TAG_FIX = "fix"                             # on a code_review ticket: also apply fixes
 TAG_ESCALATE = "claude"                     # free bot: manual "send this to Claude" tag
@@ -68,7 +68,7 @@ WORK_DIR = Path(__file__).resolve().parent / "work"
 AUDIT_TAIL_BYTES = 4096
 
 # Tags counting failed plan/implement attempts (see process()/bump_attempts).
-ATTEMPT_PREFIX = "claude:attempt-"
+ATTEMPT_PREFIX = "resolver:attempt-"
 
 
 def log(msg: str) -> None:
@@ -152,8 +152,8 @@ def run(cmd: list[str], cwd: str | Path | None = None, timeout: int | None = 120
 
 
 # --- ticket helpers ------------------------------------------------------
-def claude_tags(ticket: dict) -> set[str]:
-    return {t for t in ticket.get("tags", []) if t.startswith(CLAUDE_PREFIX)}
+def resolver_tags(ticket: dict) -> set[str]:
+    return {t for t in ticket.get("tags", []) if t.startswith(RESOLVER_PREFIX)}
 
 
 def _should_escalate(cfg, ticket: dict) -> tuple[bool, str]:
@@ -187,9 +187,9 @@ def repo_name_of(ticket: dict) -> str | None:
 
 def set_state(client: StingrayClient, ticket: dict, new_claude_tags: list[str],
               **fields) -> dict:
-    """Replace the ticket's claude:* tags with new_claude_tags (preserving
+    """Replace the ticket's resolver:* tags with new_claude_tags (preserving
     repo:/dangerous/other tags) and apply any other PATCH fields in one call."""
-    kept = [t for t in ticket.get("tags", []) if not t.startswith(CLAUDE_PREFIX)]
+    kept = [t for t in ticket.get("tags", []) if not t.startswith(RESOLVER_PREFIX)]
     return client.update_ticket(ticket["id"], tags=kept + new_claude_tags, **fields)
 
 
@@ -1422,7 +1422,7 @@ def review_prompt(ticket: dict, repo: Path | None, want_fix: bool) -> str:
 def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             revise_notes: str | None) -> None:
     # Ack first, then claim: a transient failure posting the ack shouldn't leave
-    # the ticket claimed (claude:planning) but silent.
+    # the ticket claimed (resolver:planning) but silent.
     agent_label = agents.get_runner(cfg.agent).label
     client.add_comment(ticket["id"], f"🔧 {agent_label} is " +
         ("revising the plan" if revise_notes else "planning this ticket") +
@@ -2020,7 +2020,7 @@ def tail(text: str, limit: int = 3000) -> str:
 def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) -> None:
     tid = ticket["id"]
     audit.set_ticket(tid)
-    tags = claude_tags(ticket)
+    tags = resolver_tags(ticket)
     dangerous = TAG_DANGEROUS in ticket.get("tags", [])
     status = ticket.get("status")
     # A code_review ticket carries its own code_blocks, so it can be reviewed with
@@ -2055,7 +2055,7 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     comments = client.list_comments(tid)
 
     # Difficulty routing: a free bot hands hard/important tickets to the Claude bot
-    # rather than working them itself. Only for fresh tickets (no in-flight claude:*
+    # rather than working them itself. Only for fresh tickets (no in-flight resolver:*
     # claim) so we never orphan work this bot already started; the reassign moves it
     # off this bot's queue and Claude picks it up on its next sweep.
     escalate, why = _should_escalate(cfg, ticket)

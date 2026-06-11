@@ -1095,7 +1095,7 @@ def test_process_does_not_escalate_midflight(fake_cfg, monkeypatch):
     called = {}
     monkeypatch.setattr(rt, "do_plan", lambda *a, **k: called.update(plan=True))
     ticket = {"id": 82, "type": "task", "title": "x", "priority": "high",
-              "tags": ["repo:x", "claude:planning"], "status": "open", "created_by": 9}
+              "tags": ["repo:x", "resolver:planning"], "status": "open", "created_by": 9}
     rt.process(fake_cfg, FakeClient(), ticket, dry_run=False)
     assert "plan" in called   # handled the in-flight retry, not escalated
 
@@ -1123,7 +1123,7 @@ def test_process_skips_already_reviewed_unless_review_cmd(fake_cfg, monkeypatch)
 def test_process_reviewing_tag_retries_review(fake_cfg, monkeypatch):
     called = {}
     monkeypatch.setattr(rt, "do_review", lambda *a, **k: called.update(review=True))
-    rt.process(fake_cfg, FakeClient(), _review_ticket(tags=["repo:x", "claude:reviewing"]), dry_run=False)
+    rt.process(fake_cfg, FakeClient(), _review_ticket(tags=["repo:x", "resolver:reviewing"]), dry_run=False)
     assert called.get("review")
 
 
