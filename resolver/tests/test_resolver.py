@@ -89,7 +89,7 @@ def test_honors_retry_after_on_429(monkeypatch):
 def test_attempt_cap_gives_up_after_max(fake_cfg):
     fails = [{"author": BOT, "body": f"{rt.FAIL_MARKER} this ticket.\n\nboom"} for _ in range(3)]
     client = FakeClient(fails)
-    ticket = {"id": 7, "tags": [], "status": "open", "created_by": 9}
+    ticket = {"id": 7, "tags": ["repo:x"], "status": "open", "created_by": 9}
 
     rt.process(fake_cfg, client, ticket, dry_run=False)
 
@@ -303,6 +303,7 @@ def _set_opencode_cfg(fake_cfg):
     fake_cfg.agent_fallback_model = ""
     fake_cfg.agent_timeout = 5
     fake_cfg.agent_implement_timeout = 5
+    fake_cfg.agent_plan_review_timeout = 5
     fake_cfg.opencode_plan_agent = "plan"
     fake_cfg.opencode_build_agent = "build"
     return fake_cfg
@@ -336,6 +337,18 @@ def test_opencode_event_parses_tool_and_final_text():
     # the final answer is the text from the step that ends with reason=stop
     assert state["final"] == "all done"
     assert state["stopped"] is True
+    assert state["tool_calls"] == 1   # the one bash tool_use was counted
+
+
+def test_opencode_event_counts_each_tool_call():
+    state = {}
+    logger = logging.getLogger("resolver.octools")
+    for cmd in ("ls", "pytest", "git diff"):
+        rt._opencode_event(logger, json.dumps({"type": "tool_use", "part": {
+            "tool": "bash", "state": {"input": {"command": cmd}}}}), state)
+    assert state["tool_calls"] == 3
+    # a run that never calls a tool leaves the counter absent/zero
+    assert {}.get("tool_calls", 0) == 0
 
 
 def test_opencode_event_accumulates_tokens():
@@ -451,13 +464,13 @@ def test_run_opencode_no_output_is_failure_not_silent_success(tmp_path, fake_cfg
     ok, msg = rt.run_opencode(fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log")
     assert ok is False
     assert "no output" in msg and "provider" in msg
-    # swallowed-503 is retryable: with no fallback the primary is retried once.
-    assert len(calls) == 2
+    # No fallback configured -> the chain is just the primary, tried once.
+    assert len(calls) == 1
 
 
 def test_run_opencode_retries_then_escalates_to_fallback_model(tmp_path, fake_cfg, monkeypatch):
-    # Transient failure on the primary -> retry primary -> escalate to the fallback
-    # model, which then succeeds. One overloaded-model blip shouldn't burn the ticket.
+    # Transient failure on the primary -> escalate to the fallback model, which then
+    # succeeds. One overloaded-model blip shouldn't burn the ticket.
     _set_opencode_cfg(fake_cfg)
     fake_cfg.agent_fallback_model = "google/gemini-2.5-pro"
     monkeypatch.setattr(rt.time, "sleep", lambda s: None)
@@ -467,6 +480,8 @@ def test_run_opencode_retries_then_escalates_to_fallback_model(tmp_path, fake_cf
         model = cmd[cmd.index("--model") + 1]
         models.append(model)
         if model == "google/gemini-2.5-pro":
+            on_line(json.dumps({"type": "tool_use", "part": {
+                "tool": "edit", "state": {"input": {"filePath": "a.py"}}}}))
             on_line(json.dumps({"type": "text", "part": {"text": "fixed it"}}))
             on_line(json.dumps({"type": "step_finish", "part": {"reason": "stop"}}))
         else:
@@ -476,8 +491,53 @@ def test_run_opencode_retries_then_escalates_to_fallback_model(tmp_path, fake_cf
     monkeypatch.setattr(rt, "_stream_subprocess", stream)
     ok, text = rt.run_opencode(fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log")
     assert ok is True and text == "fixed it"
-    assert models == ["google/gemini-2.5-flash", "google/gemini-2.5-flash",
-                      "google/gemini-2.5-pro"]
+    # Distinct models, in order — no wasted same-model retry.
+    assert models == ["google/gemini-2.5-flash", "google/gemini-2.5-pro"]
+
+
+def test_run_opencode_escalates_through_several_fallback_models(tmp_path, fake_cfg, monkeypatch):
+    # A configured list of fallbacks is tried in order until one succeeds, so an
+    # unreliable free model falls through to alternatives before giving up.
+    _set_opencode_cfg(fake_cfg)
+    fake_cfg.agent_fallback_models = ["google/gemini-2.0-flash", "google/gemini-2.5-pro"]
+    monkeypatch.setattr(rt.time, "sleep", lambda s: None)
+    models = []
+
+    def stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        model = cmd[cmd.index("--model") + 1]
+        models.append(model)
+        if model == "google/gemini-2.5-pro":   # only the 3rd model produces a review
+            on_line(json.dumps({"type": "text", "part": {"text": "the review"}}))
+            on_line(json.dumps({"type": "step_finish", "part": {"reason": "stop"}}))
+        elif model == "google/gemini-2.0-flash":
+            return 0, True, None                # 2nd model hangs (timeout) -> escalate
+        else:
+            on_line(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))  # swallowed 503
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", stream)
+    ok, text = rt.run_opencode(fake_cfg, "review it", tmp_path, "review", tmp_path / "r.log")
+    assert ok is True and text == "the review"
+    assert models == ["google/gemini-2.5-flash", "google/gemini-2.0-flash", "google/gemini-2.5-pro"]
+
+
+def test_phase_timeout_uses_short_budget_for_read_only_phases():
+    cfg = SimpleNamespace(agent_implement_timeout=2400, agent_plan_review_timeout=600,
+                          agent_timeout=1800)
+    assert rt._phase_timeout(cfg, "implement") == 2400
+    assert rt._phase_timeout(cfg, "plan") == 600
+    assert rt._phase_timeout(cfg, "review") == 600
+    # Falls back to agent_timeout when the read-only budget isn't configured.
+    legacy = SimpleNamespace(agent_implement_timeout=2400, agent_timeout=1800)
+    assert rt._phase_timeout(legacy, "review") == 1800
+
+
+def test_opencode_model_chain_dedups_and_orders():
+    cfg = SimpleNamespace(agent_model="m1", agent_fallback_models=["m2", "m1", "m3", "m2"])
+    assert rt._opencode_model_chain(cfg, "review") == ["m1", "m2", "m3"]
+    # Falls back to the singular legacy field when the list is empty.
+    cfg2 = SimpleNamespace(agent_model="m1", agent_fallback_models=[], agent_fallback_model="m9")
+    assert rt._opencode_model_chain(cfg2, "review") == ["m1", "m9"]
 
 
 def test_run_opencode_success_does_not_retry(tmp_path, fake_cfg, monkeypatch):
@@ -487,6 +547,8 @@ def test_run_opencode_success_does_not_retry(tmp_path, fake_cfg, monkeypatch):
 
     def stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
         calls.append(1)
+        on_line(json.dumps({"type": "tool_use", "part": {
+            "tool": "edit", "state": {"input": {"filePath": "a.py"}}}}))
         on_line(json.dumps({"type": "text", "part": {"text": "ok"}}))
         on_line(json.dumps({"type": "step_finish", "part": {"reason": "stop"}}))
         return 0, False, None
@@ -546,6 +608,27 @@ def test_review_prompt_blocks_vs_explore_and_readonly():
     assert "apply your recommended fixes" in rt.review_prompt(no_blocks, Path("/r"), True)
 
 
+def test_review_prompt_no_repo_uses_code_blocks_and_forbids_file_reads():
+    base = {"id": 1, "title": "Review snippet", "priority": "low", "description": "check"}
+    with_blocks = {**base, "code_blocks": [
+        {"filename": "a.sh", "language": "bash", "line_start": 1, "line_end": 3, "content": "x"}]}
+    prompt = rt.review_prompt(with_blocks, None, False)
+    assert "in the repository at" not in prompt        # no repo path when repo is None
+    assert "Review ONLY the code shown above" in prompt # anchors to the blocks
+    assert "do NOT attempt to read files" in prompt     # no hunting for a checkout (the #64 wedge)
+    assert "read the surrounding code" not in prompt
+    assert "READ-ONLY" in prompt
+
+
+def test_review_prompt_with_repo_still_reads_surrounding_code():
+    base = {"id": 1, "title": "Review snippet", "priority": "low", "description": "check"}
+    with_blocks = {**base, "code_blocks": [
+        {"filename": "a.sh", "language": "bash", "line_start": 1, "line_end": 3, "content": "x"}]}
+    prompt = rt.review_prompt(with_blocks, Path("/r"), False)
+    assert "read the surrounding code in the repo for context" in prompt
+    assert "do NOT attempt to read files" not in prompt
+
+
 def _review_ticket(**over):
     t = {"id": 50, "type": "code_review", "title": "Review the installer",
          "tags": ["repo:x"], "status": "open", "created_by": 9,
@@ -568,6 +651,75 @@ def test_process_code_review_fix_tag_sets_want_fix(fake_cfg, monkeypatch):
     monkeypatch.setattr(rt, "do_review", lambda c, cl, t, r, want_fix: called.update(want_fix=want_fix))
     rt.process(fake_cfg, FakeClient(), _review_ticket(tags=["repo:x", "fix"]), dry_run=False)
     assert called.get("want_fix") is True
+
+
+def test_process_code_review_without_repo_tag_still_reviews(fake_cfg, monkeypatch):
+    # A code_review with no `repo:` tag (and no DEFAULT_REPO) has no checkout, but
+    # carries code_blocks — it must reach do_review with repo=None, not be rejected.
+    seen = {}
+    monkeypatch.setattr(rt, "do_review",
+                        lambda c, cl, t, r, want_fix: seen.update(repo=r, want_fix=want_fix))
+    ticket = _review_ticket(tags=[], code_blocks=[
+        {"filename": "a.py", "language": "python", "line_start": 1, "line_end": 2, "content": "x"}])
+    client = FakeClient()
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+    assert "repo" in seen and seen["repo"] is None        # routed to review, repo-less
+    assert not any(rt.FAIL_MARKER in b for _, b in client.comments_added)
+
+
+def test_process_non_review_without_repo_tag_fails(fake_cfg, monkeypatch):
+    # A task ticket genuinely needs a checkout; no repo tag is still a hard reject.
+    monkeypatch.setattr(rt, "do_plan", lambda *a, **k: pytest.fail("should not plan"))
+    client = FakeClient()
+    rt.process(fake_cfg, client, _review_ticket(type="task", tags=[]), dry_run=False)
+    assert any(rt.FAIL_MARKER in b and "Cannot resolve target repo" in b
+               for _, b in client.comments_added)
+
+
+# --- difficulty routing / escalation -------------------------------------
+def test_should_escalate_criteria():
+    cfg = SimpleNamespace(escalate_to_user_id=2, escalate_priorities=["high", "critical"])
+    assert rt._should_escalate(cfg, {"priority": "high", "tags": []})[0] is True
+    assert rt._should_escalate(cfg, {"priority": "critical", "tags": []})[0] is True
+    assert rt._should_escalate(cfg, {"priority": "low", "tags": ["dangerous"]})[0] is True
+    assert rt._should_escalate(cfg, {"priority": "low", "tags": ["claude"]})[0] is True
+    assert rt._should_escalate(cfg, {"priority": "medium", "tags": []})[0] is False
+    # Disabled (Claude resolver leaves the id unset) -> never escalate.
+    off = SimpleNamespace(escalate_to_user_id=0, escalate_priorities=["high"])
+    assert rt._should_escalate(off, {"priority": "critical", "tags": ["dangerous"]})[0] is False
+
+
+def test_process_escalates_high_priority_to_claude(fake_cfg, monkeypatch):
+    fake_cfg.escalate_to_user_id = 2
+    monkeypatch.setattr(rt, "do_plan", lambda *a, **k: pytest.fail("should not plan"))
+    monkeypatch.setattr(rt, "do_review", lambda *a, **k: pytest.fail("should not review"))
+    client = FakeClient()
+    ticket = {"id": 80, "type": "task", "title": "x", "priority": "high",
+              "tags": ["repo:x"], "status": "open", "created_by": 9}
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+    assert any(rt.ESCALATE_MARKER in b for _, b in client.comments_added)
+    assert client.updates[-1]["assigned_to"] == 2   # reassigned to the Claude bot
+
+
+def test_process_does_not_escalate_when_disabled(fake_cfg, monkeypatch):
+    fake_cfg.escalate_to_user_id = 0   # disabled
+    called = {}
+    monkeypatch.setattr(rt, "do_plan", lambda c, cl, t, r, notes: called.update(plan=True))
+    ticket = {"id": 81, "type": "task", "title": "x", "priority": "critical",
+              "tags": ["repo:x"], "status": "open", "created_by": 9}
+    rt.process(fake_cfg, FakeClient(), ticket, dry_run=False)
+    assert called.get("plan") is True
+
+
+def test_process_does_not_escalate_midflight(fake_cfg, monkeypatch):
+    # A ticket this bot already claimed (claude:* tag) must not be yanked away.
+    fake_cfg.escalate_to_user_id = 2
+    called = {}
+    monkeypatch.setattr(rt, "do_plan", lambda *a, **k: called.update(plan=True))
+    ticket = {"id": 82, "type": "task", "title": "x", "priority": "high",
+              "tags": ["repo:x", "claude:planning"], "status": "open", "created_by": 9}
+    rt.process(fake_cfg, FakeClient(), ticket, dry_run=False)
+    assert "plan" in called   # handled the in-flight retry, not escalated
 
 
 def test_process_task_ticket_still_plans(fake_cfg, monkeypatch):
@@ -626,11 +778,116 @@ def test_do_review_fix_plus_dangerous_implements_directly(fake_cfg, monkeypatch)
     assert impl.get("plan") == "FINDINGS"
 
 
+def test_do_review_no_repo_with_blocks_reviews_in_scratch(fake_cfg, monkeypatch):
+    # repo=None + code_blocks: review runs in a throwaway dir off the blocks.
+    seen = {}
+    monkeypatch.setattr(rt, "run_agent",
+                        lambda cfg, p, cwd, mode, log: seen.update(cwd=cwd) or (True, "FINDINGS"))
+    client = FakeClient()
+    ticket = _review_ticket(tags=[], code_blocks=[
+        {"filename": "a.py", "language": "python", "line_start": 1, "line_end": 2, "content": "x"}])
+    rt.do_review(fake_cfg, client, ticket, None, want_fix=False)
+    assert any(rt.REVIEW_MARKER in b and "FINDINGS" in b for _, b in client.comments_added)
+    assert not seen["cwd"].exists()   # scratch dir cleaned up afterwards
+
+
+def test_do_review_no_repo_no_blocks_fails(fake_cfg, monkeypatch):
+    monkeypatch.setattr(rt, "run_agent", lambda *a, **k: pytest.fail("should not run agent"))
+    client = FakeClient()
+    rt.do_review(fake_cfg, client, _review_ticket(tags=[], code_blocks=[]), None, want_fix=False)
+    assert any(rt.FAIL_MARKER in b and "code blocks" in b for _, b in client.comments_added)
+
+
+def test_do_review_no_repo_with_fix_fails(fake_cfg, monkeypatch):
+    # `fix` needs a checkout to land edits; repo-less means we can't apply.
+    monkeypatch.setattr(rt, "run_agent", lambda *a, **k: pytest.fail("should not run agent"))
+    client = FakeClient()
+    ticket = _review_ticket(tags=["fix"], code_blocks=[
+        {"filename": "a.py", "language": "python", "line_start": 1, "line_end": 2, "content": "x"}])
+    rt.do_review(fake_cfg, client, ticket, None, want_fix=True)
+    assert any(rt.FAIL_MARKER in b and "can't apply fixes" in b for _, b in client.comments_added)
+
+
 def test_do_review_failure_is_reported(fake_cfg, monkeypatch):
     monkeypatch.setattr(rt, "run_agent", lambda *a, **k: (False, "boom"))
     client = FakeClient()
     rt.do_review(fake_cfg, client, _review_ticket(), fake_cfg.resolve_repo("x"), want_fix=False)
     assert any(rt.FAIL_MARKER in b for _, b in client.comments_added)
+
+
+# --- single-shot review backend ------------------------------------------
+class _FakeResp:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text or json.dumps(payload or {})
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+def _enable_single_shot(fake_cfg):
+    fake_cfg.review_api_url = "https://api.groq.com/openai/v1/chat/completions"
+    fake_cfg.review_api_key = "sk_test_key"
+    fake_cfg.review_api_model = "groq/llama-3.3-70b-versatile"
+    fake_cfg.agent_plan_review_timeout = 30
+    fake_cfg.agent_implement_timeout = 60
+    fake_cfg.agent_timeout = 30
+
+
+def test_single_shot_review_success(tmp_path, fake_cfg, monkeypatch):
+    _enable_single_shot(fake_cfg)
+    sent = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sent.update(url=url, body=json, headers=headers)
+        return _FakeResp(200, {"choices": [{"message": {"content": "LGTM, two nits."}}],
+                               "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    ok, text = rt.single_shot_review(fake_cfg, "review this", tmp_path / "r.log")
+    assert ok is True and text == "LGTM, two nits."
+    assert sent["body"]["model"] == "groq/llama-3.3-70b-versatile"
+    assert sent["body"]["messages"][0]["content"] == "review this"
+    assert sent["headers"]["Authorization"] == "Bearer sk_test_key"
+
+
+def test_single_shot_review_429_is_clear(tmp_path, fake_cfg, monkeypatch):
+    _enable_single_shot(fake_cfg)
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **k: _FakeResp(429, text="rate limited"))
+    ok, text = rt.single_shot_review(fake_cfg, "review", tmp_path / "r.log")
+    assert ok is False and "quota exceeded" in text.lower()
+
+
+def test_single_shot_review_empty_completion_fails(tmp_path, fake_cfg, monkeypatch):
+    _enable_single_shot(fake_cfg)
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **k: _FakeResp(200, {"choices": [{"message": {"content": ""}}]}))
+    ok, text = rt.single_shot_review(fake_cfg, "review", tmp_path / "r.log")
+    assert ok is False and "empty" in text.lower()
+
+
+def test_do_review_uses_single_shot_when_configured(fake_cfg, monkeypatch):
+    _enable_single_shot(fake_cfg)
+    monkeypatch.setattr(rt, "run_agent", lambda *a, **k: pytest.fail("agent must not run"))
+    monkeypatch.setattr(rt, "single_shot_review", lambda cfg, p, log: (True, "FINDINGS"))
+    client = FakeClient()
+    rt.do_review(fake_cfg, client, _review_ticket(), fake_cfg.resolve_repo("x"), want_fix=False)
+    assert any(rt.REVIEW_MARKER in b and "FINDINGS" in b for _, b in client.comments_added)
+
+
+def test_do_review_falls_back_to_agent_when_unconfigured(fake_cfg, monkeypatch):
+    # No REVIEW_API_* -> the agent path is used (default fake_cfg leaves them blank).
+    used = {}
+    monkeypatch.setattr(rt, "run_agent",
+                        lambda *a, **k: used.update(agent=True) or (True, "FINDINGS"))
+    monkeypatch.setattr(rt, "single_shot_review",
+                        lambda *a, **k: pytest.fail("single-shot must not run"))
+    rt.do_review(fake_cfg, FakeClient(), _review_ticket(), fake_cfg.resolve_repo("x"), want_fix=False)
+    assert used.get("agent") is True
 
 
 def test_run_opencode_review_uses_readonly_plan_agent(tmp_path, fake_cfg, monkeypatch):
@@ -651,6 +908,103 @@ def test_run_opencode_review_uses_readonly_plan_agent(tmp_path, fake_cfg, monkey
     assert cmd[cmd.index("--agent") + 1] == "plan"          # read-only agent
     assert "--dangerously-skip-permissions" not in cmd       # cannot edit
     assert captured["label"] == "review"
+
+
+def test_run_opencode_implement_no_tool_calls_is_retryable(tmp_path, fake_cfg, monkeypatch):
+    # An implement run that emits prose but never calls a tool produces an empty
+    # worktree. _run_opencode_once must flag it retryable so run_opencode escalates
+    # to the fallback model rather than letting do_implement misreport "no changes".
+    _set_opencode_cfg(fake_cfg)
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        on_line(json.dumps({"type": "text", "part": {"text": "Here is the diff you should apply..."}}))
+        on_line(json.dumps({"type": "step_finish", "part": {"reason": "stop"}}))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, text, retryable, _ = rt._run_opencode_once(
+        fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log", "m")
+    assert ok is False and retryable is True
+    assert "0 tool calls" in text
+
+    # Same no-tool-call stream in *plan* mode is a legitimate success (plans are
+    # prose), so the gate must not fire there.
+    ok2, _text2, retryable2, _ = rt._run_opencode_once(
+        fake_cfg, "plan it", tmp_path, "plan", tmp_path / "p.log", "m")
+    assert ok2 is True and retryable2 is False
+
+
+def test_run_opencode_quota_429_fails_fast_non_retryable(tmp_path, fake_cfg, monkeypatch):
+    # A free-tier 429 leaves our tee'd log empty (opencode records it only in its own
+    # global log). The run must be classified non-retryable with a clear quota message
+    # so it hands off instead of escalating into the same project-wide quota wall.
+    _set_opencode_cfg(fake_cfg)
+    oclog = tmp_path / "oclog"
+    oclog.mkdir()
+    monkeypatch.setattr(rt, "_opencode_log_dir", lambda: oclog)
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        # opencode writes its real error to its global log, not to stdout json.
+        (oclog / "run.log").write_text(
+            'ERROR service=llm error={"name":"AI_APICallError","statusCode":429,'
+            '"message":"You exceeded your current quota, please check your plan"}')
+        on_line(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))
+        return 0, False, None  # empty, exits 0 — the 429 shape
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, text, retryable, _ = rt._run_opencode_once(
+        fake_cfg, "review", tmp_path, "review", tmp_path / "r.log", "google/gemini-2.5-flash")
+    assert ok is False and retryable is False
+    assert "quota exceeded" in text.lower()
+
+
+def test_run_opencode_no_output_no_tools_is_retryable(tmp_path, fake_cfg, monkeypatch):
+    # Swallowed-503 shape: the model call never connected, so no tool ran and no
+    # text/stop came back. Worth retrying/escalating.
+    _set_opencode_cfg(fake_cfg)
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        on_line(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, _text, retryable, _ = rt._run_opencode_once(
+        fake_cfg, "review", tmp_path, "review", tmp_path / "r.log", "m")
+    assert ok is False and retryable is True
+
+
+def test_run_opencode_tools_ran_but_no_output_escalates(tmp_path, fake_cfg, monkeypatch):
+    # #65 shape: the model explored (tool calls) but produced no plan/review and no
+    # stop. Retrying the same model rarely helps, but a different one might — so it's
+    # escalatable (retryable=True) and falls through to the next model in the chain.
+    _set_opencode_cfg(fake_cfg)
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        on_line(json.dumps({"type": "tool_use", "part": {
+            "tool": "read", "state": {"status": "error", "input": {"filePath": "nope.py"},
+                                      "error": "File not found"}}}))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, text, retryable, _ = rt._run_opencode_once(
+        fake_cfg, "review", tmp_path, "review", tmp_path / "r.log", "m")
+    assert ok is False and retryable is True
+    assert "tool call" in text
+
+
+def test_run_opencode_implement_with_tool_calls_succeeds(tmp_path, fake_cfg, monkeypatch):
+    _set_opencode_cfg(fake_cfg)
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        on_line(json.dumps({"type": "tool_use", "part": {
+            "tool": "edit", "state": {"input": {"filePath": "a.py"}}}}))
+        on_line(json.dumps({"type": "text", "part": {"text": "done"}}))
+        on_line(json.dumps({"type": "step_finish", "part": {"reason": "stop"}}))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, text = rt.run_opencode(fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log")
+    assert ok is True and text == "done"
 
 
 def test_opencode_runner_registered_and_unknown_fails():
