@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import contextvars
+import copy
 import hashlib
 import json
 import logging
@@ -1260,6 +1261,12 @@ def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
         "Refer to files by their repo-relative path (e.g. `resolver/foo.py`), NOT by",
         "absolute path — the implementation runs in a separate checkout, so absolute",
         "paths from this exploration would point at the wrong tree.",
+        "",
+        "End your plan with exactly these two lines (used to route the implementation):",
+        "DIFFICULTY: easy|medium|hard",
+        "FILES: <number of files you expect to change>",
+        "where easy = a single small/localized change, medium = a few files of",
+        "straightforward work, hard = cross-cutting, many files, ambiguous, or risky.",
     ]
     if revise_notes:
         p += ["", "The reviewer requested changes to your previous plan:",
@@ -1520,6 +1527,29 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         "back to you when done.")
     phase("implementing", ticket, f"#{ticket['id']}: implementing"
           + (" (rework)" if reviewer_notes else ""))
+
+    # Difficulty routing: the plan self-assessed easy|medium|hard (survives the
+    # /approve round-trip inside the plan comment). A hard ticket goes to the strong
+    # bot when escalation is enabled; otherwise easy/hard swap the implement model
+    # tier for this run. Skip on rework — the human is already iterating in-flight.
+    difficulty = parse_difficulty(plan)
+    if difficulty == "hard" and cfg.escalate_to_user_id and not reviewer_notes:
+        client.add_comment(ticket["id"],
+            f"{ESCALATE_MARKER} — plan assessed hard; reassigning to the Claude resolver.")
+        set_state(client, ticket, [], status="open", assigned_to=cfg.escalate_to_user_id)
+        phase("escalated", ticket,
+              f"#{ticket['id']}: escalated to user {cfg.escalate_to_user_id} (plan assessed hard)")
+        return
+    tier = {"easy": cfg.agent_implement_model_easy,
+            "hard": cfg.agent_implement_model_hard}.get(difficulty, "")
+    # Override the implement model via a per-run cfg copy so model_for picks it up
+    # deep in the runner with no new parameter threaded through run_agent. Blank tier
+    # => unchanged cfg => the default agent_implement_model. Shallow copy keeps the
+    # original cfg untouched for the rest of the sweep.
+    if tier.strip():
+        cfg = copy.copy(cfg)
+        cfg.agent_implement_model = tier
+
     # Compute remote/PR availability once and pass it down (cheaper, consistent).
     origin = has_origin(repo)
     pr_ok = origin and run(["gh", "auth", "status"])[0] == 0
@@ -1709,6 +1739,19 @@ def _critique_enabled(cfg) -> bool:
 
 
 _CRITIQUE_VERDICT_RE = re.compile(r"VERDICT:\s*(APPROVE|REVISE)", re.IGNORECASE)
+
+# The planner ends its plan with a `DIFFICULTY:` line (see plan_prompt); the implement
+# phase routes on it. Fail-open to "medium" exactly like the critique verdict above so a
+# missing/garbled line never blocks or misroutes implementation.
+_DIFFICULTY_RE = re.compile(r"^DIFFICULTY:\s*(easy|medium|hard)\b",
+                            re.IGNORECASE | re.MULTILINE)
+
+
+def parse_difficulty(text: str | None) -> str:
+    """The plan's self-assessed difficulty ('easy'|'medium'|'hard'), parsed from the
+    approved-plan comment body. Returns 'medium' when absent/unparseable."""
+    m = _DIFFICULTY_RE.search(text or "")
+    return m.group(1).lower() if m else "medium"
 
 
 def critique_prompt(ticket: dict, plan: str) -> str:

@@ -112,6 +112,13 @@ class Config:
     agent_plan_model: str
     agent_implement_model: str
     agent_review_model: str
+    # Difficulty-routed implement tiers: when the plan self-assesses an `easy`/`hard`
+    # ticket, the implement phase swaps to these instead of agent_implement_model.
+    # Blank = no swap (fall back to agent_implement_model -> agent_model), so routing
+    # is opt-in. `hard` only swaps when escalation is disabled; otherwise hard tickets
+    # escalate to escalate_to_user_id. See parse_difficulty / do_implement.
+    agent_implement_model_easy: str
+    agent_implement_model_hard: str
     agent_fallback_model: str
     # Ordered list of models to try after the primary before giving up (and handing
     # the ticket back / to another resolver). Parsed from AGENT_FALLBACK_MODELS
@@ -212,6 +219,9 @@ class Config:
             agent_plan_model=_env("AGENT_PLAN_MODEL", default=""),
             agent_implement_model=_env("AGENT_IMPLEMENT_MODEL", default=""),
             agent_review_model=_env("AGENT_REVIEW_MODEL", default=""),
+            # Difficulty-routed implement tiers (blank = no swap). See do_implement.
+            agent_implement_model_easy=_env("AGENT_IMPLEMENT_MODEL_EASY", default=""),
+            agent_implement_model_hard=_env("AGENT_IMPLEMENT_MODEL_HARD", default=""),
             # opencode-only: a stronger model to escalate to after the primary
             # fails a run with a transient provider error (overloaded/503). Empty
             # disables escalation. Ignored by the Claude runner. Kept for back-compat;

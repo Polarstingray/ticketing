@@ -59,6 +59,10 @@ def fake_cfg(tmp_path):
         logs_dir=tmp_path,
         default_repo=None,
         resolve_repo=resolve_repo,
+        # implement model + difficulty-routed tiers (blank = no swap)
+        agent_implement_model="",
+        agent_implement_model_easy="",
+        agent_implement_model_hard="",
         # free-resolver knobs (off by default; individual tests opt in)
         escalate_to_user_id=0,
         escalate_priorities=["high", "critical"],

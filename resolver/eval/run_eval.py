@@ -107,7 +107,11 @@ def write_env_file(path: Path, *, base_url: str, bot_key: str, bot_id: int,
     # Pass the plan-critique gate through when configured in the harness env, so
     # `CRITIQUE_API_URL=… eval/run_eval.py --baseline …` A/Bs the gate vs. baseline.
     for key in ("CRITIQUE_API_URL", "CRITIQUE_API_KEY", "CRITIQUE_API_MODEL",
-                "CRITIQUE_MAX_REVISIONS"):
+                "CRITIQUE_MAX_REVISIONS",
+                # Difficulty routing: forward the implement tiers + escalation gate so
+                # `AGENT_IMPLEMENT_MODEL_EASY=… eval/run_eval.py …` A/Bs routing.
+                "AGENT_IMPLEMENT_MODEL_EASY", "AGENT_IMPLEMENT_MODEL_HARD",
+                "ESCALATE_TO_USER_ID"):
         val = os.environ.get(key)
         if val:
             lines.append(f"{key}={val}")
