@@ -206,6 +206,106 @@ def test_implement_prompt_main_repo_optional(tmp_path):
     assert f"{tmp_path}/resolver/x.py" in prompt
 
 
+# --- absolute-path neutralization (worktree-escape defense) --------------
+def test_strip_residual_abs_paths_reduces_foreign_absolutes():
+    text = "read /etc/cron.d/job.sh and copy /other/checkout/app/main.py over"
+    out = rt._strip_residual_abs_paths(text, Path("/wt/ticket-1"))
+    assert "/etc/cron.d/job.sh" not in out
+    assert "/other/checkout/app/main.py" not in out
+    assert "job.sh" in out
+    assert "main.py" in out
+
+
+def test_strip_residual_abs_paths_keeps_paths_under_worktree():
+    root = Path("/wt/ticket-1")
+    text = "edit /wt/ticket-1/resolver/x.py but not /wt/ticket-1-backup/y.py"
+    out = rt._strip_residual_abs_paths(text, root)
+    assert "/wt/ticket-1/resolver/x.py" in out   # under the worktree → kept
+    assert "/wt/ticket-1-backup/y.py" not in out  # sibling → neutralized to basename
+    assert "y.py" in out
+
+
+def test_strip_residual_abs_paths_leaves_relative_untouched():
+    text = "edit resolver/foo.py and frontend/src/App.jsx"
+    assert rt._strip_residual_abs_paths(text, Path("/wt/ticket-1")) == text
+
+
+def test_strip_residual_abs_paths_none():
+    assert rt._strip_residual_abs_paths(None, Path("/wt/ticket-1")) is None
+
+
+def test_implement_prompt_reanchors_then_strips_foreign_absolutes(tmp_path):
+    # Composition + order: a main-repo path is reanchored under the worktree (keeping its
+    # subdir), while a foreign absolute path is collapsed to its basename.
+    main_repo = tmp_path / "ticketing"
+    wt = tmp_path / "ticketing" / "resolver" / "work" / "ticket-9"
+    plan = (f"Edit {main_repo}/resolver/resolve_tickets.py, "
+            "then mirror /elsewhere/other/x.py into it.")
+    prompt = rt.implement_prompt(
+        {"id": 9, "title": "t", "description": "d"}, wt, plan=plan, main_repo=main_repo)
+    assert f"{wt}/resolver/resolve_tickets.py" in prompt   # reanchored, subdir intact
+    assert "/elsewhere/other/x.py" not in prompt           # foreign absolute neutralized
+    assert "x.py" in prompt                                # intent preserved as basename
+
+
+# --- worktree-escape: revert + hard fail --------------------------------
+def test_porcelain_path_parses_status_and_rename():
+    assert rt._porcelain_path(" M resolver/x.py") == "resolver/x.py"
+    assert rt._porcelain_path("R  a.py -> b.py") == "b.py"
+    assert rt._porcelain_path('?? "weird name.py"') == "weird name.py"
+    assert rt._porcelain_path("xx") is None  # too short to carry a path
+
+
+def test_handle_escape_reverts_only_parseable_paths(monkeypatch):
+    checkouts = []
+
+    def fake_run(cmd, cwd=None, timeout=None):
+        if "checkout" in cmd:
+            checkouts.append(cmd[-1])  # the path arg
+        return 0, ""
+
+    monkeypatch.setattr(rt, "run", fake_run)
+    repo = Path("/some/repo")
+    escaped = {" M resolver/x.py", "R  a -> b", "x"}  # last is unparseable, must be skipped
+    assert rt._handle_escape(repo, escaped, {"id": 7}) is True
+    assert set(checkouts) == {"resolver/x.py", "b"}
+    assert "x" not in checkouts  # unparseable line left for manual cleanup
+
+
+def test_do_implement_hard_fails_on_worktree_escape(fake_cfg, monkeypatch, tmp_path):
+    # An implement run that dirties the MAIN checkout must revert + fail reimplementable
+    # and NEVER reach publish, even though the agent reported success.
+    wt = tmp_path / "wt"
+    monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "has_origin", lambda repo: False)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "run_agent_tracked", lambda *a, **k: (True, "did the work"))
+
+    # First snapshot (before run) is clean; the post-run snapshot shows a new dirty file.
+    snapshots = iter([set(), {" M backend/models.py"}])
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: next(snapshots))
+
+    handled = {}
+    monkeypatch.setattr(rt, "_handle_escape",
+                        lambda repo, escaped, ticket: handled.update(escaped=escaped) or True)
+    monkeypatch.setattr(rt, "publish", lambda *a, **k: pytest.fail("must not publish after escape"))
+
+    failed = {}
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: failed.update(msg=msg, kw=k))
+
+    client = FakeClient()
+    ticket = {"id": 7, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, tmp_path / "repo", plan="do stuff")
+
+    assert handled["escaped"] == {" M backend/models.py"}
+    assert failed["kw"].get("reimplementable") is True
+    assert "escaped its worktree" in failed["msg"]
+
+
 # --- per-phase model selection ------------------------------------------
 def test_model_for_falls_back_to_agent_model():
     cfg = SimpleNamespace(agent_model="base")

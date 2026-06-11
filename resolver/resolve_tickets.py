@@ -1112,6 +1112,47 @@ def _tracked_dirty(repo: Path) -> set[str]:
     return {ln for ln in out.splitlines() if ln.strip()}
 
 
+def _porcelain_path(line: str) -> str | None:
+    """Extract the working-tree path from a `git status --porcelain` line, or None if it
+    can't be parsed cleanly. Handles the two-char `XY ` status prefix, the `orig -> new`
+    rename/copy form (returns the new path), and the surrounding quotes git adds for
+    names with unusual characters."""
+    if len(line) < 4:
+        return None
+    path = line[3:]
+    if " -> " in path:  # rename/copy — the destination is what's now on disk
+        path = path.split(" -> ", 1)[1]
+    path = path.strip()
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+    return path or None
+
+
+def _handle_escape(repo: Path, escaped: set[str], ticket: dict) -> bool:
+    """An implement run dirtied the MAIN checkout — a worktree escape. Loudly audit it and
+    best-effort revert ONLY the newly-dirtied paths (those in `escaped`, which already
+    excludes the pre-run dirty state via set difference) so the user's pre-existing
+    uncommitted work is never touched. A path that can't be parsed is left for manual
+    cleanup rather than risking a wrong `checkout`. Returns True (escape handled)."""
+    logger = audit.get_logger()
+    logger.warning("#%s: implement run modified the MAIN checkout %s (likely a "
+                   "worktree escape): %s", ticket["id"], repo, sorted(escaped))
+    audit.audit_event(
+        logger, "phase",
+        f"#{ticket['id']}: WARNING — implement dirtied the main checkout "
+        f"(worktree escape?): {sorted(escaped)}",
+        level=logging.WARNING, category="implement",
+        main_repo=str(repo), changed=sorted(escaped))
+    for line in sorted(escaped):
+        path = _porcelain_path(line)
+        if not path:
+            logger.warning("#%s: could not parse escaped path from %r; leaving it for "
+                           "manual cleanup", ticket["id"], line)
+            continue
+        run(["git", "-C", str(repo), "checkout", "--", path])
+    return True
+
+
 # --- prompts -------------------------------------------------------------
 # Path-like tokens in plan text: either something containing a slash and an
 # extension, or a bare filename with a known source extension.
@@ -1138,6 +1179,31 @@ def _reanchor(text: str | None, main_repo: "Path | None", wt: Path) -> str | Non
     # filename-continuation char ([\w.-]), so `<repo>` and `<repo>/sub` are rewritten
     # but a sibling like `<repo>-backup` is left intact.
     return re.sub(re.escape(str(main_repo)) + r"(?![\w.\-])", str(wt), text)
+
+
+def _strip_residual_abs_paths(text: str | None, allowed_root: "Path | None") -> str | None:
+    """Reduce any *absolute* path token that points OUTSIDE `allowed_root` to its bare
+    basename. Run this AFTER `_reanchor`: main-checkout paths have already been remapped
+    to absolute paths under the worktree (`allowed_root`) — those are kept verbatim. What
+    remains absolute and outside the worktree points elsewhere (a sibling checkout, /tmp,
+    /etc, a hallucinated tree); collapsing it to the filename keeps the agent's intent —
+    the file to find *inside* its working dir — while removing the out-of-sandbox anchor
+    it could otherwise follow. Relative paths are always left untouched."""
+    if not text:
+        return text
+    root = str(allowed_root) if allowed_root else None
+
+    def _repl(m: "re.Match") -> str:
+        token = m.group(1)
+        if not os.path.isabs(token):
+            return token
+        # Keep absolutes that live under the worktree (boundary check avoids matching a
+        # sibling like `<root>-backup`); neutralize everything else.
+        if root and (token == root or token.startswith(root + os.sep)):
+            return token
+        return os.path.basename(token)
+
+    return _PLAN_PATH.sub(_repl, text)
 
 
 def _files_mentioned_in_plan(plan: str, repo: Path, limit: int = 20) -> list[str]:
@@ -1196,8 +1262,16 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
     # absolute paths; reanchor them to this worktree so the agent doesn't follow
     # them out of the sandbox and edit the real tree. main_repo defaults to None
     # (no rewrite) to keep the prompt-builder unit tests' call shape working.
+    # Reanchor first (remap main-checkout paths into the worktree), THEN reduce any
+    # still-absolute path to its basename — order matters, so `<repo>/sub/f.py` becomes
+    # `<wt>/sub/f.py` rather than being flattened to `f.py`. Both steps are gated on
+    # main_repo: it's always set in real runs; main_repo=None is the prompt-builder
+    # unit-test call shape, which passes text through untouched for back-compat.
     plan = _reanchor(plan, main_repo, repo)
     reviewer_notes = _reanchor(reviewer_notes, main_repo, repo)
+    if main_repo:
+        plan = _strip_residual_abs_paths(plan, repo)
+        reviewer_notes = _strip_residual_abs_paths(reviewer_notes, repo)
     p = [
         f"You are resolving Stingray ticket #{ticket['id']}.",
         f"Your working directory is a dedicated checkout at {repo} — work there and",
@@ -1207,8 +1281,9 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         "do NOT just print code or describe the edits in your reply. A run that ends",
         "without actually modifying any files is treated as a failure.",
         f"IMPORTANT: every file you read, edit, or run MUST live under {repo}. Never",
-        "edit files outside it. If any path in the plan below points elsewhere (e.g. an",
-        "absolute path to a different checkout), remap it under your working directory.",
+        "edit files outside it. The plan below has already been confined to this working",
+        "directory, so any absolute path you find yourself reaching for is out of scope —",
+        "resolve it to a path under your working directory instead of following it.",
         "",
         "Constraints for this automated run (no human is watching the terminal,",
         "and the run is killed at a hard time limit):",
@@ -1390,15 +1465,15 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             wt, "implement", log_path)
         escaped = _tracked_dirty(repo) - dirty_before
         if escaped:
-            logger = audit.get_logger()
-            logger.warning("#%s: implement run modified the MAIN checkout %s (likely a "
-                           "worktree escape): %s", ticket["id"], repo, sorted(escaped))
-            audit.audit_event(
-                logger, "phase",
-                f"#{ticket['id']}: WARNING — implement dirtied the main checkout "
-                f"(worktree escape?): {sorted(escaped)}",
-                level=logging.WARNING, category="implement",
-                main_repo=str(repo), changed=sorted(escaped))
+            # Hard stop: the run reached outside its worktree and touched the real tree.
+            # Revert the damage and abort WITHOUT publishing — never ship a result built
+            # by a run that breached the sandbox, even if the agent reported success.
+            _handle_escape(repo, escaped, ticket)
+            fail(client, ticket,
+                 f"{agent_label} escaped its worktree and modified the main checkout; "
+                 "aborting without publishing.",
+                 reimplementable=True)
+            return
         if not ok:
             # An approved plan exists — hand back re-implementable so a timeout
             # doesn't throw the plan away and re-plan from scratch on retry.
