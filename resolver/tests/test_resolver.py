@@ -5,6 +5,7 @@ No network, no subprocesses, no real Claude — every external edge is stubbed.
 import json
 import logging
 import os
+import subprocess
 import tarfile
 import time
 from datetime import date
@@ -441,6 +442,59 @@ def test_do_implement_repair_escape_hard_fails(fake_cfg, monkeypatch, tmp_path):
     rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
     assert rec["failed"][1].get("reimplementable") is True
     assert "escaped its worktree" in rec["failed"][0]
+
+
+# --- resolve_base: origin-less repos (real git, no network) --------------
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          check=True, capture_output=True, text=True).stdout
+
+def _init_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "f.txt").write_text("hi\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    return repo
+
+
+def test_resolve_base_no_origin_pins_head_sha(tmp_path):
+    repo = _init_repo(tmp_path)
+    base_ref, base_branch = rt.resolve_base(repo)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    # The fix: a stable SHA, not the symbolic "HEAD" (which degenerates in the worktree).
+    assert base_ref == head
+    assert base_ref != "HEAD"
+    assert len(base_ref) == 40 and all(c in "0123456789abcdef" for c in base_ref)
+    assert base_branch == "main"
+
+
+def test_resolve_base_no_origin_ahead_count_is_one_after_commit(tmp_path):
+    # Reproduces the live bug end-to-end: branch from base_ref in a worktree, commit, and
+    # confirm `{base_ref}..HEAD` counts 1 (it was 0 when base_ref was the symbolic "HEAD").
+    repo = _init_repo(tmp_path)
+    base_ref, _ = rt.resolve_base(repo)
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", "-B", "claude/ticket-1", str(wt), base_ref)
+    (wt / "f.txt").write_text("changed\n")
+    _git(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-aqm", "change")
+    ahead = _git(wt, "rev-list", "--count", f"{base_ref}..HEAD").strip()
+    assert ahead == "1"
+    _git(repo, "worktree", "remove", "--force", str(wt))
+
+
+def test_resolve_base_prefers_origin_default(tmp_path):
+    repo = _init_repo(tmp_path)
+    bare = tmp_path / "o.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(repo), str(bare)],
+                   check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "remote", "set-head", "origin", "main")
+    base_ref, base_branch = rt.resolve_base(repo)
+    assert base_ref == "origin/main"
+    assert base_branch == "main"
 
 
 # --- per-phase model selection ------------------------------------------
