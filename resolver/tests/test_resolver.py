@@ -307,6 +307,93 @@ def test_do_implement_hard_fails_on_worktree_escape(fake_cfg, monkeypatch, tmp_p
     assert "escaped its worktree" in failed["msg"]
 
 
+# --- difficulty routing --------------------------------------------------
+def test_parse_difficulty_variants():
+    assert rt.parse_difficulty("steps\nDIFFICULTY: easy\nFILES: 1") == "easy"
+    assert rt.parse_difficulty("DIFFICULTY: HARD") == "hard"            # case-insensitive
+    assert rt.parse_difficulty(f"{rt.PLAN_MARKER}\n\nplan\n\nDIFFICULTY: medium\nFILES: 3"
+                               "\n\n---\nReply /approve") == "medium"   # mid-body
+    assert rt.parse_difficulty("a plan with no marker line") == "medium"  # fail-open
+    assert rt.parse_difficulty("DIFFICULTY: spicy") == "medium"          # invalid -> fail-open
+    assert rt.parse_difficulty(None) == "medium"
+
+
+def _route_harness(fake_cfg, monkeypatch, tmp_path):
+    """Wire do_implement's externals for routing tests. Records the cfg handed to
+    run_agent_tracked (None if the agent never ran) and every set_state call."""
+    wt = tmp_path / "wt"
+    rec = {"states": [], "agent_cfg": None, "published": False}
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "set_state",
+                        lambda client, ticket, tags, **f: rec["states"].append((tags, f)) or {})
+    monkeypatch.setattr(rt, "has_origin", lambda repo: False)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # never escapes
+
+    def fake_agent(cfg, client, ticket, prompt, *a, **k):
+        rec["agent_cfg"] = cfg
+        return (True, "did it")
+
+    monkeypatch.setattr(rt, "run_agent_tracked", fake_agent)
+    monkeypatch.setattr(rt, "run",
+                        lambda cmd, cwd=None, timeout=None: (0, "1") if "rev-list" in cmd else (0, ""))
+    monkeypatch.setattr(rt, "publish", lambda *a, **k: rec.update(published=True))
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: pytest.fail(f"unexpected fail(): {msg}"))
+    return rec
+
+
+def test_do_implement_easy_routes_cheap_model(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.agent_implement_model = "default-model"
+    fake_cfg.agent_implement_model_easy = "cheap-model"
+    rec = _route_harness(fake_cfg, monkeypatch, tmp_path)
+    ticket = {"id": 1, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo",
+                    plan="steps\nDIFFICULTY: easy\nFILES: 1")
+    assert rec["agent_cfg"].agent_implement_model == "cheap-model"
+    assert fake_cfg.agent_implement_model == "default-model"  # original untouched
+    assert rec["published"]
+
+
+def test_do_implement_hard_escalates_when_enabled(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.escalate_to_user_id = 99
+    rec = _route_harness(fake_cfg, monkeypatch, tmp_path)
+    client = FakeClient()
+    ticket = {"id": 2, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, tmp_path / "repo",
+                    plan="DIFFICULTY: hard\nFILES: 9")
+    assert rec["agent_cfg"] is None  # never implemented here
+    reassign = [f for _, f in rec["states"] if f.get("assigned_to") == 99]
+    assert reassign and reassign[0].get("status") == "open"
+    assert any(rt.ESCALATE_MARKER in body for _, body in client.comments_added)
+
+
+def test_do_implement_hard_swaps_model_when_escalation_off(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.escalate_to_user_id = 0
+    fake_cfg.agent_implement_model_hard = "strong-model"
+    rec = _route_harness(fake_cfg, monkeypatch, tmp_path)
+    ticket = {"id": 3, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo",
+                    plan="DIFFICULTY: hard\nFILES: 9")
+    assert rec["agent_cfg"].agent_implement_model == "strong-model"
+    assert rec["published"]
+
+
+def test_do_implement_rework_does_not_escalate(fake_cfg, monkeypatch, tmp_path):
+    # A human-driven rework (reviewer_notes set) must implement in-place even when the
+    # plan is hard and escalation is enabled — don't bounce in-flight work to another bot.
+    fake_cfg.escalate_to_user_id = 99
+    rec = _route_harness(fake_cfg, monkeypatch, tmp_path)
+    ticket = {"id": 4, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo",
+                    plan="DIFFICULTY: hard\nFILES: 9", reviewer_notes="fix the edge case")
+    assert rec["agent_cfg"] is not None
+    assert not any(f.get("assigned_to") == 99 for _, f in rec["states"])
+    assert rec["published"]
+
+
 # --- verification gate ---------------------------------------------------
 def test_run_verify_maps_returncode_and_timeout(fake_cfg, monkeypatch, tmp_path):
     fake_cfg.verify_command = "pytest -q"
