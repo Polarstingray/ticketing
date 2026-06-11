@@ -1218,16 +1218,24 @@ def test_run_critique_revise_with_notes(tmp_path, fake_cfg, monkeypatch):
     monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
         200, {"choices": [{"message": {"content": "VERDICT: REVISE\n- add a test"}}],
               "usage": {"prompt_tokens": 5, "completion_tokens": 4}}))
-    ok, verdict, notes = rt.run_critique(fake_cfg, {"id": 1, "title": "t", "description": "d"},
+    client = RunRecordingClient()
+    ok, verdict, notes = rt.run_critique(fake_cfg, client, {"id": 1, "title": "t", "description": "d"},
                                          "plan", tmp_path / "c.log")
     assert ok is True and verdict == "REVISE" and "add a test" in notes
+    # the critique is surfaced as a first-class AgentRun
+    assert len(client.runs) == 1
+    tid, fields = client.runs[0]
+    assert tid == 1 and fields["agent"] == "critique-api" and fields["phase"] == "plan-critique"
+    assert fields["model"] == fake_cfg.critique_api_model and fields["status"] == "succeeded"
+    assert fields["input_tokens"] == 5 and fields["output_tokens"] == 4
 
 
 def test_run_critique_approve(tmp_path, fake_cfg, monkeypatch):
     _enable_critique(fake_cfg)
     monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
         200, {"choices": [{"message": {"content": "VERDICT: APPROVE\nlooks complete"}}]}))
-    ok, verdict, _ = rt.run_critique(fake_cfg, {"id": 1, "title": "t", "description": "d"},
+    ok, verdict, _ = rt.run_critique(fake_cfg, RunRecordingClient(),
+                                     {"id": 1, "title": "t", "description": "d"},
                                      "plan", tmp_path / "c.log")
     assert ok is True and verdict == "APPROVE"
 
@@ -1237,7 +1245,8 @@ def test_run_critique_unparseable_defaults_approve(tmp_path, fake_cfg, monkeypat
     _enable_critique(fake_cfg)
     monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
         200, {"choices": [{"message": {"content": "I think the plan is fine, ship it."}}]}))
-    ok, verdict, _ = rt.run_critique(fake_cfg, {"id": 1, "title": "t", "description": "d"},
+    ok, verdict, _ = rt.run_critique(fake_cfg, RunRecordingClient(),
+                                     {"id": 1, "title": "t", "description": "d"},
                                      "plan", tmp_path / "c.log")
     assert ok is True and verdict == "APPROVE"
 
@@ -1245,9 +1254,23 @@ def test_run_critique_unparseable_defaults_approve(tmp_path, fake_cfg, monkeypat
 def test_run_critique_http_error_reports_not_ok(tmp_path, fake_cfg, monkeypatch):
     _enable_critique(fake_cfg)
     monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(429, text="rate"))
-    ok, verdict, _ = rt.run_critique(fake_cfg, {"id": 1, "title": "t", "description": "d"},
+    client = RunRecordingClient()
+    ok, verdict, _ = rt.run_critique(fake_cfg, client, {"id": 1, "title": "t", "description": "d"},
                                      "plan", tmp_path / "c.log")
     assert ok is False and verdict == "APPROVE"   # caller fails open on ok=False
+    # a failed call is still recorded as a failed run (zero usage), so it stays visible
+    assert client.runs and client.runs[0][1]["status"] == "failed"
+
+
+def test_run_critique_agent_run_post_failure_is_swallowed(tmp_path, fake_cfg, monkeypatch):
+    # A backend that 422s/drops the AgentRun POST must not break the critique verdict.
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "VERDICT: APPROVE"}}]}))
+    ok, verdict, _ = rt.run_critique(fake_cfg, RunRecordingClient(raise_on_post=True),
+                                     {"id": 1, "title": "t", "description": "d"},
+                                     "plan", tmp_path / "c.log")
+    assert ok is True and verdict == "APPROVE"
 
 
 def _plan_harness(fake_cfg, monkeypatch, agent_results, critique_results):
@@ -1267,7 +1290,7 @@ def _plan_harness(fake_cfg, monkeypatch, agent_results, critique_results):
         monkeypatch.setattr(rt, "run_critique",
                             lambda *a, **k: pytest.fail("critique must not run when disabled"))
     else:
-        def fake_critique(cfg, ticket, plan, log):
+        def fake_critique(cfg, client, ticket, plan, log):
             rec["critiqued"].append(plan)
             return next(critique_results)
         monkeypatch.setattr(rt, "run_critique", fake_critique)

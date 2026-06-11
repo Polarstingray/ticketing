@@ -319,9 +319,9 @@ It is **fail-open**: a quota'd, flaky, or unparseable critique never blocks a pl
 was actually produced (the resolver proceeds with the plan it has). Blank `CRITIQUE_API_*`
 = gate off (plans go straight to the human — the legacy behavior). Each REVISE costs an
 extra (cheap) critique call plus a full re-plan agent run, so keep `CRITIQUE_MAX_REVISIONS`
-small. The critique's token usage is recorded as a `token_usage` audit event
-(`agent=critique-api`); it is not yet a first-class `AgentRun` (the backend `AgentName`
-enum would need widening — a recommended follow-up).
+small. The critique's token usage is recorded both as a `token_usage` audit event and as
+a first-class `AgentRun` (`agent=critique-api`, `phase=plan-critique`), so its cost shows
+on the ticket like any other phase.
 
 ## Verification gate (optional)
 
