@@ -71,6 +71,19 @@ def _cron_log_path() -> "Path | None":
     return p if p.is_absolute() else HERE / p
 
 
+def _split_models(*raws: str) -> list[str]:
+    """Flatten one or more comma-separated model lists into an ordered, de-duped
+    list, dropping blanks. Order is preserved (first occurrence wins) so the
+    primary->fallback escalation is deterministic."""
+    out: list[str] = []
+    for raw in raws:
+        for name in (raw or "").split(","):
+            name = name.strip()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
 def _parse_repo_map(raw: str) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for chunk in raw.split(","):
@@ -100,9 +113,20 @@ class Config:
     agent_implement_model: str
     agent_review_model: str
     agent_fallback_model: str
+    # Ordered list of models to try after the primary before giving up (and handing
+    # the ticket back / to another resolver). Parsed from AGENT_FALLBACK_MODELS
+    # (comma-separated); the legacy singular AGENT_FALLBACK_MODEL is appended for
+    # back-compat. Lets an unreliable free model fall through several alternatives
+    # instead of one. See run_opencode.
+    agent_fallback_models: list[str]
     implement_tools: str
     agent_timeout: int
     agent_implement_timeout: int
+    # The read-only plan/review phases are exploration only and should finish in a
+    # couple of minutes; a much shorter cap than implement means a hung/stalled model
+    # fails over to the next in the fallback chain quickly instead of holding the
+    # resolver lock for the full agent_timeout. See _phase_timeout.
+    agent_plan_review_timeout: int
     # opencode-specific: which named agents drive the read-only plan phase and the
     # edit-capable implement phase (built-in "plan"/"build"; unused by Claude).
     opencode_plan_agent: str
@@ -124,6 +148,21 @@ class Config:
     git_author_name: str
     git_author_email: str
     audit_output_tail_bytes: int
+    # --- free-resolver: difficulty routing -------------------------------------
+    # When set, this (free) resolver hands tickets it deems out of scope to that
+    # user (the Claude bot) instead of working them itself — see _should_escalate.
+    # 0 = disabled (the Claude resolver leaves it unset, so there's no ping-pong).
+    escalate_to_user_id: int
+    # Priorities that escalate to escalate_to_user_id (in addition to the always-on
+    # `dangerous` / `claude` tag triggers). Comma-separated; default high,critical.
+    escalate_priorities: list[str]
+    # --- free-resolver: single-shot review backend -----------------------------
+    # When all three are set, code reviews go through a direct OpenAI-compatible
+    # chat completion (no opencode agent loop) — see single_shot_review. Works with
+    # Groq / Mistral / OpenRouter etc. Empty = use the configured agent for reviews.
+    review_api_url: str
+    review_api_key: str
+    review_api_model: str
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
@@ -160,9 +199,17 @@ class Config:
             agent_review_model=_env("AGENT_REVIEW_MODEL", default=""),
             # opencode-only: a stronger model to escalate to after the primary
             # fails a run with a transient provider error (overloaded/503). Empty
-            # disables escalation (the primary is still retried once). Ignored by
-            # the Claude runner.
+            # disables escalation. Ignored by the Claude runner. Kept for back-compat;
+            # AGENT_FALLBACK_MODELS (plural) is the preferred way to list several.
             agent_fallback_model=_env("AGENT_FALLBACK_MODEL", default=""),
+            # opencode-only: an ordered, comma-separated list of fallback models to
+            # try (each a distinct attempt) after the primary, before the ticket is
+            # handed back. The singular AGENT_FALLBACK_MODEL is appended so existing
+            # configs keep working. e.g. AGENT_FALLBACK_MODELS=google/gemini-2.0-flash,
+            # google/gemini-2.5-pro
+            agent_fallback_models=_split_models(
+                _env("AGENT_FALLBACK_MODELS", default=""),
+                _env("AGENT_FALLBACK_MODEL", default="")),
             implement_tools=_env(
                 "AGENT_IMPLEMENT_TOOLS", "CLAUDE_IMPLEMENT_TOOLS",
                 # Broad Bash so the agent can run tests/build in the worktree;
@@ -176,6 +223,14 @@ class Config:
             # so give it a larger default budget than the (read-only) plan phase.
             agent_implement_timeout=int(
                 _env("AGENT_IMPLEMENT_TIMEOUT", "CLAUDE_IMPLEMENT_TIMEOUT", default="2400")
+            ),
+            # Read-only plan/review cap. Much shorter than implement (and shorter than
+            # the legacy AGENT_TIMEOUT) so a stalled model is given up on quickly and
+            # the fallback chain moves on. Defaults to AGENT_TIMEOUT when set (so old
+            # configs that tuned it keep working), else 600s.
+            agent_plan_review_timeout=int(
+                _env("AGENT_PLAN_REVIEW_TIMEOUT", "AGENT_TIMEOUT", "CLAUDE_TIMEOUT",
+                     default="600")
             ),
             # opencode named agents: "plan" is permission-restricted (no edit/bash)
             # for the read-only plan phase; "build" is unrestricted for implement.
@@ -216,6 +271,15 @@ class Config:
             # Per-event cap on how much command/Claude output is copied into the
             # structured audit log (the full text still goes to per-ticket logs).
             audit_output_tail_bytes=int(os.environ.get("AUDIT_OUTPUT_TAIL_BYTES", "4096")),
+            # Difficulty routing: the free bot hands hard/important tickets to this
+            # user (the Claude bot). 0 = disabled.
+            escalate_to_user_id=int(os.environ.get("ESCALATE_TO_USER_ID", "0") or "0"),
+            escalate_priorities=_split_models(
+                _env("ESCALATE_PRIORITIES", default="high,critical")),
+            # Single-shot review backend (direct OpenAI-compatible chat completion).
+            review_api_url=_env("REVIEW_API_URL", default=""),
+            review_api_key=_env("REVIEW_API_KEY", default=""),
+            review_api_model=_env("REVIEW_API_MODEL", default=""),
         )
         cfg.logs_dir.mkdir(exist_ok=True)
         if not cfg.projects_root.is_dir():

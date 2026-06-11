@@ -245,8 +245,8 @@ bot user.
    RESOLVER_BOT_USER_ID=<gemini-bot id>
    STINGRAY_API_KEY=<gemini-bot's own key>   # not the admin key
    AGENT_BIN=/home/you/.local/bin/opencode   # absolute path for cron's thin PATH
-   AGENT_MODEL=google/gemini-2.5-flash       # provider/model
-   AGENT_FALLBACK_MODEL=google/gemini-2.5-pro  # escalate to this on a transient 503
+   AGENT_MODEL=google/gemini-2.5-flash       # provider/model (primary)
+   AGENT_FALLBACK_MODELS=google/gemini-2.5-flash-lite  # tried in order after primary
    # plan phase uses opencode's read-only `plan` agent; implement uses `build`.
    # Override only if you've defined custom opencode agents:
    # OPENCODE_PLAN_AGENT=plan
@@ -255,6 +255,27 @@ bot user.
    Pick a model that's actually good at agentic tool-calling: `gemini-2.5-flash`
    or stronger. `gemini-2.5-flash-lite` stalls on multi-step edits (≈148s/step,
    the loop dies with no changes) and is a poor fit for the implement phase.
+
+   **Reliability — chain across providers, not one project's quota.** A single
+   provider's free tier rate-limits hard (HTTP 429); the resolver detects the 429
+   and fails over to the next model in `AGENT_FALLBACK_MODELS`, but models inside
+   *one* Google project share *one* quota and 429 together. Point the chain at
+   **different providers** (each `opencode auth login`'d, independent free quotas):
+   ```bash
+   AGENT_MODEL=mistral/codestral-latest
+   AGENT_FALLBACK_MODELS=openrouter/deepseek/deepseek-chat-v3:free,google/gemini-2.5-flash
+   ```
+   (`gemini-2.5-pro` is free-tier `limit:0` — it 429s every time and the SDK retries
+   it into a fake "hang"; only add it once the key has billing.)
+
+   > ⚠️ **The opencode *agent* needs a high token-per-minute (TPM) budget.** opencode
+   > injects a ~32k-token system prompt (tool schemas + skills) on *every* call, so
+   > the **agent** (plan/implement) phases are unusable on low-TPM free tiers — e.g.
+   > **Groq free** caps TPM at 6–12k, so every `groq/*` model 429s with
+   > `ContextOverflowError` before it starts (and `groq/compound` errors outright).
+   > Use such providers for **single-shot reviews** instead (below) — those send only
+   > the small review prompt. For the agent path, pick a provider with a large/free
+   > context budget (Gemini, Mistral, OpenRouter free models) or a paid tier.
 4. **Add a second cron line** under its *own* `flock` lock, selecting the env file:
    ```cron
    */10 * * * * /usr/bin/flock -n /tmp/stingray-resolver-gemini.lock \
@@ -267,6 +288,19 @@ bot user.
 **Routing rule:** assign mechanical tickets (small PRs, merge conflicts, lint /
 dependency bumps) to `gemini-bot`; assign heavy or ambiguous work to `claude-bot`.
 Each resolver only sweeps its own bot's queue, so the two never collide.
+
+**Automatic escalation (free → Claude).** So you can route *everything* to the free
+bot and let it triage, set `ESCALATE_TO_USER_ID=<claude-bot id>` in `.env.gemini`:
+the free bot then reassigns any ticket that is high/critical priority (configurable
+via `ESCALATE_PRIORITIES`), tagged `dangerous`, or tagged `claude`, to the Claude
+bot — which picks it up on its next sweep. The Claude resolver leaves the var unset,
+so it never escalates to itself.
+
+**Single-shot reviews (optional, more reliable).** A code review needs no tools — the
+ticket carries the `code_blocks`. Set `REVIEW_API_URL` / `REVIEW_API_KEY` /
+`REVIEW_API_MODEL` (any OpenAI-compatible `/chat/completions` endpoint — Groq,
+Mistral, OpenRouter) and reviews run as a single chat completion instead of the
+opencode agent loop, sidestepping the loop's fragility. Unset = review via the agent.
 
 > **Read-only safety:** the plan phase runs opencode's permission-restricted
 > `plan` agent and does **not** pass `--dangerously-skip-permissions`, so it
