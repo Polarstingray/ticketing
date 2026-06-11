@@ -1439,7 +1439,7 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         for rev in range(cfg.critique_max_revisions + 1):
             cts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             c_log = cfg.logs_dir / f"ticket-{ticket['id']}-critique-{cts}.log"
-            ok_c, verdict, notes = run_critique(cfg, ticket, result, c_log)
+            ok_c, verdict, notes = run_critique(cfg, client, ticket, result, c_log)
             if not ok_c:
                 phase("plan-critique-skipped", ticket,
                       f"#{ticket['id']}: critique unavailable, proceeding with plan")
@@ -1738,18 +1738,48 @@ def critique_prompt(ticket: dict, plan: str) -> str:
     ])
 
 
-def run_critique(cfg, ticket: dict, plan: str, log_path: Path) -> tuple[bool, str, str]:
+def run_critique(cfg, client: StingrayClient, ticket: dict, plan: str,
+                 log_path: Path) -> tuple[bool, str, str]:
     """Vet a freshly produced plan with the cheap CRITIQUE_API_* model. Returns
     (ok, verdict, notes): `ok` is False when the API call failed (caller fails open and
     proceeds); `verdict` is "APPROVE" or "REVISE". An unparseable verdict defaults to
-    APPROVE — a malformed critique must never block planning. Emits a token_usage audit
-    event so the critique's cost is visible in the logs."""
+    APPROVE — a malformed critique must never block planning.
+
+    Emits a token_usage audit event AND POSTs the run as a first-class AgentRun
+    (agent="critique-api", phase="plan-critique") so the gate's cost shows on the
+    ticket like any other phase. POSTing must never break planning, so a failure is
+    swallowed (the audit log stays the source of truth)."""
     logger = audit.get_logger()
-    ok, text, usage = _chat_completion(
-        cfg.critique_api_url, cfg.critique_api_key, cfg.critique_api_model,
-        critique_prompt(ticket, plan), _phase_timeout(cfg, "plan"), log_path)
-    if usage:
-        _emit_token_usage(logger, "critique-api", "plan-critique", usage)
+    started = datetime.now(timezone.utc)
+    collected: dict = {}
+    token = _RUN_USAGE.set(collected)
+    try:
+        ok, text, usage = _chat_completion(
+            cfg.critique_api_url, cfg.critique_api_key, cfg.critique_api_model,
+            critique_prompt(ticket, plan), _phase_timeout(cfg, "plan"), log_path)
+        if usage:
+            _emit_token_usage(logger, "critique-api", "plan-critique", usage)
+    finally:
+        _RUN_USAGE.reset(token)
+    try:
+        client.create_agent_run(
+            ticket["id"], agent="critique-api", phase="plan-critique",
+            model=cfg.critique_api_model,
+            input_tokens=collected.get("input_tokens", 0),
+            output_tokens=collected.get("output_tokens", 0),
+            cache_read_tokens=collected.get("cache_read_tokens", 0),
+            cache_write_tokens=collected.get("cache_write_tokens", 0),
+            cost_usd=collected.get("cost_usd", 0.0),
+            status="succeeded" if ok else "failed",
+            started_at=started.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        audit.audit_event(
+            audit.get_logger(), "agent_run_post_failed",
+            f"#{ticket['id']}: failed to POST agent run (plan-critique)",
+            level=logging.WARNING, phase="plan-critique",
+        )
     if not ok:
         return False, "APPROVE", text
     m = _CRITIQUE_VERDICT_RE.search(text)
