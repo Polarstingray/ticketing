@@ -1,8 +1,9 @@
 """Pydantic request/response schemas."""
 from datetime import datetime, timezone
+import re
 from typing import Annotated, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer, field_validator
 
 from models import (
     NotificationChannel,
@@ -12,6 +13,43 @@ from models import (
     TicketType,
     UserRole,
 )
+
+# --- Tag validation ----------------------------------------------------------
+# Defense in depth, applied to ALL callers (including the resolver bot). Tag
+# strings are concatenated into LLM prompts, so newlines / control characters
+# are a prompt-injection vector; we also bound count and length. The charset is
+# permissive enough that existing control tags (``claude:…``, ``repo:…``) still
+# validate.
+
+MAX_TAGS = 30
+MAX_TAG_LENGTH = 50
+# Letters, digits and a small set of punctuation used by real tags
+# (`claude:planning`, `repo:my-app`, `c++`, `area/backend`, etc.). Notably
+# excludes whitespace control chars like \n, \r, \t.
+_TAG_CHARS = re.compile(r"^[\w:./+\-# ]+$")
+
+
+def _clean_tags(tags: Optional[List[str]]) -> Optional[List[str]]:
+    if tags is None:
+        return None
+    cleaned: List[str] = []
+    seen = set()
+    for tag in tags:
+        if not isinstance(tag, str):
+            raise ValueError("tags must be strings")
+        tag = tag.strip()
+        if not tag:
+            continue  # drop empties
+        if len(tag) > MAX_TAG_LENGTH:
+            raise ValueError(f"tag too long (max {MAX_TAG_LENGTH} chars): {tag!r}")
+        if not _TAG_CHARS.match(tag):
+            raise ValueError(f"tag contains invalid characters: {tag!r}")
+        if tag not in seen:
+            seen.add(tag)
+            cleaned.append(tag)
+    if len(cleaned) > MAX_TAGS:
+        raise ValueError(f"too many tags (max {MAX_TAGS})")
+    return cleaned
 
 # --- Datetime serialization --------------------------------------------------
 # DB datetimes are stored as UTC but come back naive (SQLite has no tz type, and
@@ -94,6 +132,11 @@ class TicketCreate(BaseModel):
     code_blocks: List[CodeBlock] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
 
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, v):
+        return _clean_tags(v)
+
 
 class TicketUpdate(BaseModel):
     title: Optional[str] = None
@@ -104,6 +147,11 @@ class TicketUpdate(BaseModel):
     due_date: Optional[datetime] = None
     code_blocks: Optional[List[CodeBlock]] = None
     tags: Optional[List[str]] = None
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, v):
+        return _clean_tags(v)
 
 
 class TicketOut(BaseModel):
