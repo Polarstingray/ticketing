@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from config import RepoNotFound
+
 RESOLVER_DIR = Path(__file__).resolve().parent.parent
 if str(RESOLVER_DIR) not in sys.path:
     sys.path.insert(0, str(RESOLVER_DIR))
@@ -37,6 +39,14 @@ class FakeClient:
 @pytest.fixture
 def fake_cfg(tmp_path):
     """A stand-in Config with just the attributes the tested paths read."""
+    def resolve_repo(name):
+        # Mirror the real contract: an empty/None name (no `repo:` tag and no
+        # DEFAULT_REPO) raises RepoNotFound; a named repo resolves to a path.
+        if not (name or "").strip():
+            raise RepoNotFound("no repo specified (add a `repo:<name>` tag) and "
+                               "DEFAULT_REPO is unset")
+        return tmp_path / "repo"
+
     return SimpleNamespace(
         bot_user_id=BOT,
         agent="claude",
@@ -47,7 +57,14 @@ def fake_cfg(tmp_path):
         git_author_email="bot@test.local",
         audit_output_tail_bytes=4096,
         logs_dir=tmp_path,
-        resolve_repo=lambda name: tmp_path / "repo",
+        default_repo=None,
+        resolve_repo=resolve_repo,
+        # free-resolver knobs (off by default; individual tests opt in)
+        escalate_to_user_id=0,
+        escalate_priorities=["high", "critical"],
+        review_api_url="",
+        review_api_key="",
+        review_api_model="",
     )
 
 

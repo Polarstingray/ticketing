@@ -53,10 +53,33 @@ def _migrate_archived(engine: Engine) -> None:
     _add_column(engine, "tickets", "archived", "BOOLEAN NOT NULL DEFAULT 0")
 
 
+def _migrate_notification_preferences(engine: Engine) -> None:
+    """notification_preferences table — added with the settings panel (#55).
+
+    ``create_all`` already builds brand-new tables on a fresh boot; this makes the
+    add explicit and idempotent (``checkfirst`` no-ops when the table exists) so a
+    database that predates the model still gains the table on the next startup."""
+    from models import NotificationPreference
+
+    NotificationPreference.__table__.create(bind=engine, checkfirst=True)
+
+
+def _migrate_agent_runs(engine: Engine) -> None:
+    """agent_runs table — added with resolver token-usage surfacing (#56).
+
+    A brand-new table, so `create_all` already builds it on a fresh DB; this
+    step backfills it on a database that predates the model. `checkfirst=True`
+    makes it a no-op when the table already exists (idempotent)."""
+    from models import AgentRun
+    AgentRun.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
     _migrate_archived,
+    _migrate_notification_preferences,
+    _migrate_agent_runs,
 ]
 
 
