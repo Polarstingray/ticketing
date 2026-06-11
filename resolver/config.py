@@ -163,6 +163,12 @@ class Config:
     review_api_url: str
     review_api_key: str
     review_api_model: str
+    # Verification gate: a shell command the resolver runs in the worktree after an
+    # implement run to confirm the agent's changes actually pass. Empty disables the
+    # gate (implement publishes as soon as there's a diff, the legacy behavior).
+    verify_command: str
+    verify_timeout: int
+    verify_max_retries: int
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
@@ -280,6 +286,15 @@ class Config:
             review_api_url=_env("REVIEW_API_URL", default=""),
             review_api_key=_env("REVIEW_API_KEY", default=""),
             review_api_model=_env("REVIEW_API_MODEL", default=""),
+            # Verification gate. VERIFY_COMMAND is a shell string run in the worktree
+            # (e.g. `cd backend && .venv/bin/pytest -q`); empty disables the gate. Note
+            # the worktree is a FRESH checkout with no gitignored .venv/node_modules, so
+            # the command must be self-contained. On failure the resolver re-invokes the
+            # implement agent with the output up to VERIFY_MAX_RETRIES times, then
+            # publishes flagged.
+            verify_command=_env("VERIFY_COMMAND", default=""),
+            verify_timeout=int(os.environ.get("VERIFY_TIMEOUT", "900")),
+            verify_max_retries=int(os.environ.get("VERIFY_MAX_RETRIES", "1")),
         )
         cfg.logs_dir.mkdir(exist_ok=True)
         if not cfg.projects_root.is_dir():
