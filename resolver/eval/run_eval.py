@@ -21,6 +21,7 @@ plan→approve→implement, then scores the output branch.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -92,7 +93,7 @@ def seed_repo(src: Path, dst: Path) -> None:
 
 def write_env_file(path: Path, *, base_url: str, bot_key: str, bot_id: int,
                    projects_root: Path, agent: str, model: str) -> None:
-    path.write_text("\n".join([
+    lines = [
         f"STINGRAY_URL={base_url}",          # direct to uvicorn — no /api proxy here
         f"STINGRAY_API_KEY={bot_key}",
         f"RESOLVER_BOT_USER_ID={bot_id}",
@@ -102,8 +103,15 @@ def write_env_file(path: Path, *, base_url: str, bot_key: str, bot_id: int,
         "PATCH_FALLBACK=0",
         "VERIFY_COMMAND=",                   # harness scores independently
         "MAX_ATTEMPTS=2",
-        "",
-    ]), encoding="utf-8")
+    ]
+    # Pass the plan-critique gate through when configured in the harness env, so
+    # `CRITIQUE_API_URL=… eval/run_eval.py --baseline …` A/Bs the gate vs. baseline.
+    for key in ("CRITIQUE_API_URL", "CRITIQUE_API_KEY", "CRITIQUE_API_MODEL",
+                "CRITIQUE_MAX_REVISIONS"):
+        val = os.environ.get(key)
+        if val:
+            lines.append(f"{key}={val}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:

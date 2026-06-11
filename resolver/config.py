@@ -163,6 +163,15 @@ class Config:
     review_api_url: str
     review_api_key: str
     review_api_model: str
+    # --- free-resolver: plan-critique gate -------------------------------------
+    # When all three are set, a cheap chat-completion model vets each freshly
+    # produced plan before the human sees it (see run_critique). On a REVISE verdict
+    # the planner is re-invoked with the critique notes, up to critique_max_revisions
+    # times. Empty disables the gate. Same OpenAI-compatible shape as review_api_*.
+    critique_api_url: str
+    critique_api_key: str
+    critique_api_model: str
+    critique_max_revisions: int
     # Verification gate: a shell command the resolver runs in the worktree after an
     # implement run to confirm the agent's changes actually pass. Empty disables the
     # gate (implement publishes as soon as there's a diff, the legacy behavior).
@@ -286,6 +295,12 @@ class Config:
             review_api_url=_env("REVIEW_API_URL", default=""),
             review_api_key=_env("REVIEW_API_KEY", default=""),
             review_api_model=_env("REVIEW_API_MODEL", default=""),
+            # Plan-critique gate (direct OpenAI-compatible chat completion). All three
+            # set ⇒ gate on; a REVISE verdict re-plans up to CRITIQUE_MAX_REVISIONS times.
+            critique_api_url=_env("CRITIQUE_API_URL", default=""),
+            critique_api_key=_env("CRITIQUE_API_KEY", default=""),
+            critique_api_model=_env("CRITIQUE_API_MODEL", default=""),
+            critique_max_revisions=int(os.environ.get("CRITIQUE_MAX_REVISIONS", "1")),
             # Verification gate. VERIFY_COMMAND is a shell string run in the worktree
             # (e.g. `cd backend && .venv/bin/pytest -q`); empty disables the gate. Note
             # the worktree is a FRESH checkout with no gitignored .venv/node_modules, so

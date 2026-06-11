@@ -65,6 +65,11 @@ def fake_cfg(tmp_path):
         review_api_url="",
         review_api_key="",
         review_api_model="",
+        # plan-critique gate (off by default; individual tests opt in)
+        critique_api_url="",
+        critique_api_key="",
+        critique_api_model="",
+        critique_max_revisions=1,
         # verification gate (off by default; individual tests opt in)
         verify_command="",
         verify_timeout=900,

@@ -1161,6 +1161,189 @@ def test_single_shot_review_empty_completion_fails(tmp_path, fake_cfg, monkeypat
     assert ok is False and "empty" in text.lower()
 
 
+# --- _chat_completion (shared cheap-completion plumbing) -----------------
+def test_chat_completion_parses_content_and_usage(tmp_path, monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "hello"}}],
+              "usage": {"prompt_tokens": 7, "completion_tokens": 3}}))
+    ok, text, usage = rt._chat_completion("u", "k", "m", "p", 10, tmp_path / "c.log")
+    assert ok is True and text == "hello"
+    assert usage == {"input_tokens": 7, "output_tokens": 3}
+    assert (tmp_path / "c.log").exists()       # transcript teed
+
+
+def test_chat_completion_429_and_non200_fail(tmp_path, monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(429, text="slow down"))
+    ok, text, usage = rt._chat_completion("u", "k", "m", "p", 10, tmp_path / "c.log")
+    assert ok is False and "quota exceeded" in text.lower() and usage == {}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(500, text="boom"))
+    ok, text, _ = rt._chat_completion("u", "k", "m", "p", 10, tmp_path / "c.log")
+    assert ok is False and "HTTP 500" in text
+
+
+def test_chat_completion_request_exception_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("down")))
+    ok, text, usage = rt._chat_completion("u", "k", "m", "p", 10, tmp_path / "c.log")
+    assert ok is False and "request failed" in text and usage == {}
+
+
+def test_single_shot_review_still_works_after_refactor(tmp_path, fake_cfg, monkeypatch):
+    # The refactor must be behavior-preserving: single_shot_review still returns (ok, text).
+    _enable_single_shot(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "LGTM"}}],
+              "usage": {"prompt_tokens": 1, "completion_tokens": 1}}))
+    ok, text = rt.single_shot_review(fake_cfg, "review", tmp_path / "r.log")
+    assert ok is True and text == "LGTM"
+
+
+# --- plan-critique gate --------------------------------------------------
+def _enable_critique(fake_cfg):
+    fake_cfg.critique_api_url = "https://api.groq.com/openai/v1/chat/completions"
+    fake_cfg.critique_api_key = "sk_critique"
+    fake_cfg.critique_api_model = "groq/llama-3.1-8b-instant"
+
+
+def test_critique_prompt_includes_plan_and_title():
+    ticket = {"id": 7, "title": "Add CSV export", "priority": "low", "description": "d"}
+    prompt = rt.critique_prompt(ticket, "STEP 1: edit foo.py")
+    assert "Add CSV export" in prompt and "STEP 1: edit foo.py" in prompt
+    assert "VERDICT: APPROVE" in prompt and "VERDICT: REVISE" in prompt
+
+
+def test_run_critique_revise_with_notes(tmp_path, fake_cfg, monkeypatch):
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "VERDICT: REVISE\n- add a test"}}],
+              "usage": {"prompt_tokens": 5, "completion_tokens": 4}}))
+    ok, verdict, notes = rt.run_critique(fake_cfg, {"id": 1, "title": "t", "description": "d"},
+                                         "plan", tmp_path / "c.log")
+    assert ok is True and verdict == "REVISE" and "add a test" in notes
+
+
+def test_run_critique_approve(tmp_path, fake_cfg, monkeypatch):
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "VERDICT: APPROVE\nlooks complete"}}]}))
+    ok, verdict, _ = rt.run_critique(fake_cfg, {"id": 1, "title": "t", "description": "d"},
+                                     "plan", tmp_path / "c.log")
+    assert ok is True and verdict == "APPROVE"
+
+
+def test_run_critique_unparseable_defaults_approve(tmp_path, fake_cfg, monkeypatch):
+    # A malformed critique must never block planning — fail open to APPROVE.
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(
+        200, {"choices": [{"message": {"content": "I think the plan is fine, ship it."}}]}))
+    ok, verdict, _ = rt.run_critique(fake_cfg, {"id": 1, "title": "t", "description": "d"},
+                                     "plan", tmp_path / "c.log")
+    assert ok is True and verdict == "APPROVE"
+
+
+def test_run_critique_http_error_reports_not_ok(tmp_path, fake_cfg, monkeypatch):
+    _enable_critique(fake_cfg)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResp(429, text="rate"))
+    ok, verdict, _ = rt.run_critique(fake_cfg, {"id": 1, "title": "t", "description": "d"},
+                                     "plan", tmp_path / "c.log")
+    assert ok is False and verdict == "APPROVE"   # caller fails open on ok=False
+
+
+def _plan_harness(fake_cfg, monkeypatch, agent_results, critique_results):
+    """Wire do_plan's externals. `agent_results` is an iterator of (ok, plan) for each
+    run_agent_tracked call; `critique_results` an iterator of (ok, verdict, notes) for each
+    run_critique call (None ⇒ critique must never be invoked). Records the agent prompts."""
+    monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    rec = {"prompts": [], "critiqued": []}
+
+    def fake_agent(cfg, client, ticket, prompt, repo, mode, log):
+        rec["prompts"].append(prompt)
+        return next(agent_results)
+
+    monkeypatch.setattr(rt, "run_agent_tracked", fake_agent)
+    if critique_results is None:
+        monkeypatch.setattr(rt, "run_critique",
+                            lambda *a, **k: pytest.fail("critique must not run when disabled"))
+    else:
+        def fake_critique(cfg, ticket, plan, log):
+            rec["critiqued"].append(plan)
+            return next(critique_results)
+        monkeypatch.setattr(rt, "run_critique", fake_critique)
+    return rec
+
+
+def _plan_ticket():
+    return {"id": 1, "title": "t", "description": "d", "priority": "low",
+            "tags": [], "created_by": 9}
+
+
+def _plan_body(client):
+    return next(b for _, b in client.comments_added if rt.PLAN_MARKER in b)
+
+
+def test_do_plan_gate_disabled_runs_planner_once(fake_cfg, monkeypatch, tmp_path):
+    # No CRITIQUE_API_* (default) → run_critique never called, plan posted as-is.
+    rec = _plan_harness(fake_cfg, monkeypatch, iter([(True, "PLAN A")]), critique_results=None)
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 1
+    body = _plan_body(client)
+    assert "PLAN A" in body and "🧭" not in body
+
+
+def test_do_plan_critique_approve_notes_approved(fake_cfg, monkeypatch, tmp_path):
+    _enable_critique(fake_cfg)
+    rec = _plan_harness(fake_cfg, monkeypatch, iter([(True, "PLAN A")]),
+                        critique_results=iter([(True, "APPROVE", "good")]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 1 and rec["critiqued"] == ["PLAN A"]
+    assert "approved" in _plan_body(client)
+
+
+def test_do_plan_critique_revise_then_approve_replans(fake_cfg, monkeypatch, tmp_path):
+    _enable_critique(fake_cfg)
+    fake_cfg.critique_max_revisions = 1
+    rec = _plan_harness(fake_cfg, monkeypatch,
+                        iter([(True, "PLAN1"), (True, "PLAN2")]),
+                        critique_results=iter([(True, "REVISE", "- add a test"),
+                                               (True, "APPROVE", "ok")]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 2                  # one re-plan
+    assert "add a test" in rec["prompts"][1]         # critique notes fed to the re-plan
+    body = _plan_body(client)
+    assert "PLAN2" in body and "approved" in body
+
+
+def test_do_plan_critique_exhausted_flags_concerns(fake_cfg, monkeypatch, tmp_path):
+    _enable_critique(fake_cfg)
+    fake_cfg.critique_max_revisions = 1
+    rec = _plan_harness(fake_cfg, monkeypatch,
+                        iter([(True, "PLAN1"), (True, "PLAN2")]),
+                        critique_results=iter([(True, "REVISE", "gap A"),
+                                               (True, "REVISE", "gap B")]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 2
+    body = _plan_body(client)
+    assert "still flags concerns" in body and "gap B" in body and "PLAN2" in body
+
+
+def test_do_plan_critique_error_proceeds_with_plan(fake_cfg, monkeypatch, tmp_path):
+    # run_critique ok=False (quota/flaky) → fail open, publish the original plan, no re-plan.
+    _enable_critique(fake_cfg)
+    rec = _plan_harness(fake_cfg, monkeypatch, iter([(True, "PLAN A")]),
+                        critique_results=iter([(False, "APPROVE", "boom")]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _plan_ticket(), tmp_path, None)
+    assert len(rec["prompts"]) == 1
+    body = _plan_body(client)
+    assert "PLAN A" in body and "🧭" not in body     # no verdict line on skip
+
+
 def test_do_review_uses_single_shot_when_configured(fake_cfg, monkeypatch):
     _enable_single_shot(fake_cfg)
     monkeypatch.setattr(rt, "run_agent", lambda *a, **k: pytest.fail("agent must not run"))
