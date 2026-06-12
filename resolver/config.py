@@ -37,6 +37,17 @@ def _require(name: str) -> str:
     return val
 
 
+def _env(*names: str, default: str = "") -> str:
+    """First non-empty env var among `names`, else `default`. Lets agent-neutral
+    AGENT_* names take precedence while still honoring the legacy CLAUDE_* names
+    (mirrors the RESOLVER_BOT_USER_ID <- CLAUDE_BOT_USER_ID fallback)."""
+    for name in names:
+        val = os.environ.get(name, "").strip()
+        if val:
+            return val
+    return default
+
+
 def _bot_user_id() -> int:
     """The resolver's bot user id. Prefer the agent-neutral RESOLVER_BOT_USER_ID;
     fall back to the original CLAUDE_BOT_USER_ID for backward compatibility."""
@@ -48,6 +59,29 @@ def _bot_user_id() -> int:
             "(or legacy CLAUDE_BOT_USER_ID); see .env.example"
         )
     return int(raw)
+
+
+def _cron_log_path() -> "Path | None":
+    """This resolver's cron stdout log, for size-rotation. A relative path is
+    taken next to this module (matching logs_dir). Unset = no rotation."""
+    raw = os.environ.get("CRON_LOG", "").strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    return p if p.is_absolute() else HERE / p
+
+
+def _split_models(*raws: str) -> list[str]:
+    """Flatten one or more comma-separated model lists into an ordered, de-duped
+    list, dropping blanks. Order is preserved (first occurrence wins) so the
+    primary->fallback escalation is deterministic."""
+    out: list[str] = []
+    for raw in raws:
+        for name in (raw or "").split(","):
+            name = name.strip()
+            if name and name not in out:
+                out.append(name)
+    return out
 
 
 def _parse_repo_map(raw: str) -> dict[str, str]:
@@ -70,11 +104,40 @@ class Config:
     projects_root: Path
     repo_map: dict[str, str]
     default_repo: str
-    claude_bin: str
-    claude_model: str
+    # --- agent invocation (agent-neutral; legacy CLAUDE_* names still honored) ---
+    agent_bin: str
+    agent_model: str
+    # Optional per-phase model overrides; each falls back to agent_model when blank.
+    # Lets the read-only plan/review phases run on a cheaper model than implement.
+    agent_plan_model: str
+    agent_implement_model: str
+    agent_review_model: str
+    # Difficulty-routed implement tiers: when the plan self-assesses an `easy`/`hard`
+    # ticket, the implement phase swaps to these instead of agent_implement_model.
+    # Blank = no swap (fall back to agent_implement_model -> agent_model), so routing
+    # is opt-in. `hard` only swaps when escalation is disabled; otherwise hard tickets
+    # escalate to escalate_to_user_id. See parse_difficulty / do_implement.
+    agent_implement_model_easy: str
+    agent_implement_model_hard: str
+    agent_fallback_model: str
+    # Ordered list of models to try after the primary before giving up (and handing
+    # the ticket back / to another resolver). Parsed from AGENT_FALLBACK_MODELS
+    # (comma-separated); the legacy singular AGENT_FALLBACK_MODEL is appended for
+    # back-compat. Lets an unreliable free model fall through several alternatives
+    # instead of one. See run_opencode.
+    agent_fallback_models: list[str]
     implement_tools: str
-    claude_timeout: int
-    claude_implement_timeout: int
+    agent_timeout: int
+    agent_implement_timeout: int
+    # The read-only plan/review phases are exploration only and should finish in a
+    # couple of minutes; a much shorter cap than implement means a hung/stalled model
+    # fails over to the next in the fallback chain quickly instead of holding the
+    # resolver lock for the full agent_timeout. See _phase_timeout.
+    agent_plan_review_timeout: int
+    # opencode-specific: which named agents drive the read-only plan phase and the
+    # edit-capable implement phase (built-in "plan"/"build"; unused by Claude).
+    opencode_plan_agent: str
+    opencode_build_agent: str
     patch_fallback: bool
     # --- reliability / hygiene tunables ---
     stingray_max_retries: int
@@ -82,14 +145,65 @@ class Config:
     max_tickets_per_sweep: int
     git_net_timeout: int
     log_retention_days: int
+    # Loose per-sweep/ticket logs from days older than this get rolled into a
+    # daily archive/<date>.tar.gz; the archives are deleted after retention.
+    log_archive_after_days: int
+    # Optional path to this resolver's cron stdout log (its own per bot). When
+    # set, it is size-rotated to <path>.1 at sweep start. None = no rotation.
+    cron_log: Path | None
+    cron_log_max_bytes: int
     git_author_name: str
     git_author_email: str
     audit_output_tail_bytes: int
+    # --- free-resolver: difficulty routing -------------------------------------
+    # When set, this (free) resolver hands tickets it deems out of scope to that
+    # user (the Claude bot) instead of working them itself — see _should_escalate.
+    # 0 = disabled (the Claude resolver leaves it unset, so there's no ping-pong).
+    escalate_to_user_id: int
+    # Priorities that escalate to escalate_to_user_id (in addition to the always-on
+    # `dangerous` / `claude` tag triggers). Comma-separated; default high,critical.
+    escalate_priorities: list[str]
+    # --- free-resolver: single-shot review backend -----------------------------
+    # When all three are set, code reviews go through a direct OpenAI-compatible
+    # chat completion (no opencode agent loop) — see single_shot_review. Works with
+    # Groq / Mistral / OpenRouter etc. Empty = use the configured agent for reviews.
+    review_api_url: str
+    review_api_key: str
+    review_api_model: str
+    # --- free-resolver: plan-critique gate -------------------------------------
+    # When all three are set, a cheap chat-completion model vets each freshly
+    # produced plan before the human sees it (see run_critique). On a REVISE verdict
+    # the planner is re-invoked with the critique notes, up to critique_max_revisions
+    # times. Empty disables the gate. Same OpenAI-compatible shape as review_api_*.
+    critique_api_url: str
+    critique_api_key: str
+    critique_api_model: str
+    critique_max_revisions: int
+    # Verification gate: a shell command the resolver runs in the worktree after an
+    # implement run to confirm the agent's changes actually pass. Empty disables the
+    # gate (implement publishes as soon as there's a diff, the legacy behavior).
+    verify_command: str
+    verify_timeout: int
+    verify_max_retries: int
+    # Quota backoff: when an agent run fails on an API quota/rate limit (rather than
+    # a real error), the resolver parks the ticket — keeping it assigned to the bot
+    # and preserving its phase tag — instead of handing it back to the user. The
+    # sweep skips the ticket until this many minutes have elapsed, then auto-retries
+    # the same phase. A user can force an early retry by re-assigning the ticket.
+    quota_backoff_minutes: int
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
     def load(cls) -> "Config":
-        _load_env_file(HERE / ".env")
+        # Which env file to load (default `.env`). Lets several resolver identities
+        # share this one code dir — e.g. RESOLVER_ENV_FILE=.env.gemini selects the
+        # opencode/Gemini bot's config. The selector is read from the real
+        # environment; a relative path is taken next to this module.
+        env_file = os.environ.get("RESOLVER_ENV_FILE", "").strip() or ".env"
+        env_path = Path(env_file)
+        if not env_path.is_absolute():
+            env_path = HERE / env_path
+        _load_env_file(env_path)
         cfg = cls(
             stingray_url=_require("STINGRAY_URL").rstrip("/"),
             api_key=_require("STINGRAY_API_KEY"),
@@ -100,21 +214,59 @@ class Config:
             projects_root=Path(_require("PROJECTS_ROOT")).resolve(),
             repo_map=_parse_repo_map(os.environ.get("REPO_MAP", "")),
             default_repo=os.environ.get("DEFAULT_REPO", "").strip(),
-            claude_bin=os.environ.get("CLAUDE_BIN", "claude").strip() or "claude",
-            claude_model=os.environ.get("CLAUDE_MODEL", "").strip(),
-            implement_tools=os.environ.get(
-                "CLAUDE_IMPLEMENT_TOOLS",
-                # Broad Bash so Claude can run tests/build in the worktree;
+            # Agent CLI binary/model. AGENT_* is the agent-neutral name; the legacy
+            # CLAUDE_* names still work so existing Claude resolvers need no change.
+            agent_bin=_env("AGENT_BIN", "CLAUDE_BIN", default="claude"),
+            agent_model=_env("AGENT_MODEL", "CLAUDE_MODEL"),
+            # Per-phase model overrides. Each is empty by default and falls back to
+            # AGENT_MODEL (in model_for), so behavior is unchanged until one is set.
+            # Use them to run the read-only plan/review phases on a cheaper model and
+            # reserve the strongest model for implement.
+            agent_plan_model=_env("AGENT_PLAN_MODEL", default=""),
+            agent_implement_model=_env("AGENT_IMPLEMENT_MODEL", default=""),
+            agent_review_model=_env("AGENT_REVIEW_MODEL", default=""),
+            # Difficulty-routed implement tiers (blank = no swap). See do_implement.
+            agent_implement_model_easy=_env("AGENT_IMPLEMENT_MODEL_EASY", default=""),
+            agent_implement_model_hard=_env("AGENT_IMPLEMENT_MODEL_HARD", default=""),
+            # opencode-only: a stronger model to escalate to after the primary
+            # fails a run with a transient provider error (overloaded/503). Empty
+            # disables escalation. Ignored by the Claude runner. Kept for back-compat;
+            # AGENT_FALLBACK_MODELS (plural) is the preferred way to list several.
+            agent_fallback_model=_env("AGENT_FALLBACK_MODEL", default=""),
+            # opencode-only: an ordered, comma-separated list of fallback models to
+            # try (each a distinct attempt) after the primary, before the ticket is
+            # handed back. The singular AGENT_FALLBACK_MODEL is appended so existing
+            # configs keep working. e.g. AGENT_FALLBACK_MODELS=google/gemini-2.0-flash,
+            # google/gemini-2.5-pro
+            agent_fallback_models=_split_models(
+                _env("AGENT_FALLBACK_MODELS", default=""),
+                _env("AGENT_FALLBACK_MODEL", default="")),
+            implement_tools=_env(
+                "AGENT_IMPLEMENT_TOOLS", "CLAUDE_IMPLEMENT_TOOLS",
+                # Broad Bash so the agent can run tests/build in the worktree;
                 # isolation comes from the worktree + PROJECTS_ROOT allowlist,
                 # not from narrowing Bash (compound `cd && cmd` defeats that).
-                "Edit Write Read Glob Grep Bash",
-            ).strip(),
-            claude_timeout=int(os.environ.get("CLAUDE_TIMEOUT", "1800")),
+                # Claude-tool-name allowlist; the opencode runner ignores this.
+                default="Edit Write Read Glob Grep Bash",
+            ),
+            agent_timeout=int(_env("AGENT_TIMEOUT", "CLAUDE_TIMEOUT", default="1800")),
             # The implement phase does strictly more than plan (edit + verify),
             # so give it a larger default budget than the (read-only) plan phase.
-            claude_implement_timeout=int(
-                os.environ.get("CLAUDE_IMPLEMENT_TIMEOUT", "2400")
+            agent_implement_timeout=int(
+                _env("AGENT_IMPLEMENT_TIMEOUT", "CLAUDE_IMPLEMENT_TIMEOUT", default="2400")
             ),
+            # Read-only plan/review cap. Much shorter than implement (and shorter than
+            # the legacy AGENT_TIMEOUT) so a stalled model is given up on quickly and
+            # the fallback chain moves on. Defaults to AGENT_TIMEOUT when set (so old
+            # configs that tuned it keep working), else 600s.
+            agent_plan_review_timeout=int(
+                _env("AGENT_PLAN_REVIEW_TIMEOUT", "AGENT_TIMEOUT", "CLAUDE_TIMEOUT",
+                     default="600")
+            ),
+            # opencode named agents: "plan" is permission-restricted (no edit/bash)
+            # for the read-only plan phase; "build" is unrestricted for implement.
+            opencode_plan_agent=_env("OPENCODE_PLAN_AGENT", default="plan"),
+            opencode_build_agent=_env("OPENCODE_BUILD_AGENT", default="build"),
             patch_fallback=os.environ.get("PATCH_FALLBACK", "0").strip() in ("1", "true", "yes"),
             # Retry transient Stingray API failures (connection/5xx/429) this many
             # times before giving up, so a network blip mid-sweep doesn't strand a
@@ -130,8 +282,16 @@ class Config:
             # Longer timeout for network git/gh commands (push/fetch/pr create) so a
             # slow transfer isn't SIGKILLed mid-flight by the default run() budget.
             git_net_timeout=int(os.environ.get("GIT_NET_TIMEOUT", "300")),
-            # Prune sweep/audit/ticket logs older than this many days at sweep start.
+            # Delete archived logs older than this many days at sweep start.
             log_retention_days=int(os.environ.get("LOG_RETENTION_DAYS", "14")),
+            # Roll loose logs from days older than this into daily tarballs. 1 =
+            # keep today loose, archive yesterday and older.
+            log_archive_after_days=int(os.environ.get("LOG_ARCHIVE_AFTER_DAYS", "1")),
+            # This bot's own cron stdout log, size-rotated at sweep start. Each
+            # identity points CRON_LOG at its own file (e.g. cron.log vs
+            # cron-gemini.log); unset disables rotation (back-compat).
+            cron_log=_cron_log_path(),
+            cron_log_max_bytes=int(os.environ.get("CRON_LOG_MAX_BYTES", "5000000")),
             # Identity stamped on the resolver's commits, so the commit doesn't fail
             # on a host with no global git identity (which gets misreported as
             # "Claude produced no code changes").
@@ -142,6 +302,33 @@ class Config:
             # Per-event cap on how much command/Claude output is copied into the
             # structured audit log (the full text still goes to per-ticket logs).
             audit_output_tail_bytes=int(os.environ.get("AUDIT_OUTPUT_TAIL_BYTES", "4096")),
+            # Difficulty routing: the free bot hands hard/important tickets to this
+            # user (the Claude bot). 0 = disabled.
+            escalate_to_user_id=int(os.environ.get("ESCALATE_TO_USER_ID", "0") or "0"),
+            escalate_priorities=_split_models(
+                _env("ESCALATE_PRIORITIES", default="high,critical")),
+            # Single-shot review backend (direct OpenAI-compatible chat completion).
+            review_api_url=_env("REVIEW_API_URL", default=""),
+            review_api_key=_env("REVIEW_API_KEY", default=""),
+            review_api_model=_env("REVIEW_API_MODEL", default=""),
+            # Plan-critique gate (direct OpenAI-compatible chat completion). All three
+            # set ⇒ gate on; a REVISE verdict re-plans up to CRITIQUE_MAX_REVISIONS times.
+            critique_api_url=_env("CRITIQUE_API_URL", default=""),
+            critique_api_key=_env("CRITIQUE_API_KEY", default=""),
+            critique_api_model=_env("CRITIQUE_API_MODEL", default=""),
+            critique_max_revisions=int(os.environ.get("CRITIQUE_MAX_REVISIONS", "1")),
+            # Verification gate. VERIFY_COMMAND is a shell string run in the worktree
+            # (e.g. `cd backend && .venv/bin/pytest -q`); empty disables the gate. Note
+            # the worktree is a FRESH checkout with no gitignored .venv/node_modules, so
+            # the command must be self-contained. On failure the resolver re-invokes the
+            # implement agent with the output up to VERIFY_MAX_RETRIES times, then
+            # publishes flagged.
+            verify_command=_env("VERIFY_COMMAND", default=""),
+            verify_timeout=int(os.environ.get("VERIFY_TIMEOUT", "900")),
+            verify_max_retries=int(os.environ.get("VERIFY_MAX_RETRIES", "1")),
+            # How long to wait after a quota/rate-limit failure before auto-retrying
+            # the parked ticket from the same phase (see quota_backoff). Default 60m.
+            quota_backoff_minutes=int(os.environ.get("QUOTA_BACKOFF_MINUTES", "60")),
         )
         cfg.logs_dir.mkdir(exist_ok=True)
         if not cfg.projects_root.is_dir():

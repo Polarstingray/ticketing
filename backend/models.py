@@ -7,10 +7,12 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -46,6 +48,29 @@ class TicketPriority(str, enum.Enum):
     medium = "medium"
     high = "high"
     critical = "critical"
+
+
+class NotificationType(str, enum.Enum):
+    assigned = "assigned"
+    commented = "commented"
+
+
+class NotificationChannel(str, enum.Enum):
+    """Where a notification is delivered. ``in_app`` is the bell/inbox;
+    ``email`` is the SMTP path in ``notifications.py``."""
+    in_app = "in_app"
+    email = "email"
+
+
+class AgentPhase(str, enum.Enum):
+    plan = "plan"
+    implement = "implement"
+    review = "review"
+
+
+class AgentRunStatus(str, enum.Enum):
+    succeeded = "succeeded"
+    failed = "failed"
 
 
 # --- Models ------------------------------------------------------------------
@@ -121,6 +146,35 @@ class Ticket(Base):
     activities = relationship(
         "Activity", cascade="all, delete-orphan"
     )
+    agent_runs = relationship(
+        "AgentRun", cascade="all, delete-orphan"
+    )
+
+
+class AgentRun(Base):
+    """One resolver phase (plan|implement|review) executed by an agent, with the
+    token usage and cost it consumed. Lets the app surface the otherwise-invisible
+    resolver work as an auditable, costed timeline per ticket.
+
+    Mirrors the per-phase `token_usage` audit event the resolver writes to its
+    JSONL log — this is the durable, app-visible copy of the same fact.
+    """
+    __tablename__ = "agent_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False, index=True)
+    agent = Column(String, nullable=False)        # claude | opencode | review-api | critique-api
+    phase = Column(String, nullable=False)        # plan | implement | review | plan-critique
+    model = Column(String, nullable=False, default="")
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cache_read_tokens = Column(Integer, nullable=False, default=0)
+    cache_write_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd = Column(Float, nullable=False, default=0.0)
+    status = Column(String, nullable=False, default=AgentRunStatus.succeeded.value)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, default=utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class Comment(Base):
@@ -134,6 +188,53 @@ class Comment(Base):
 
     ticket = relationship("Ticket", back_populates="comments")
     author_user = relationship("User", foreign_keys=[author])
+
+
+class Notification(Base):
+    """An in-app notification delivered to a single recipient.
+
+    One row per (recipient, event). Strictly per-user — every endpoint filters by
+    the authenticated user. Ticket/actor fields are *snapshots* (denormalized,
+    mirroring how ``Activity.detail`` stores ``{name}``) so the inbox renders
+    without joins and survives deletion of the ticket or actor; ``ticket_id`` is
+    deliberately not an enforced FK for the same reason.
+
+    ``type`` categorizes each notification (see :class:`NotificationType`) and is
+    the seam for a future notification-settings panel: every notification carries
+    a type and flows through the ``should_notify`` gate in ``inbox.py``.
+    """
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)  # recipient
+    type = Column(String, nullable=False)        # NotificationType value
+    ticket_id = Column(Integer, nullable=True)   # not FK-enforced; snapshot below keeps it usable
+    ticket_title = Column(String, nullable=False, default="")
+    actor_id = Column(Integer, nullable=True)
+    actor_name = Column(String, nullable=False, default="")
+    comment_id = Column(Integer, nullable=True)
+    read = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class NotificationPreference(Base):
+    """A single user's opt-out for one (type, channel) pair.
+
+    Rows are sparse and default-on: the absence of a row means "enabled", so we
+    only ever store explicit overrides. ``inbox.should_notify`` consults this
+    table — a missing row, or ``enabled=True``, lets the notification through.
+    The unique constraint keeps it to at most one row per (user, type, channel).
+    """
+    __tablename__ = "notification_preferences"
+    __table_args__ = (
+        UniqueConstraint("user_id", "type", "channel", name="uq_notif_pref"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(String, nullable=False)     # NotificationType value
+    channel = Column(String, nullable=False)  # NotificationChannel value
+    enabled = Column(Boolean, nullable=False, default=True)
 
 
 class Activity(Base):

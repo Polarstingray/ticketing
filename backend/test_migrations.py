@@ -23,6 +23,10 @@ def _columns(engine, table):
     return {c["name"] for c in inspect(engine).get_columns(table)}
 
 
+def _tables(engine):
+    return set(inspect(engine).get_table_names())
+
+
 def test_adds_missing_columns():
     engine, path = _legacy_engine()
     try:
@@ -33,6 +37,8 @@ def test_adds_missing_columns():
 
         assert "session_version" in _columns(engine, "users")
         assert "archived" in _columns(engine, "tickets")
+        # The settings panel's table is created (idempotently) by a migration too.
+        assert "notification_preferences" in inspect(engine).get_table_names()
     finally:
         os.unlink(path)
 
@@ -44,6 +50,23 @@ def test_idempotent():
         # Running again must not raise (columns already present).
         run_migrations(engine)
         assert "session_version" in _columns(engine, "users")
+    finally:
+        os.unlink(path)
+
+
+def test_creates_agent_runs_table():
+    """On a DB predating the AgentRun model, run_migrations creates the
+    agent_runs table and is idempotent on a second call (#56)."""
+    engine, path = _legacy_engine()
+    try:
+        assert "agent_runs" not in _tables(engine)
+        run_migrations(engine)
+        assert "agent_runs" in _tables(engine)
+        cols = _columns(engine, "agent_runs")
+        assert {"ticket_id", "phase", "agent", "cost_usd", "input_tokens"} <= cols
+        # Second run must not raise (table already present).
+        run_migrations(engine)
+        assert "agent_runs" in _tables(engine)
     finally:
         os.unlink(path)
 

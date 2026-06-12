@@ -7,9 +7,12 @@ from sqlalchemy.orm import Session
 
 from activity import record_activity
 from auth import can_modify_ticket, can_view_ticket, get_current_user, is_admin
+from control_tags import can_manage_reserved_tags, is_reserved_tag, reserved_subset
 from database import get_db
+from inbox import create_notification
 from models import (
     Activity,
+    AgentRun,
     Ticket,
     TicketPriority,
     TicketStatus,
@@ -20,6 +23,8 @@ from models import (
 from notifications import notify_assignment, notify_new_ticket_admins
 from schemas import (
     ActivityOut,
+    AgentRunCreate,
+    AgentRunOut,
     PaginatedTickets,
     TicketCreate,
     TicketOut,
@@ -34,6 +39,29 @@ def _get_ticket_or_404(ticket_id: int, db: Session) -> Ticket:
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
     return ticket
+
+
+_RESERVED_TAG_ERROR = (
+    "Reserved tags (claude:*, repo:*, dangerous, fix) cannot be set; "
+    "they are managed by the automation."
+)
+
+
+def _resolve_tags(submitted: list[str], existing: list[str] | None) -> list[str]:
+    """Compute the tag set to store for a non-trusted caller's request.
+
+    Trusted callers (admin / resolver bot) bypass this and get a full replace.
+    For everyone else the ``tags`` field controls only *free* (non-reserved)
+    tags: submitting any reserved tag is rejected, and the ticket's existing
+    reserved tags are preserved so a free-tag edit can never add, remove, or
+    alter a control tag.
+    """
+    if reserved_subset(submitted):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=_RESERVED_TAG_ERROR)
+    existing_reserved = [t for t in (existing or []) if is_reserved_tag(t)]
+    # submitted contains only free tags here (reserved rejected above).
+    return existing_reserved + [t for t in submitted if t not in existing_reserved]
 
 
 @router.get("", response_model=PaginatedTickets)
@@ -104,6 +132,12 @@ def create_ticket(
         else []
     )
 
+    # Only trusted automation (admin / resolver bot) may set reserved control
+    # tags; everyone else may set free tags only. (No existing tags on create.)
+    tags = payload.tags
+    if tags and not can_manage_reserved_tags(user):
+        tags = _resolve_tags(tags, existing=None)
+
     ticket = Ticket(
         type=payload.type.value,
         title=payload.title,
@@ -114,7 +148,7 @@ def create_ticket(
         assigned_to=payload.assigned_to,
         due_date=payload.due_date,
         code_blocks=code_blocks,
-        tags=payload.tags,
+        tags=tags,
     )
     db.add(ticket)
     db.flush()  # assign ticket.id for the activity rows
@@ -125,13 +159,16 @@ def create_ticket(
             db, ticket.id, user.id, "assigned",
             {"to": assignee.id, "name": assignee.display_name},
         )
+        create_notification(
+            db, user_id=assignee.id, type="assigned", ticket=ticket, actor=user,
+        )
     db.commit()
     db.refresh(ticket)
 
     # Notify admins of the new ticket, and the assignee (if any, and not the author).
     notify_new_ticket_admins(background, db, ticket, user)
     if assignee is not None:
-        notify_assignment(background, ticket, assignee, user)
+        notify_assignment(background, db, ticket, assignee, user)
     return ticket
 
 
@@ -168,10 +205,18 @@ def update_ticket(
         if not new_assignee:
             raise HTTPException(status_code=400, detail="assigned_to user does not exist")
 
+    # Reserved control tags drive the resolver's automation, so only trusted
+    # identities (admin / resolver bot) may set them. For everyone else, a tags
+    # edit controls free tags only and the ticket's existing reserved tags are
+    # preserved — see _resolve_tags.
+    if "tags" in data and data["tags"] is not None and not can_manage_reserved_tags(user):
+        data["tags"] = _resolve_tags(data["tags"], existing=ticket.tags)
+
     # Snapshot the fields we audit, before mutating.
     old_status = ticket.status
     old_priority = ticket.priority
     old_assigned_to = ticket.assigned_to
+    old_tags = list(ticket.tags or [])
 
     for field in ("title", "description", "status", "priority", "assigned_to", "due_date", "tags"):
         if field in data:
@@ -199,6 +244,16 @@ def update_ticket(
         else:
             record_activity(db, ticket.id, user.id, "assigned",
                             {"to": new_assignee.id, "name": new_assignee.display_name})
+            create_notification(
+                db, user_id=new_assignee.id, type="assigned", ticket=ticket, actor=user,
+            )
+    if "tags" in data and data["tags"] is not None:
+        new_tags = list(ticket.tags or [])
+        if new_tags != old_tags:
+            added = [t for t in new_tags if t not in old_tags]
+            removed = [t for t in old_tags if t not in new_tags]
+            record_activity(db, ticket.id, user.id, "tags_changed",
+                            {"added": added, "removed": removed})
 
     ticket.updated_at = utcnow()
     db.commit()
@@ -206,7 +261,7 @@ def update_ticket(
 
     # Notify a newly-assigned (non-self) user.
     if new_assignee is not None and old_assigned_to != new_assignee.id:
-        notify_assignment(background, ticket, new_assignee, user)
+        notify_assignment(background, db, ticket, new_assignee, user)
     return ticket
 
 
@@ -235,6 +290,68 @@ def list_activity(
         db.query(Activity)
         .filter(Activity.ticket_id == ticket_id)
         .order_by(Activity.created_at.asc(), Activity.id.asc())
+        .all()
+    )
+
+
+@router.post(
+    "/{ticket_id}/agent-runs",
+    response_model=AgentRunOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_agent_run(
+    ticket_id: int,
+    payload: AgentRunCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Record one resolver phase (its model, token usage, cost, status).
+
+    Posted by the resolver (authenticating as the claude-bot via X-API-Key) as it
+    finishes each phase. We gate on `can_modify_ticket`: during a run the bot is
+    the ticket's assignee, so it passes; a random member who can't touch the
+    ticket can't forge runs against it. (Admins also pass, which is fine for
+    backfills/manual entry.)
+    """
+    ticket = _get_ticket_or_404(ticket_id, db)
+    if not can_modify_ticket(user, ticket):
+        raise HTTPException(status_code=403, detail="Not permitted to modify this ticket")
+
+    run = AgentRun(
+        ticket_id=ticket.id,
+        agent=payload.agent,
+        phase=payload.phase,
+        model=payload.model,
+        input_tokens=payload.input_tokens,
+        output_tokens=payload.output_tokens,
+        cache_read_tokens=payload.cache_read_tokens,
+        cache_write_tokens=payload.cache_write_tokens,
+        cost_usd=payload.cost_usd,
+        status=payload.status,
+        started_at=payload.started_at,
+        # Default the completion time server-side if the caller omits it.
+        finished_at=payload.finished_at or utcnow(),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@router.get("/{ticket_id}/agent-runs", response_model=list[AgentRunOut])
+def list_agent_runs(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ticket = _get_ticket_or_404(ticket_id, db)
+    # 404 (not 403) so non-members can't probe ticket existence — same as get_ticket.
+    if not can_view_ticket(user, ticket):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
+    return (
+        db.query(AgentRun)
+        .filter(AgentRun.ticket_id == ticket_id)
+        .order_by(AgentRun.started_at.asc().nullslast(), AgentRun.id.asc())
         .all()
     )
 

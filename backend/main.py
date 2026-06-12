@@ -12,6 +12,8 @@ from migrations import run_migrations
 from ratelimit import limiter
 from routers import auth as auth_router
 from routers import comments as comments_router
+from routers import notifications as notifications_router
+from routers import preferences as preferences_router
 from routers import tickets as tickets_router
 from routers import users as users_router
 from seed import seed_admin
@@ -55,6 +57,8 @@ app.add_middleware(
 app.include_router(auth_router.router)
 app.include_router(tickets_router.router)
 app.include_router(comments_router.router)
+app.include_router(notifications_router.router)
+app.include_router(preferences_router.router)
 app.include_router(users_router.router)
 
 

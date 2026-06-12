@@ -1,11 +1,13 @@
 """Comment routes nested under a ticket."""
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from activity import record_activity
 from auth import can_view_ticket, get_current_user
 from database import get_db
+from inbox import notify_comment_recipients
 from models import Comment, Ticket, User
+from notifications import notify_comment_email
 from schemas import CommentCreate, CommentOut
 
 router = APIRouter(prefix="/tickets/{ticket_id}/comments", tags=["comments"])
@@ -40,6 +42,7 @@ def list_comments(
 def create_comment(
     ticket_id: int,
     payload: CommentCreate,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -51,6 +54,8 @@ def create_comment(
     db.add(comment)
     db.flush()  # assign comment.id
     record_activity(db, ticket_id, user.id, "commented", {"comment_id": comment.id})
+    notify_comment_recipients(db, ticket, comment, user)
+    notify_comment_email(background, db, ticket, comment, user)
     db.commit()
     db.refresh(comment)
     return comment
