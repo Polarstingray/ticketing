@@ -111,8 +111,6 @@ def build_payload(args: argparse.Namespace) -> dict:
     }
     if args.assign is not None:
         payload["assigned_to"] = args.assign
-    if getattr(args, "origin", None) is not None:
-        payload["tags"].append(f"origin:{args.origin}")
     return payload
 
 
@@ -126,8 +124,6 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--priority", default="medium", choices=PRIORITIES, help="default: medium")
     p.add_argument("--tag", action="append", metavar="TAG", help="repeatable")
     p.add_argument("--assign", type=user_id, metavar="USER_ID", help="assign to this user id")
-    p.add_argument("--origin", type=user_id, metavar="USER_ID",
-                   help="stamp origin:<id> tag so chained resolvers return to the right person")
     p.add_argument(
         "--code-block", action="append", dest="code_block", metavar="PATH:LANG:START-END",
         help="repeatable; reads the lines from disk (code_review only)",

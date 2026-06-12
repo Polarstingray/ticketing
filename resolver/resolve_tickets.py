@@ -55,7 +55,6 @@ TAG_DANGEROUS = "dangerous"
 TAG_FIX = "fix"                             # on a code_review ticket: also apply fixes
 TAG_ESCALATE = "claude"                     # free bot: manual "send this to Claude" tag
 REPO_TAG_PREFIX = "repo:"
-ORIGIN_TAG_PREFIX = "origin:"   # carries the original human through bot-to-bot ticket chains
 
 PLAN_MARKER = "📋 **Proposed plan**"
 IMPL_MARKER = "✅ **Implemented**"
@@ -186,26 +185,6 @@ def repo_name_of(ticket: dict) -> str | None:
         if t.startswith(REPO_TAG_PREFIX):
             return t[len(REPO_TAG_PREFIX):].strip()
     return None
-
-
-def origin_user(ticket: dict) -> int | None:
-    """The human to return results to, stamped by the bot that created this ticket.
-    Present when the ticket was created by another resolver in a bot-to-bot chain."""
-    for t in ticket.get("tags", []):
-        if t.startswith(ORIGIN_TAG_PREFIX):
-            try:
-                return int(t[len(ORIGIN_TAG_PREFIX):])
-            except ValueError:
-                pass
-    return None
-
-
-def handback_user(ticket: dict) -> int | None:
-    """Resolves who should receive the ticket back when the resolver finishes:
-    the origin tag user (if set), else the ticket's direct creator. In real runs
-    a ticket always carries created_by; the prompt-builder unit tests pass
-    skeleton tickets without it, so fall back to None rather than KeyError."""
-    return origin_user(ticket) or ticket.get("created_by")
 
 
 def set_state(client: StingrayClient, ticket: dict, new_claude_tags: list[str],
@@ -396,14 +375,6 @@ def handle_ticket_directives(cfg: Config, client: StingrayClient, ticket: dict,
     for d in pending:
         try:
             payload = directive_payload(d, repo)
-            # Carry the original human forward so any resolver in the chain hands
-            # results back to them, not to the bot that filed this sub-ticket.
-            origin_id = origin_user(ticket) or ticket.get("created_by")
-            if origin_id is not None:
-                payload.setdefault("tags", [])
-                origin_tag = f"{ORIGIN_TAG_PREFIX}{origin_id}"
-                if origin_tag not in payload["tags"]:
-                    payload["tags"].append(origin_tag)
             created = client.create_ticket(**payload)
             lines.append(
                 f"- #{created['id']} — {payload['type']} \"{created.get('title')}\""
@@ -1374,9 +1345,6 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         "supply them), and --code-block reads the exact lines off disk so you never",
         "escape code by hand. Only file one if the ticket asks for it or it's clearly",
         "warranted; otherwise skip it.",
-        "When the sub-ticket will be assigned to another resolver (a bot), also pass",
-        f"  --origin {handback_user(ticket)}",
-        "so that resolver can return results to the original requester, not to this bot.",
         "",
     ]
     if plan:
@@ -1532,7 +1500,7 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     )
     client.add_comment(ticket["id"], body)
     set_state(client, ticket, [TAG_AWAIT_PLAN], status="in_review",
-              assigned_to=handback_user(ticket))
+              assigned_to=ticket["created_by"])
     phase("awaiting-plan-approval", ticket,
           f"#{ticket['id']}: posted plan, handed back to user {ticket['created_by']}")
 
@@ -1711,7 +1679,7 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                 client.add_comment(ticket["id"],
                     f"{IMPL_MARKER} — no code changes were needed; filed {ids}.\n\n{summary}")
                 set_state(client, ticket, [], status="in_review",
-                          assigned_to=handback_user(ticket))
+                          assigned_to=ticket["created_by"])
                 phase("filed-no-code", ticket,
                       f"#{ticket['id']}: filed {ids}, no code changes — handed back")
                 return
@@ -1973,7 +1941,7 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
     if not want_fix:
         # Findings-only: post the review and hand the ticket back to the reporter.
         client.add_comment(ticket["id"], f"{REVIEW_MARKER} (Stingray resolver)\n\n{result}")
-        set_state(client, ticket, [], status="in_review", assigned_to=handback_user(ticket))
+        set_state(client, ticket, [], status="in_review", assigned_to=ticket["created_by"])
         phase("reviewed", ticket, f"#{ticket['id']}: posted review, handed back to "
               f"user {ticket['created_by']}")
         return
@@ -1988,7 +1956,7 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
         do_implement(cfg, client, ticket, repo, plan=result)
         return
     set_state(client, ticket, [TAG_AWAIT_PLAN], status="in_review",
-              assigned_to=handback_user(ticket))
+              assigned_to=ticket["created_by"])
     phase("awaiting-plan-approval", ticket,
           f"#{ticket['id']}: posted review, awaiting /approve to fix")
 
@@ -2039,7 +2007,7 @@ def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summar
                 f"{summary}\n\nChanged files:\n```\n{stat}\n```")
 
     client.add_comment(tid, body)
-    set_state(client, ticket, [TAG_AWAIT_PR], status="in_review", assigned_to=handback_user(ticket))
+    set_state(client, ticket, [TAG_AWAIT_PR], status="in_review", assigned_to=ticket["created_by"])
     phase("awaiting-pr-review", ticket,
           f"#{tid}: implemented, handed back to user {ticket['created_by']}")
 
@@ -2105,9 +2073,9 @@ def fail(client: StingrayClient, ticket: dict, message: str, *,
         audit.get_logger().warning("#%s: fail() could not post comment: %r", ticket["id"], e)
     if reimplementable:
         set_state(client, ticket, [TAG_AWAIT_PLAN], status="in_review",
-                  assigned_to=handback_user(ticket))
+                  assigned_to=ticket["created_by"])
     else:
-        set_state(client, ticket, [], status="open", assigned_to=handback_user(ticket))
+        set_state(client, ticket, [], status="open", assigned_to=ticket["created_by"])
     phase("failed", ticket, f"#{ticket['id']}: FAILED — {message.splitlines()[0]}",
           reimplementable=reimplementable)
 
@@ -2199,10 +2167,10 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
         if dry_run:
             log(f"#{tid}: directive-only ticket — would file and hand back (no plan)")
             return
-        handback = handback_user(ticket)
-        if handback and handback != cfg.bot_user_id:
-            set_state(client, ticket, [], status="in_review", assigned_to=handback)
-        log(f"#{tid}: directive-only ticket — filed, handed back to {handback} (no plan)")
+        author = ticket.get("created_by")
+        if author and author != cfg.bot_user_id:
+            set_state(client, ticket, [], status="in_review", assigned_to=author)
+        log(f"#{tid}: directive-only ticket — filed, handed back to {author} (no plan)")
         return
 
     last = latest_human(comments, cfg.bot_user_id)
@@ -2271,7 +2239,7 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
         client.add_comment(tid, "I need an explicit `/approve` or `/revise <notes>` comment "
                                 "to proceed. Re-assign to me with one of those.")
         set_state(client, ticket, [TAG_AWAIT_PLAN], status="in_review",
-                  assigned_to=handback_user(ticket))
+                  assigned_to=ticket["created_by"])
     # "skip": nothing to do.
 
 
@@ -2283,7 +2251,7 @@ def give_up(client: StingrayClient, ticket: dict, failures: int) -> None:
         f"🛑 Giving up after {failures} failed attempt(s). I've reopened this "
         "ticket and handed it back — a human will need to take a look. Re-assign "
         "it to me to make me try again.")
-    set_state(client, ticket, [], status="open", assigned_to=handback_user(ticket))
+    set_state(client, ticket, [], status="open", assigned_to=ticket["created_by"])
     phase("gave-up", ticket, f"#{ticket['id']}: gave up after {failures} attempts",
           failures=failures)
 
