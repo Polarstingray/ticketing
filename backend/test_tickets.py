@@ -228,7 +228,7 @@ def test_resolver_bot_can_set_reserved_tags(client, make_user, monkeypatch):
     tags — this is what keeps the resolver's set_state working."""
     import control_tags
     bot = make_user()
-    monkeypatch.setattr(control_tags, "RESOLVER_BOT_USER_ID", bot.id)
+    monkeypatch.setattr(control_tags, "RESOLVER_BOT_USER_IDS", frozenset({bot.id}))
     t = _create(client, bot.key, tags=["repo:app", "claude:planning"])
     assert _tags(t) == {"repo:app", "claude:planning"}
     r = client.patch(
