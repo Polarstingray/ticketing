@@ -170,7 +170,7 @@ def test_member_can_edit_free_tags_on_own_ticket(client, make_user):
 
 def test_member_cannot_set_reserved_tags_on_create(client, make_user):
     member = make_user()
-    for bad in ("claude:planning", "repo:secret", "dangerous", "fix"):
+    for bad in ("claude:planning", "repo:secret", "dangerous", "fix", "delegate", "parent:7", "review-by:7"):
         r = client.post(
             "/tickets", json={"type": "task", "title": "x", "tags": [bad]},
             headers={"X-API-Key": member.key},
@@ -181,7 +181,7 @@ def test_member_cannot_set_reserved_tags_on_create(client, make_user):
 def test_member_cannot_set_reserved_tags_on_update(client, make_user):
     member = make_user()
     t = _create(client, member.key, tags=["bug"])
-    for bad in ("claude:implementing", "repo:x", "dangerous", "fix"):
+    for bad in ("claude:implementing", "repo:x", "dangerous", "fix", "delegate", "parent:7", "review-by:7"):
         r = client.patch(
             f"/tickets/{t['id']}", json={"tags": ["bug", bad]},
             headers={"X-API-Key": member.key},

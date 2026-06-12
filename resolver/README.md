@@ -294,13 +294,51 @@ bot and let it triage, set `ESCALATE_TO_USER_ID=<claude-bot id>` in `.env.gemini
 the free bot then reassigns any ticket that is high/critical priority (configurable
 via `ESCALATE_PRIORITIES`), tagged `dangerous`, or tagged `claude`, to the Claude
 bot — which picks it up on its next sweep. The Claude resolver leaves the var unset,
-so it never escalates to itself.
+so it never escalates to itself. **Delegated sub-tasks are exempt:** a ticket with a
+`parent:<id>` tag was already routed to this resolver by a lead, so it's never
+escalated — its `dangerous` tag there only means "skip the plan gate", and clawing it
+back would defeat the lead's capability routing.
 
 **Single-shot reviews (optional, more reliable).** A code review needs no tools — the
 ticket carries the `code_blocks`. Set `REVIEW_API_URL` / `REVIEW_API_KEY` /
 `REVIEW_API_MODEL` (any OpenAI-compatible `/chat/completions` endpoint — Groq,
 Mistral, OpenRouter) and reviews run as a single chat completion instead of the
 opencode agent loop, sidestepping the loop's fragility. Unset = review via the agent.
+
+## Delegation / fan-out (optional)
+
+A **lead** resolver can decompose one ticket into independent sub-tasks and hand each
+to whichever resolver fits — heavy refactors to the Claude bot, cheap mechanical fixes
+to the free bot. You assign the audit once; the resolvers do the rest, and you review
+the resulting PRs.
+
+**Strictly opt-in, gated two ways.** Nothing fans out unless *both*:
+
+1. `RESOLVER_ALLOW_DELEGATION=1` on the lead resolver, with a worker roster:
+   ```bash
+   RESOLVER_ALLOW_DELEGATION=1
+   # id:name:desc  — semicolon-separated. The lead agent routes by these blurbs.
+   RESOLVER_WORKERS=2:claude:heavy refactors & multi-file changes;3:open:cheap mechanical single-file fixes
+   RESOLVER_MAX_DELEGATIONS=10   # hard cap on sub-tasks per run
+   ```
+2. the ticket carries the reserved `delegate` tag (only you/an admin or a resolver bot
+   can set it).
+
+**What happens.** The lead audits the repo read-only, then files one sub-task per issue
+via `file_ticket.py --type task --assign <id> --parent <this-id>`, posts a roll-up on
+the parent listing each child + assignee, and hands the parent back to you. `--parent`
+makes each child self-driving (auto-tags it `dangerous`, so its assignee implements and
+opens a PR with no separate plan-approval step) and links it `parent:<id>`.
+
+**Safe by construction.** Children are **one level only** — a delegated sub-task may
+never carry `delegate`, so it can't fan out again (enforced in `file_ticket.py`). Each
+child works on its own `claude/ticket-<id>` branch and opens a PR; nothing is committed
+to your default branch or merged automatically. Each finished child PR is reassigned to
+**you** (the parent's creator), not the lead bot, so you get the "assigned to you" mail —
+the review owner is baked into each child as a `review-by:<id>` tag at creation, because
+the worker that finishes the child can't read the parent (ticket read access is narrow).
+The per-run cap bounds cost. Delegation needs a Bash-capable runner (the Claude bot);
+the opencode `plan` agent has no shell, so an opencode lead can't file sub-tasks.
 
 ## Plan-critique gate (optional)
 

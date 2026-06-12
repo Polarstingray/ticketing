@@ -95,6 +95,34 @@ def _parse_repo_map(raw: str) -> dict[str, str]:
     return mapping
 
 
+def _parse_workers(raw: str) -> list[dict]:
+    """Parse the delegation roster RESOLVER_WORKERS into an ordered list of
+    `{id, name, desc}`. Entries are semicolon-separated; each is `id:name:desc`
+    where desc (a short capability blurb) may contain spaces. A lead resolver
+    renders this so its agent can pick which resolver to hand each sub-task to.
+
+      RESOLVER_WORKERS=2:claude:heavy refactors & multi-file changes;\
+                       3:open:cheap mechanical single-file fixes
+    """
+    workers: list[dict] = []
+    for chunk in (raw or "").split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = chunk.split(":", 2)
+        if len(parts) < 2:
+            continue  # need at least id:name
+        id_s, name = parts[0].strip(), parts[1].strip()
+        desc = parts[2].strip() if len(parts) == 3 else ""
+        try:
+            uid = int(id_s)
+        except ValueError:
+            continue  # skip malformed ids rather than crash a sweep
+        if name:
+            workers.append({"id": uid, "name": name, "desc": desc})
+    return workers
+
+
 @dataclass
 class Config:
     stingray_url: str
@@ -191,6 +219,19 @@ class Config:
     # sweep skips the ticket until this many minutes have elapsed, then auto-retries
     # the same phase. A user can force an early retry by re-assigning the ticket.
     quota_backoff_minutes: int
+    # --- resolver-to-resolver delegation (fan-out) -----------------------------
+    # When True, a ticket tagged `delegate` lets the lead resolver decompose it into
+    # sub-tasks and hand each to another resolver (no per-task human approval; the
+    # human reviews the resulting PRs). Default off — delegation is strictly opt-in.
+    allow_delegation: bool
+    # Roster of resolvers a lead may delegate to: a list of {id, name, desc}. The
+    # lead's orchestration prompt renders this so the agent routes each sub-task to
+    # the right resolver (e.g. heavy→claude bot, cheap mechanical→open bot). Parsed
+    # from RESOLVER_WORKERS. Empty ⇒ delegation has no targets and stays disabled.
+    workers: list[dict]
+    # Hard cap on sub-tasks one delegation run may file (enforced in file_ticket.py),
+    # so a single orchestration can't spawn unbounded tickets / agent cost.
+    max_delegations: int
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
@@ -329,6 +370,12 @@ class Config:
             # How long to wait after a quota/rate-limit failure before auto-retrying
             # the parked ticket from the same phase (see quota_backoff). Default 60m.
             quota_backoff_minutes=int(os.environ.get("QUOTA_BACKOFF_MINUTES", "60")),
+            # Resolver-to-resolver delegation (fan-out). Opt-in: off unless explicitly
+            # enabled AND a worker roster is configured (see _parse_workers).
+            allow_delegation=os.environ.get("RESOLVER_ALLOW_DELEGATION", "0").strip()
+            in ("1", "true", "yes"),
+            workers=_parse_workers(os.environ.get("RESOLVER_WORKERS", "")),
+            max_delegations=int(os.environ.get("RESOLVER_MAX_DELEGATIONS", "10")),
         )
         cfg.logs_dir.mkdir(exist_ok=True)
         if not cfg.projects_root.is_dir():
