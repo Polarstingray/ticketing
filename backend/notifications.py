@@ -99,6 +99,30 @@ def notify_assignment(background, db: Session, ticket: Ticket, assignee: User, a
     background.add_task(send_email, [assignee.email], subject, body)
 
 
+def notify_comment_email(
+    background, db: Session, ticket: Ticket, comment, actor: User
+) -> None:
+    """Email the assignee and ticket creator that a new comment was posted."""
+    actor_id = actor.id if actor else None
+    recipient_ids = {ticket.assigned_to, ticket.created_by} - {None, actor_id}
+    if not recipient_ids:
+        return
+    users = db.query(User).filter(User.id.in_(recipient_ids)).all()
+    for user in users:
+        if not should_notify(db, user.id, "commented", channel="email"):
+            continue
+        actor_name = actor.display_name if actor else "Someone"
+        subject = f"New comment on ticket #{ticket.id}: {ticket.title}"
+        body = (
+            f"Hi {user.display_name},\n\n"
+            f"{actor_name} commented on ticket #{ticket.id} ({ticket.type}):\n\n"
+            f"  {ticket.title}\n\n"
+            f"{comment.body}"
+            f"{_ticket_link(ticket)}\n"
+        )
+        background.add_task(send_email, [user.email], subject, body)
+
+
 def notify_new_ticket_admins(background, db: Session, ticket: Ticket, actor: User) -> None:
     """Email all admins (except the actor) that a new ticket was filed."""
     admins: Iterable[User] = (
