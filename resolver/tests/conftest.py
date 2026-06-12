@@ -19,10 +19,12 @@ BOT = 2
 class FakeClient:
     """Records the writes the resolver makes so tests can assert on them."""
 
-    def __init__(self, comments=None):
+    def __init__(self, comments=None, tickets=None):
         self._comments = comments or []
         self.comments_added: list[tuple[int, str]] = []
         self.updates: list[dict] = []
+        # id -> ticket dict, for get_ticket/iter_tickets (delegation paths).
+        self._tickets: dict[int, dict] = {t["id"]: t for t in (tickets or [])}
 
     def list_comments(self, ticket_id):
         return self._comments
@@ -34,6 +36,15 @@ class FakeClient:
     def update_ticket(self, ticket_id, **fields):
         self.updates.append(fields)
         return {"id": ticket_id, **fields}
+
+    def get_ticket(self, ticket_id):
+        return self._tickets[ticket_id]
+
+    def iter_tickets(self, **filters):
+        tag = filters.get("tag")
+        for t in self._tickets.values():
+            if tag is None or tag in (t.get("tags") or []):
+                yield t
 
 
 @pytest.fixture
@@ -80,6 +91,10 @@ def fake_cfg(tmp_path):
         verify_max_retries=1,
         # quota backoff window (minutes) before a parked ticket auto-retries
         quota_backoff_minutes=60,
+        # resolver-to-resolver delegation (off by default; tests opt in)
+        allow_delegation=False,
+        workers=[],
+        max_delegations=10,
     )
 
 
