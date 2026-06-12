@@ -19,6 +19,11 @@ services:
       DATABASE_PATH: /data/stingray.db
       # Allowed browser origins for CORS (dev convenience; same-origin in prod).
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      # The resolver bot's user id. The backend only lets admins and this user set
+      # the reserved control tags (claude:*, repo:*, dangerous, fix) the resolver
+      # uses as workflow signals. MUST match the resolver's RESOLVER_BOT_USER_ID, or
+      # every bot set_state PATCH is rejected 422 and tickets bounce back unworked.
+      RESOLVER_BOT_USER_ID: ${RESOLVER_BOT_USER_ID:-0}
       # Email notifications (optional). Leave SMTP_HOST empty to disable.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       SMTP_HOST: ${SMTP_HOST:-}

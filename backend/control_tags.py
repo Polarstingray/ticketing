@@ -27,10 +27,15 @@ RESERVED_PREFIXES = ("claude:", "repo:")
 # Reserved *exact* tags.
 RESERVED_EXACT = frozenset({"dangerous", "fix"})
 
-# The resolver bot's user id. Set this in the environment (memory: the seeded
-# claude-bot is typically user id 2) so the bot keeps the ability to transition
-# control tags; 0 means "unset", and then only admins can manage reserved tags.
-RESOLVER_BOT_USER_ID = int(os.environ.get("RESOLVER_BOT_USER_ID", "0"))
+# Trusted resolver bot user ids. Accepts a comma-separated list so multiple
+# resolver identities (claude-bot, gemini-bot, open-bot, …) can all manage
+# reserved control tags without being promoted to admin.
+# e.g. RESOLVER_BOT_USER_ID=2,3,4  or the legacy single-id form: RESOLVER_BOT_USER_ID=2
+_raw_bot_ids = os.environ.get("RESOLVER_BOT_USER_ID", "0")
+RESOLVER_BOT_USER_IDS: frozenset[int] = frozenset(
+    int(x.strip()) for x in _raw_bot_ids.split(",")
+    if x.strip() and x.strip() != "0"
+)
 
 
 def is_reserved_tag(tag: str) -> bool:
@@ -46,9 +51,9 @@ def reserved_subset(tags) -> set[str]:
 def can_manage_reserved_tags(user: User) -> bool:
     """Whether ``user`` may add/remove/alter reserved control tags.
 
-    Admins always may; the resolver bot may (matched by id) so its state
-    machine keeps working without widening its role to admin.
+    Admins always may; resolver bots may (matched by id) so their state
+    machines keep working without widening their role to admin.
     """
     if user.role == UserRole.admin.value:
         return True
-    return RESOLVER_BOT_USER_ID != 0 and user.id == RESOLVER_BOT_USER_ID
+    return user.id in RESOLVER_BOT_USER_IDS
