@@ -32,7 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import agents
@@ -50,6 +50,7 @@ TAG_AWAIT_PLAN = "resolver:awaiting-plan-approval"
 TAG_IMPLEMENTING = "resolver:implementing"    # implement run in flight
 TAG_REVIEWING = "resolver:reviewing"          # code-review run in flight
 TAG_AWAIT_PR = "resolver:awaiting-pr-review"
+TAG_QUOTA_BACKOFF = "resolver:quota-backoff"   # ticket is waiting for API quota to reset
 TAG_DANGEROUS = "dangerous"
 TAG_FIX = "fix"                             # on a code_review ticket: also apply fixes
 TAG_ESCALATE = "claude"                     # free bot: manual "send this to Claude" tag
@@ -62,6 +63,7 @@ FILED_MARKER = "🎫 Filed from `/ticket`"
 REVIEW_MARKER = "🔎 **Code review**"
 ESCALATE_MARKER = "⤴️ **Routed to Claude**"
 VERIFY_FAIL_MARKER = "⚠️ **Tests failing**"
+QUOTA_BACKOFF_MARKER = "⏳ Quota backoff"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Per-event audit truncation, set from config at sweep start (see main()).
@@ -792,6 +794,20 @@ def _opencode_quota_error(since: float) -> str | None:
     return None
 
 
+# A failure message that names an API quota / rate-limit exhaustion (rather than a
+# real code error). These are transient — the window resets on its own — so the
+# resolver parks the ticket in a timed backoff instead of handing it back to the
+# user. Covers the opencode Gemini 429 message (_opencode_quota_error) and the
+# single_shot_review 429 message (_chat_completion).
+_QUOTA_FAIL_RE = re.compile(
+    r"quota exceeded|RESOURCE_EXHAUSTED|rate.?limit|chat-completion quota exceeded",
+    re.I)
+
+
+def _is_quota_failure(msg: str) -> bool:
+    return bool(_QUOTA_FAIL_RE.search(msg or ""))
+
+
 def _run_opencode_once(cfg: Config, prompt: str, cwd: Path, mode: str,
                        log_path: Path, model: str) -> tuple[bool, str, bool, list[str]]:
     """One headless opencode run (`opencode run ... --format json`), auditing each
@@ -1435,7 +1451,10 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     ok, result = run_agent_tracked(cfg, client, ticket,
                                    plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
     if not ok:
-        fail(client, ticket, f"Planning failed.\n\n```\n{tail(result)}\n```")
+        if _is_quota_failure(result):
+            quota_backoff(cfg, client, ticket, TAG_PLANNING, result)
+        else:
+            fail(client, ticket, f"Planning failed.\n\n```\n{tail(result)}\n```")
         return
     # Plan-critique gate: a cheap model vets the plan before the human (and the
     # expensive implement run) sees it. A REVISE verdict re-invokes the planner with
@@ -1463,7 +1482,10 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                 ok, result = run_agent_tracked(cfg, client, ticket,
                     plan_prompt(ticket, repo, notes), repo, "plan", r_log)
                 if not ok:
-                    fail(client, ticket, f"Re-planning after critique failed.\n\n```\n{tail(result)}\n```")
+                    if _is_quota_failure(result):
+                        quota_backoff(cfg, client, ticket, TAG_PLANNING, result)
+                    else:
+                        fail(client, ticket, f"Re-planning after critique failed.\n\n```\n{tail(result)}\n```")
                     return
             else:
                 critique_summary = f"🧭 _Plan critique still flags concerns:_\n\n{notes}"
@@ -1579,10 +1601,13 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                  reimplementable=True)
             return
         if not ok:
-            # An approved plan exists — hand back re-implementable so a timeout
-            # doesn't throw the plan away and re-plan from scratch on retry.
-            fail(client, ticket, f"Implementation failed.\n\n```\n{tail(summary)}\n```",
-                 reimplementable=True)
+            if _is_quota_failure(summary):
+                quota_backoff(cfg, client, ticket, TAG_IMPLEMENTING, summary)
+            else:
+                # An approved plan exists — hand back re-implementable so a timeout
+                # doesn't throw the plan away and re-plan from scratch on retry.
+                fail(client, ticket, f"Implementation failed.\n\n```\n{tail(summary)}\n```",
+                     reimplementable=True)
             return
 
         # Verification gate: independently confirm the agent's changes pass before
@@ -1907,7 +1932,10 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
             level=logging.WARNING, phase="review",
         )
     if not ok:
-        fail(client, ticket, f"Review failed.\n\n```\n{tail(result)}\n```")
+        if _is_quota_failure(result):
+            quota_backoff(cfg, client, ticket, TAG_REVIEWING, result)
+        else:
+            fail(client, ticket, f"Review failed.\n\n```\n{tail(result)}\n```")
         return
 
     if not want_fix:
@@ -1984,6 +2012,47 @@ def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summar
           f"#{tid}: implemented, handed back to user {ticket['created_by']}")
 
 
+def _quota_backoff_elapsed(comments: list[dict], cfg: Config) -> bool:
+    """Return True if the most recent quota-backoff comment is older than
+    cfg.quota_backoff_minutes, or if no such comment exists (meaning the backoff
+    tag is stale — e.g. leftover from a config change) so the ticket isn't parked
+    forever."""
+    backoffs = [c for c in comments if QUOTA_BACKOFF_MARKER in (c.get("body") or "")]
+    if not backoffs:
+        return True
+    latest = max(backoffs, key=lambda c: c.get("created_at") or "")
+    ts_str = latest.get("created_at") or ""
+    try:
+        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) - ts >= timedelta(minutes=cfg.quota_backoff_minutes)
+    except (ValueError, TypeError):
+        return True   # unparseable timestamp: don't block forever
+
+
+def quota_backoff(cfg: Config, client: StingrayClient, ticket: dict,
+                  phase_tag: str, message: str) -> None:
+    """On a quota/rate-limit failure, park the ticket in a timed backoff instead of
+    handing it back to the user. The phase_tag is preserved so the bot knows which
+    phase to resume when the backoff window expires; the ticket stays assigned to the
+    bot and its status is unchanged (set_state only touches resolver:* tags here)."""
+    eta_min = cfg.quota_backoff_minutes
+    try:
+        client.add_comment(
+            ticket["id"],
+            f"{QUOTA_BACKOFF_MARKER} — hit API quota/rate limit. "
+            f"Will retry automatically in ~{eta_min} minute(s).\n\n"
+            f"```\n{tail(message)}\n```\n\n"
+            "_To retry sooner: re-assign this ticket to me._"
+        )
+    except Exception as e:
+        audit.get_logger().warning(
+            "#%s: quota_backoff() could not post comment: %r", ticket["id"], e)
+    # Keep phase_tag so the next sweep knows where to resume.
+    set_state(client, ticket, [phase_tag, TAG_QUOTA_BACKOFF])
+    phase("quota-backoff", ticket,
+          f"#{ticket['id']}: quota backoff ({eta_min}m) — preserving {phase_tag}")
+
+
 def fail(client: StingrayClient, ticket: dict, message: str, *,
          reimplementable: bool = False) -> None:
     """Report a failure and notify the reporter.
@@ -2053,6 +2122,20 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
 
     # Fetch comments once and derive everything from the single list (B7).
     comments = client.list_comments(tid)
+
+    # Quota backoff: skip tickets that are waiting for an API quota window to reset.
+    # Once the window expires, strip the tag and fall through to normal dispatch —
+    # the preserved phase tag (planning/implementing/reviewing) tells the dispatcher
+    # which phase to retry, same as a crash-recovery re-run.
+    if TAG_QUOTA_BACKOFF in tags:
+        if not _quota_backoff_elapsed(comments, cfg):
+            log(f"#{tid}: quota backoff active — skipping until ~{cfg.quota_backoff_minutes}m window resets")
+            return
+        # Window elapsed: strip the backoff tag, keep the phase tag, retry.
+        tags = tags - {TAG_QUOTA_BACKOFF}
+        if not dry_run:
+            set_state(client, ticket, list(tags))
+        log(f"#{tid}: quota backoff elapsed — retrying (phase tags: {tags})")
 
     # Difficulty routing: a free bot hands hard/important tickets to the Claude bot
     # rather than working them itself. Only for fresh tickets (no in-flight resolver:*
