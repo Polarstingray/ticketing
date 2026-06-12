@@ -1095,7 +1095,7 @@ def test_process_does_not_escalate_midflight(fake_cfg, monkeypatch):
     called = {}
     monkeypatch.setattr(rt, "do_plan", lambda *a, **k: called.update(plan=True))
     ticket = {"id": 82, "type": "task", "title": "x", "priority": "high",
-              "tags": ["repo:x", "claude:planning"], "status": "open", "created_by": 9}
+              "tags": ["repo:x", "resolver:planning"], "status": "open", "created_by": 9}
     rt.process(fake_cfg, FakeClient(), ticket, dry_run=False)
     assert "plan" in called   # handled the in-flight retry, not escalated
 
@@ -1123,7 +1123,7 @@ def test_process_skips_already_reviewed_unless_review_cmd(fake_cfg, monkeypatch)
 def test_process_reviewing_tag_retries_review(fake_cfg, monkeypatch):
     called = {}
     monkeypatch.setattr(rt, "do_review", lambda *a, **k: called.update(review=True))
-    rt.process(fake_cfg, FakeClient(), _review_ticket(tags=["repo:x", "claude:reviewing"]), dry_run=False)
+    rt.process(fake_cfg, FakeClient(), _review_ticket(tags=["repo:x", "resolver:reviewing"]), dry_run=False)
     assert called.get("review")
 
 
@@ -2057,3 +2057,126 @@ def test_emit_token_usage_noop_without_collector():
         "input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0,
         "cache_write_tokens": 0, "cost_usd": 0.0, "model": "",
     })
+
+
+# --- #60: quota backoff then auto-retry ---------------------------------
+def test_is_quota_failure_matches_provider_messages():
+    # opencode Gemini 429 message (from _opencode_quota_error)
+    assert rt._is_quota_failure(
+        "Gemini API quota exceeded (HTTP 429, free-tier limit) — the model ...")
+    # single_shot_review 429 message (from _chat_completion)
+    assert rt._is_quota_failure(
+        "chat-completion quota exceeded (HTTP 429) — the model is rate/quota limited")
+    assert rt._is_quota_failure("RESOURCE_EXHAUSTED")
+    assert rt._is_quota_failure("hit the rate limit, try again")
+    assert rt._is_quota_failure("rate-limited by the provider")
+
+
+def test_is_quota_failure_ignores_real_errors():
+    assert not rt._is_quota_failure("Planning failed: syntax error in foo.py")
+    assert not rt._is_quota_failure("claude timed out after 600s.")
+    assert not rt._is_quota_failure("")
+    assert not rt._is_quota_failure(None)
+
+
+def _backoff_comment(minutes_ago: int) -> dict:
+    ts = rt.datetime.now(rt.timezone.utc) - rt.timedelta(minutes=minutes_ago)
+    return {"author": BOT, "body": f"{rt.QUOTA_BACKOFF_MARKER} — hit API quota.",
+            "created_at": ts.isoformat()}
+
+
+def test_quota_backoff_elapsed_recent_blocks(fake_cfg):
+    fake_cfg.quota_backoff_minutes = 60
+    assert rt._quota_backoff_elapsed([_backoff_comment(5)], fake_cfg) is False
+
+
+def test_quota_backoff_elapsed_old_retries(fake_cfg):
+    fake_cfg.quota_backoff_minutes = 60
+    assert rt._quota_backoff_elapsed([_backoff_comment(120)], fake_cfg) is True
+
+
+def test_quota_backoff_elapsed_no_comment_retries(fake_cfg):
+    # No backoff comment at all => stale tag, don't park forever.
+    assert rt._quota_backoff_elapsed([], fake_cfg) is True
+
+
+def test_quota_backoff_elapsed_unparseable_ts_retries(fake_cfg):
+    bad = {"author": BOT, "body": f"{rt.QUOTA_BACKOFF_MARKER} x", "created_at": "not-a-date"}
+    assert rt._quota_backoff_elapsed([bad], fake_cfg) is True
+
+
+def test_quota_backoff_keeps_ticket_assigned_and_tagged(fake_cfg):
+    client = FakeClient()
+    ticket = {"id": 12, "tags": ["repo:x"], "status": "open", "created_by": 9}
+    rt.quota_backoff(fake_cfg, client, ticket, rt.TAG_PLANNING, "quota exceeded")
+
+    # A backoff comment was posted (not a FAIL_MARKER).
+    assert any(rt.QUOTA_BACKOFF_MARKER in body for _, body in client.comments_added)
+    assert not any(rt.FAIL_MARKER in body for _, body in client.comments_added)
+    # State preserves the phase tag + adds the backoff tag, and does NOT reassign
+    # away from the bot (no assigned_to / status in the update).
+    upd = client.updates[-1]
+    assert set(upd["tags"]) == {"repo:x", rt.TAG_PLANNING, rt.TAG_QUOTA_BACKOFF}
+    assert "assigned_to" not in upd
+    assert "status" not in upd
+
+
+def test_process_skips_active_quota_backoff(fake_cfg, monkeypatch):
+    # Should never dispatch a phase while the backoff window is active.
+    called = []
+    monkeypatch.setattr(rt, "do_plan", lambda *a, **k: called.append("plan"))
+    client = FakeClient([_backoff_comment(5)])
+    ticket = {"id": 13, "tags": ["repo:x", rt.TAG_PLANNING, rt.TAG_QUOTA_BACKOFF],
+              "status": "open", "created_by": 9}
+
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+
+    assert called == []
+    assert client.updates == []  # parked, untouched
+
+
+def test_process_retries_after_quota_backoff_window(fake_cfg, monkeypatch):
+    # Window elapsed: strip the backoff tag and resume the preserved phase.
+    fake_cfg.quota_backoff_minutes = 60
+    seen = []
+    monkeypatch.setattr(rt, "do_plan", lambda cfg, client, ticket, repo, notes: seen.append("replan"))
+    client = FakeClient([_backoff_comment(120)])
+    ticket = {"id": 14, "tags": ["repo:x", rt.TAG_PLANNING, rt.TAG_QUOTA_BACKOFF],
+              "status": "open", "created_by": 9}
+
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+
+    # The backoff tag was stripped (keeping the phase tag) and the phase re-ran.
+    assert seen == ["replan"]
+    stripped = client.updates[0]
+    assert rt.TAG_QUOTA_BACKOFF not in stripped["tags"]
+    assert rt.TAG_PLANNING in stripped["tags"]
+
+
+def test_do_plan_quota_failure_parks_instead_of_failing(fake_cfg, monkeypatch, tmp_path):
+    monkeypatch.setattr(rt, "run_agent_tracked",
+                        lambda *a, **k: (False, "Gemini API quota exceeded (HTTP 429)"))
+    monkeypatch.setattr(rt, "_critique_enabled", lambda cfg: False)
+    client = FakeClient()
+    ticket = {"id": 15, "tags": ["repo:x"], "status": "open", "created_by": 9,
+              "title": "t", "description": "d"}
+
+    rt.do_plan(fake_cfg, client, ticket, tmp_path / "repo", None)
+
+    assert any(rt.QUOTA_BACKOFF_MARKER in body for _, body in client.comments_added)
+    assert not any(rt.FAIL_MARKER in body for _, body in client.comments_added)
+    assert rt.TAG_QUOTA_BACKOFF in client.updates[-1]["tags"]
+
+
+def test_do_plan_real_failure_still_fails(fake_cfg, monkeypatch, tmp_path):
+    monkeypatch.setattr(rt, "run_agent_tracked",
+                        lambda *a, **k: (False, "boom: a real error"))
+    monkeypatch.setattr(rt, "_critique_enabled", lambda cfg: False)
+    client = FakeClient()
+    ticket = {"id": 16, "tags": ["repo:x"], "status": "open", "created_by": 9,
+              "title": "t", "description": "d"}
+
+    rt.do_plan(fake_cfg, client, ticket, tmp_path / "repo", None)
+
+    assert any(rt.FAIL_MARKER in body for _, body in client.comments_added)
+    assert not any(rt.QUOTA_BACKOFF_MARKER in body for _, body in client.comments_added)
