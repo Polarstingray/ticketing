@@ -185,6 +185,12 @@ class Config:
     verify_command: str
     verify_timeout: int
     verify_max_retries: int
+    # Quota backoff: when an agent run fails on an API quota/rate limit (rather than
+    # a real error), the resolver parks the ticket — keeping it assigned to the bot
+    # and preserving its phase tag — instead of handing it back to the user. The
+    # sweep skips the ticket until this many minutes have elapsed, then auto-retries
+    # the same phase. A user can force an early retry by re-assigning the ticket.
+    quota_backoff_minutes: int
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
@@ -320,6 +326,9 @@ class Config:
             verify_command=_env("VERIFY_COMMAND", default=""),
             verify_timeout=int(os.environ.get("VERIFY_TIMEOUT", "900")),
             verify_max_retries=int(os.environ.get("VERIFY_MAX_RETRIES", "1")),
+            # How long to wait after a quota/rate-limit failure before auto-retrying
+            # the parked ticket from the same phase (see quota_backoff). Default 60m.
+            quota_backoff_minutes=int(os.environ.get("QUOTA_BACKOFF_MINUTES", "60")),
         )
         cfg.logs_dir.mkdir(exist_ok=True)
         if not cfg.projects_root.is_dir():

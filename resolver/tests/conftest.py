@@ -78,6 +78,8 @@ def fake_cfg(tmp_path):
         verify_command="",
         verify_timeout=900,
         verify_max_retries=1,
+        # quota backoff window (minutes) before a parked ticket auto-retries
+        quota_backoff_minutes=60,
     )
 
 

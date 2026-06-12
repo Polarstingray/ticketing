@@ -20,8 +20,8 @@ RESOLVER_DIR = Path(__file__).resolve().parents[2]
 # doesn't import the resolver's module-level state).
 IMPL_MARKER = "✅ **Implemented**"
 FAIL_MARKER = "⚠️ Resolver could not complete"
-TAG_AWAIT_PLAN = "claude:awaiting-plan-approval"
-TAG_AWAIT_PR = "claude:awaiting-pr-review"
+TAG_AWAIT_PLAN = "resolver:awaiting-plan-approval"
+TAG_AWAIT_PR = "resolver:awaiting-pr-review"
 
 
 @dataclass

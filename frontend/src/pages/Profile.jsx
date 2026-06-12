@@ -16,7 +16,8 @@ export default function Profile() {
 
   async function loadKeys() {
     try {
-      setKeys(await api.listApiKeys(user.id));
+      const data = await api.listApiKeys(user.id);
+      setKeys(data.filter((k) => !k.revoked));
     } catch (e) {
       setError(e.message);
     }
@@ -75,7 +76,6 @@ export default function Profile() {
   }
 
   function keyStatus(k) {
-    if (k.revoked) return { label: "Revoked", cls: styles.stRevoked };
     if (k.expires_at && new Date(k.expires_at) <= new Date())
       return { label: "Expired", cls: styles.stExpired };
     return { label: "Active", cls: styles.stActive };
@@ -87,6 +87,8 @@ export default function Profile() {
 
       <div className="card" style={{ marginBottom: 18 }}>
         <dl className={styles.info}>
+          <dt>User ID</dt>
+          <dd>{user.id}</dd>
           <dt>Display name</dt>
           <dd>{user.display_name}</dd>
           <dt>Username</dt>
