@@ -51,6 +51,7 @@ TAG_IMPLEMENTING = "resolver:implementing"    # implement run in flight
 TAG_REVIEWING = "resolver:reviewing"          # code-review run in flight
 TAG_AWAIT_PR = "resolver:awaiting-pr-review"
 TAG_QUOTA_BACKOFF = "resolver:quota-backoff"   # ticket is waiting for API quota to reset
+TAG_IMPL_READY = "resolver:impl-ready"         # escalated with approved plan; skip to implement
 TAG_DANGEROUS = "dangerous"
 TAG_FIX = "fix"                             # on a code_review ticket: also apply fixes
 TAG_ESCALATE = "claude"                     # free bot: manual "send this to Claude" tag
@@ -229,9 +230,9 @@ def render_code_blocks(ticket: dict) -> str:
 
 
 def find_approved_plan(comments: list[dict], bot_id: int) -> str | None:
-    """The most recent bot comment that carries the plan marker."""
+    """The most recent comment carrying the plan marker, from any resolver bot."""
     for c in reversed(comments):
-        if c.get("author") == bot_id and PLAN_MARKER in (c.get("body") or ""):
+        if PLAN_MARKER in (c.get("body") or ""):
             return c["body"]
     return None
 
@@ -1299,10 +1300,13 @@ def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
         render_code_blocks(ticket),
         "",
         "Produce a clear, step-by-step implementation PLAN to resolve this ticket.",
-        "You have read-only access — explore the repo, then OUTPUT THE COMPLETE",
-        "PLAN AS YOUR FINAL MESSAGE (do not attempt to edit files or use any",
-        "plan-approval tool). Identify the files to change, the approach, and how",
-        "to verify. Be concise but complete.",
+        "You have read-only access — only Read, Glob, and Grep are available.",
+        "Bash, curl, and all network/write tools are NOT available in this phase;",
+        "do not attempt them. If the ticket involves filing sub-tickets or making API",
+        "calls, describe them in the plan — the implement phase will execute them.",
+        "OUTPUT THE COMPLETE PLAN AS YOUR FINAL MESSAGE (do not attempt to edit",
+        "files or use any plan-approval tool). Identify the files to change, the",
+        "approach, and how to verify. Be concise but complete.",
         "Refer to files by their repo-relative path (e.g. `resolver/foo.py`), NOT by",
         "absolute path — the implementation runs in a separate checkout, so absolute",
         "paths from this exploration would point at the wrong tree.",
@@ -1589,8 +1593,9 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     difficulty = parse_difficulty(plan)
     if difficulty == "hard" and cfg.escalate_to_user_id and not reviewer_notes:
         client.add_comment(ticket["id"],
-            f"{ESCALATE_MARKER} — plan assessed hard; reassigning to the Claude resolver.")
-        set_state(client, ticket, [], status="open", assigned_to=cfg.escalate_to_user_id)
+            f"{ESCALATE_MARKER} — plan assessed hard; the approved plan is preserved "
+            "and handed off to the escalated resolver for implementation.")
+        set_state(client, ticket, [TAG_IMPL_READY], status="open", assigned_to=cfg.escalate_to_user_id)
         phase("escalated", ticket,
               f"#{ticket['id']}: escalated to user {cfg.escalate_to_user_id} (plan assessed hard)")
         return
@@ -2242,6 +2247,9 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
             action, kw = "skip", {}
         else:
             action, kw = "review", {"want_fix": want_fix}
+    elif TAG_IMPL_READY in tags:
+        plan = find_approved_plan(comments, cfg.bot_user_id)
+        action, kw = "implement", {"plan": plan}
     else:
         action, kw = "plan", {"revise_notes": None}
 
