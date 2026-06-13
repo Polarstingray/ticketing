@@ -9,14 +9,18 @@ def _create_ticket(client, key, **overrides):
     return r.json()
 
 
+def _create_comment(client, ticket_id, key, **overrides):
+    body = {"body": "new comment"}
+    body.update(overrides)
+    r = client.post(f"/tickets/{ticket_id}/comments", json=body, headers={"X-API-Key": key})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
 def test_create_and_list_comment(client, admin_key):
     t = _create_ticket(client, admin_key)
-    r = client.post(
-        f"/tickets/{t['id']}/comments", json={"body": "first comment"},
-        headers={"X-API-Key": admin_key},
-    )
-    assert r.status_code == 201, r.text
-    assert r.json()["body"] == "first comment"
+    c = _create_comment(client, t["id"], admin_key, body="first comment")
+    assert c["body"] == "first comment"
 
     listed = client.get(f"/tickets/{t['id']}/comments", headers={"X-API-Key": admin_key})
     assert listed.status_code == 200

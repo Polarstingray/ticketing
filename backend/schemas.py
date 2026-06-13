@@ -179,6 +179,10 @@ class CommentCreate(BaseModel):
     body: str = Field(min_length=1)
 
 
+class CommentUpdate(BaseModel):
+    body: str = Field(min_length=1)
+
+
 class CommentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
