@@ -25,7 +25,10 @@ export default function TicketList() {
     assigned_to: "",
     priority: "",
     archived: "",
+    q: "",
   });
+  // Search box is debounced into filters.q so each keystroke doesn't refetch.
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -38,6 +41,14 @@ export default function TicketList() {
       .then(setUsers)
       .catch(() => setUsers([]));
   }, []);
+
+  // Debounce the search box (~300ms) into the q filter, which triggers a refetch.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setFilters((f) => (f.q === search ? f : { ...f, q: search }));
+    }, 300);
+    return () => clearTimeout(id);
+  }, [search]);
 
   // (Re)load the first page whenever filters change.
   useEffect(() => {
@@ -85,6 +96,12 @@ export default function TicketList() {
       </div>
 
       <div className={styles.filters}>
+        <input
+          type="search"
+          placeholder="Search title or description…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
         <select value={filters.type} onChange={(e) => setFilter("type", e.target.value)}>
           <option value="">All types</option>
           {TYPES.map((t) => (
@@ -132,15 +149,17 @@ export default function TicketList() {
           Show archived
         </label>
         <button
-          onClick={() =>
+          onClick={() => {
+            setSearch("");
             setFilters({
               status: "",
               type: "",
               assigned_to: "",
               priority: "",
               archived: "",
-            })
-          }
+              q: "",
+            });
+          }}
         >
           Clear
         </button>

@@ -104,6 +104,35 @@ def test_pagination_limit_bounds_enforced(client, admin_key):
     assert client.get("/tickets?limit=999", headers={"X-API-Key": admin_key}).status_code == 422
 
 
+# --- Full-text search (q) ----------------------------------------------------
+
+def test_search_matches_title_and_description_case_insensitive(client, admin_key):
+    title_hit = _create(client, admin_key, title="Payment gateway timeout", priority="high")
+    desc_hit = _create(
+        client, admin_key, title="Unrelated", description="intermittent GATEWAY error", priority="low"
+    )
+    miss = _create(client, admin_key, title="Totally different", description="nothing here")
+
+    # Lowercase query matches both the title and the (uppercase) description term.
+    r = client.get("/tickets?q=gateway", headers={"X-API-Key": admin_key})
+    assert r.status_code == 200
+    ids = [x["id"] for x in r.json()["items"]]
+    assert title_hit["id"] in ids
+    assert desc_hit["id"] in ids
+    assert miss["id"] not in ids
+
+    # q composes (ANDs) with another filter: same term, narrowed to priority=high.
+    r = client.get("/tickets?q=gateway&priority=high", headers={"X-API-Key": admin_key})
+    ids = [x["id"] for x in r.json()["items"]]
+    assert title_hit["id"] in ids
+    assert desc_hit["id"] not in ids
+
+    # Whitespace-only q is ignored (acts as no search filter).
+    r = client.get("/tickets?q=%20%20", headers={"X-API-Key": admin_key})
+    ids = [x["id"] for x in r.json()["items"]]
+    assert miss["id"] in ids
+
+
 # --- IDOR / visibility -------------------------------------------------------
 
 def test_member_cannot_view_others_ticket(client, admin_key, make_user):
