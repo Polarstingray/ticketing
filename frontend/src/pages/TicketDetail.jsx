@@ -30,6 +30,8 @@ export default function TicketDetail() {
   const [activity, setActivity] = useState([]);
   const [agentRuns, setAgentRuns] = useState([]);
   const [commentBody, setCommentBody] = useState("");
+  const [editingCommentId, setEditingCommentId] = useState(null);
+  const [editingBody, setEditingBody] = useState("");
   const [tagInput, setTagInput] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -136,6 +138,46 @@ export default function TicketDetail() {
       const c = await api.addComment(id, commentBody.trim());
       setComments((prev) => [...prev, c]);
       setCommentBody("");
+      reloadActivity();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  // A comment is editable/deletable by its author or any admin — mirrors the
+  // backend permission check in routers/comments.py.
+  const canModifyComment = (c) =>
+    user && (user.role === "admin" || user.id === c.author);
+
+  function startEditComment(c) {
+    setEditingCommentId(c.id);
+    setEditingBody(c.body);
+  }
+
+  function cancelEditComment() {
+    setEditingCommentId(null);
+    setEditingBody("");
+  }
+
+  async function saveEditComment(commentId) {
+    if (!editingBody.trim()) return;
+    setError("");
+    try {
+      const updated = await api.editComment(id, commentId, editingBody.trim());
+      setComments((prev) => prev.map((c) => (c.id === commentId ? updated : c)));
+      cancelEditComment();
+      reloadActivity();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function deleteComment(commentId) {
+    if (!window.confirm("Delete this comment?")) return;
+    setError("");
+    try {
+      await api.deleteComment(id, commentId);
+      setComments((prev) => prev.filter((c) => c.id !== commentId));
       reloadActivity();
     } catch (e) {
       setError(e.message);
@@ -263,8 +305,40 @@ export default function TicketDetail() {
                 <div className={styles.commentHead}>
                   <span className={styles.commentAuthor}>{userName(c.author)}</span>
                   <span className={styles.commentDate}>{formatDate(c.created_at)}</span>
+                  {canModifyComment(c) && editingCommentId !== c.id && (
+                    <span className={styles.commentControls}>
+                      <button type="button" className="link" onClick={() => startEditComment(c)}>
+                        Edit
+                      </button>
+                      <button type="button" className="link" onClick={() => deleteComment(c.id)}>
+                        Delete
+                      </button>
+                    </span>
+                  )}
                 </div>
-                <div className={styles.commentBody}>{c.body}</div>
+                {editingCommentId === c.id ? (
+                  <div className={styles.commentEdit}>
+                    <textarea
+                      value={editingBody}
+                      onChange={(e) => setEditingBody(e.target.value)}
+                    />
+                    <div className={styles.commentActions}>
+                      <button
+                        className="primary"
+                        type="button"
+                        disabled={!editingBody.trim()}
+                        onClick={() => saveEditComment(c.id)}
+                      >
+                        Save
+                      </button>
+                      <button type="button" onClick={cancelEditComment}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className={styles.commentBody}>{c.body}</div>
+                )}
               </div>
             ))}
           </div>

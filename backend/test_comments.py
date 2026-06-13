@@ -64,3 +64,78 @@ def test_assignee_can_comment(client, admin_key, make_user):
         headers={"X-API-Key": member.key},
     )
     assert r.status_code == 201, r.text
+
+
+def test_author_can_edit_comment(client, admin_key, make_user):
+    member = make_user()
+    t = _create_ticket(client, admin_key, assigned_to=member.id)
+    c = _create_comment(client, t["id"], member.key, body="typo")
+    r = client.patch(
+        f"/tickets/{t['id']}/comments/{c['id']}", json={"body": "fixed"},
+        headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["body"] == "fixed"
+    assert r.json()["id"] == c["id"]
+
+
+def test_author_can_delete_comment(client, admin_key, make_user):
+    member = make_user()
+    t = _create_ticket(client, admin_key, assigned_to=member.id)
+    c = _create_comment(client, t["id"], member.key, body="oops")
+    r = client.delete(
+        f"/tickets/{t['id']}/comments/{c['id']}", headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 204, r.text
+    listed = client.get(f"/tickets/{t['id']}/comments", headers={"X-API-Key": member.key})
+    assert c["id"] not in [x["id"] for x in listed.json()]
+
+
+def test_non_author_with_view_access_gets_403(client, admin_key, make_user):
+    member = make_user()
+    # admin authors a comment on a ticket the member can view (assigned to them);
+    # member is not the author and not admin -> 403.
+    t = _create_ticket(client, admin_key, assigned_to=member.id)
+    c = _create_comment(client, t["id"], admin_key, body="admin note")
+    r = client.patch(
+        f"/tickets/{t['id']}/comments/{c['id']}", json={"body": "nope"},
+        headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 403, r.text
+    r = client.delete(
+        f"/tickets/{t['id']}/comments/{c['id']}", headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 403, r.text
+
+
+def test_admin_can_edit_and_delete_others_comment(client, admin_key, make_user):
+    member = make_user()
+    t = _create_ticket(client, admin_key, assigned_to=member.id)
+    c = _create_comment(client, t["id"], member.key, body="member's")
+    r = client.patch(
+        f"/tickets/{t['id']}/comments/{c['id']}", json={"body": "edited by admin"},
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["body"] == "edited by admin"
+    r = client.delete(
+        f"/tickets/{t['id']}/comments/{c['id']}", headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 204, r.text
+
+
+def test_edit_missing_comment_404(client, admin_key):
+    t = _create_ticket(client, admin_key)
+    r = client.patch(
+        f"/tickets/{t['id']}/comments/999999", json={"body": "ghost"},
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_delete_missing_comment_404(client, admin_key):
+    t = _create_ticket(client, admin_key)
+    r = client.delete(
+        f"/tickets/{t['id']}/comments/999999", headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 404, r.text
