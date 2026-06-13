@@ -1067,6 +1067,18 @@ def test_should_escalate_criteria():
     assert rt._should_escalate(off, {"priority": "critical", "tags": ["dangerous"]})[0] is False
 
 
+def test_should_escalate_exempts_delegated_subtasks():
+    # A delegated child is `dangerous` only to skip the plan gate; the lead already
+    # routed it to this resolver, so the difficulty router must not claw it back.
+    cfg = SimpleNamespace(escalate_to_user_id=2, escalate_priorities=["high", "critical"])
+    assert rt._should_escalate(cfg, {"priority": "low", "tags": ["dangerous", "parent:92"]})[0] is False
+    # Full exemption: even high priority / `claude` tag on a child stays put.
+    assert rt._should_escalate(cfg, {"priority": "critical", "tags": ["parent:92"]})[0] is False
+    assert rt._should_escalate(cfg, {"priority": "low", "tags": ["claude", "parent:92"]})[0] is False
+    # Regression: the same dangerous ticket WITHOUT a parent: tag still escalates.
+    assert rt._should_escalate(cfg, {"priority": "low", "tags": ["dangerous"]})[0] is True
+
+
 def test_process_escalates_high_priority_to_claude(fake_cfg, monkeypatch):
     fake_cfg.escalate_to_user_id = 2
     monkeypatch.setattr(rt, "do_plan", lambda *a, **k: pytest.fail("should not plan"))
@@ -1077,6 +1089,22 @@ def test_process_escalates_high_priority_to_claude(fake_cfg, monkeypatch):
     rt.process(fake_cfg, client, ticket, dry_run=False)
     assert any(rt.ESCALATE_MARKER in b for _, b in client.comments_added)
     assert client.updates[-1]["assigned_to"] == 2   # reassigned to the Claude bot
+
+
+def test_process_does_not_escalate_delegated_subtask(fake_cfg, monkeypatch):
+    # A free bot (escalation on) gets a dangerous delegated child: it must IMPLEMENT it,
+    # not claw it back to the Claude bot — the lead already routed it here.
+    fake_cfg.escalate_to_user_id = 2
+    called = {}
+    monkeypatch.setattr(rt, "do_implement",
+                        lambda cfg, client, ticket, repo, *a, **k: called.setdefault("implement", ticket["id"]))
+    monkeypatch.setattr(rt, "handle_ticket_directives", lambda *a, **k: None)
+    client = FakeClient()
+    ticket = {"id": 94, "type": "task", "title": "fix", "priority": "low",
+              "tags": ["dangerous", "parent:92", "repo:x"], "status": "open", "created_by": 2}
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+    assert called == {"implement": 94}
+    assert not any(rt.ESCALATE_MARKER in b for _, b in client.comments_added)
 
 
 def test_process_does_not_escalate_when_disabled(fake_cfg, monkeypatch):
@@ -1757,7 +1785,7 @@ def test_create_ticket_posts_to_tickets_endpoint():
 
 def _args(**over):
     base = dict(type="code_review", title="t", description="", priority="medium",
-               tag=None, assign=None, code_block=None, root=".")
+               tag=None, assign=None, code_block=None, root=".", parent=None)
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -1818,6 +1846,50 @@ def test_build_payload_code_block_requires_code_review(tmp_path):
     args = _args(type="task", code_block=["a.py:python:1"], root=str(tmp_path))
     with pytest.raises(ValueError):
         ft.build_payload(args)
+
+
+# --- delegation: file_ticket --parent ------------------------------------
+def test_build_payload_parent_forces_dangerous_and_links():
+    args = _args(type="task", parent=85, assign=3)
+    payload = ft.build_payload(args)
+    assert "dangerous" in payload["tags"]
+    assert "parent:85" in payload["tags"]
+    assert payload["assigned_to"] == 3
+
+
+def test_build_payload_parent_keeps_explicit_tags():
+    args = _args(type="task", parent=85, tag=["backend"])
+    payload = ft.build_payload(args)
+    assert set(["backend", "dangerous", "parent:85"]).issubset(set(payload["tags"]))
+
+
+def test_build_payload_parent_rejects_delegate_tag():
+    # One level only: a delegated sub-task may never re-delegate.
+    args = _args(type="task", parent=85, tag=["delegate"])
+    with pytest.raises(ValueError):
+        ft.build_payload(args)
+
+
+def test_build_payload_no_parent_leaves_tags_untouched():
+    args = _args(type="task", tag=["backend"])
+    payload = ft.build_payload(args)
+    assert payload["tags"] == ["backend"]
+    assert "dangerous" not in payload["tags"]
+
+
+def test_inherited_parent_tags_names_owner_and_repo():
+    client = FakeClient(tickets=[
+        {"id": 85, "created_by": 9, "tags": ["delegate", "repo:cantina", "backend"]}])
+    tags = ft.inherited_parent_tags(client, 85)
+    assert "review-by:9" in tags
+    assert "repo:cantina" in tags          # the assignee needs to know the repo
+    assert "delegate" not in tags          # don't propagate the trigger
+    assert "backend" not in tags
+
+
+def test_inherited_parent_tags_best_effort_on_unreadable_parent():
+    client = FakeClient()  # get_ticket raises -> empty, leaving the defaults
+    assert ft.inherited_parent_tags(client, 85) == []
 
 
 # --- /ticket directive (resolver-parsed) ---------------------------------
@@ -2180,3 +2252,115 @@ def test_do_plan_real_failure_still_fails(fake_cfg, monkeypatch, tmp_path):
 
     assert any(rt.FAIL_MARKER in body for _, body in client.comments_added)
     assert not any(rt.QUOTA_BACKOFF_MARKER in body for _, body in client.comments_added)
+
+
+# --- delegation / fan-out ------------------------------------------------
+def test_parse_workers_roster():
+    from config import _parse_workers
+    workers = _parse_workers(
+        "2:claude:heavy refactors & multi-file;3:open:cheap mechanical fixes")
+    assert workers == [
+        {"id": 2, "name": "claude", "desc": "heavy refactors & multi-file"},
+        {"id": 3, "name": "open", "desc": "cheap mechanical fixes"},
+    ]
+
+
+def test_parse_workers_tolerates_blank_and_malformed():
+    from config import _parse_workers
+    assert _parse_workers("") == []
+    # missing name, non-numeric id, and a no-desc entry
+    workers = _parse_workers("4:; x:open:hi ; 5:solo")
+    assert workers == [{"id": 5, "name": "solo", "desc": ""}]
+
+
+def test_parent_id_of_reads_tag():
+    assert rt.parent_id_of({"tags": ["dangerous", "parent:85"]}) == 85
+    assert rt.parent_id_of({"tags": ["backend"]}) is None
+    assert rt.parent_id_of({"tags": ["parent:nope"]}) is None
+
+
+def test_handback_user_redirects_child_to_parent_creator():
+    parent = {"id": 85, "created_by": 9}  # the human who filed the audit
+    client = FakeClient(tickets=[parent])
+    child = {"id": 101, "created_by": 2, "tags": ["dangerous", "parent:85"]}
+    assert rt.handback_user(client, child) == 9
+    # A normal (non-child) ticket hands back to its own creator, unchanged.
+    assert rt.handback_user(client, {"id": 7, "created_by": 4, "tags": []}) == 4
+
+
+def test_handback_user_prefers_review_by_tag_without_parent_read():
+    # The worker can't read the parent, but the review owner was baked into the child.
+    client = FakeClient()  # get_ticket raises -> no parent fallback available
+    child = {"id": 101, "created_by": 2,
+             "tags": ["dangerous", "parent:85", "review-by:9"]}
+    assert rt.handback_user(client, child) == 9
+
+
+def test_dispatch_routes_delegate_when_enabled(fake_cfg, monkeypatch):
+    fake_cfg.allow_delegation = True
+    fake_cfg.workers = [{"id": 3, "name": "open", "desc": ""}]
+    called = {}
+    monkeypatch.setattr(rt, "do_delegate",
+                        lambda cfg, client, ticket, repo: called.setdefault("delegate", ticket["id"]))
+    monkeypatch.setattr(rt, "do_plan",
+                        lambda *a, **k: called.setdefault("plan", True))
+    monkeypatch.setattr(rt, "handle_ticket_directives", lambda *a, **k: None)
+    ticket = {"id": 85, "tags": ["delegate", "repo:app"], "status": "open",
+              "created_by": 9, "type": "task", "title": "audit", "description": "d"}
+    rt.process(fake_cfg, FakeClient(), ticket, dry_run=False)
+    assert called == {"delegate": 85}
+
+
+def test_dispatch_delegate_disabled_falls_through_with_notice(fake_cfg, monkeypatch):
+    fake_cfg.allow_delegation = False  # tagged but not enabled
+    fake_cfg.workers = []
+    called = {}
+    monkeypatch.setattr(rt, "do_delegate",
+                        lambda *a, **k: called.setdefault("delegate", True))
+    monkeypatch.setattr(rt, "do_plan",
+                        lambda *a, **k: called.setdefault("plan", True))
+    monkeypatch.setattr(rt, "handle_ticket_directives", lambda *a, **k: None)
+    client = FakeClient()
+    ticket = {"id": 85, "tags": ["delegate", "repo:app"], "status": "open",
+              "created_by": 9, "type": "task", "title": "audit", "description": "d"}
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+    assert called == {"plan": True}  # treated as a normal ticket
+    assert any(rt.DELEGATE_OFF_MARKER in body for _, body in client.comments_added)
+
+
+def test_do_delegate_files_rollup_and_hands_back(fake_cfg, monkeypatch, tmp_path):
+    fake_cfg.workers = [{"id": 3, "name": "open", "desc": "cheap fixes"}]
+    children = [
+        {"id": 101, "assigned_to": 3, "title": "fix A", "tags": ["dangerous", "parent:85"]},
+        {"id": 102, "assigned_to": 3, "title": "fix B", "tags": ["dangerous", "parent:85"]},
+    ]
+    client = FakeClient(tickets=children)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "prepare_worktree",
+                        lambda repo, tid, base: (tmp_path / "wt", f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # never escapes
+    monkeypatch.setattr(rt, "run_agent_tracked", lambda *a, **k: (True, "found 2 issues"))
+    monkeypatch.setattr(rt, "filed_tickets_in_log", lambda log_path: [101, 102])
+
+    ticket = {"id": 85, "tags": ["delegate", "repo:app"], "status": "open",
+              "created_by": 9, "type": "task", "title": "audit", "description": "d"}
+    rt.do_delegate(fake_cfg, client, ticket, tmp_path / "repo")
+
+    rollup = next(body for tid, body in client.comments_added
+                  if rt.DELEGATE_MARKER in body)
+    assert "#101" in rollup and "#102" in rollup and "open" in rollup
+    # Handed back to the human (the parent's creator), in_review.
+    last = client.updates[-1]
+    assert last["assigned_to"] == 9
+    assert last["status"] == "in_review"
+
+
+def test_do_delegate_without_repo_fails(fake_cfg, monkeypatch):
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    client = FakeClient()
+    ticket = {"id": 85, "tags": ["delegate"], "status": "open",
+              "created_by": 9, "type": "task", "title": "audit", "description": "d"}
+    rt.do_delegate(fake_cfg, client, ticket, None)
+    assert any(rt.FAIL_MARKER in body for _, body in client.comments_added)

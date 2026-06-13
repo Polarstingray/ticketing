@@ -36,6 +36,38 @@ HERE = Path(__file__).resolve().parent
 TYPES = ("code_review", "task")
 PRIORITIES = ("low", "medium", "high", "critical")
 
+# Delegation control tags (mirrors resolve_tickets.py / backend control_tags.py).
+TAG_DANGEROUS = "dangerous"
+TAG_DELEGATE = "delegate"
+PARENT_PREFIX = "parent:"
+REVIEW_BY_PREFIX = "review-by:"
+REPO_PREFIX = "repo:"
+
+
+def inherited_parent_tags(client, parent_id: int) -> list[str]:
+    """Tags a delegated sub-task must inherit from its parent so its assignee can act:
+
+    - ``review-by:<parent.created_by>`` — who the finished PR is handed back to (the
+      human who asked for the audit).
+    - the parent's ``repo:<name>`` — which repo to check out. The assignee can't
+      discover this from the parent itself (ticket read access is restricted to a
+      ticket's creator/assignee, and the worker is neither), so without this the
+      worker fails with "no repo specified" and bounces the child back.
+
+    We stamp these at creation because the lead bot filing the child *can* read the
+    parent (it's assigned to it during the run). Best-effort: empty if the parent
+    can't be read, leaving the defaults."""
+    try:
+        parent = client.get_ticket(parent_id)
+    except Exception:
+        return []
+    tags: list[str] = []
+    owner = parent.get("created_by")
+    if owner:
+        tags.append(f"{REVIEW_BY_PREFIX}{owner}")
+    tags += [t for t in (parent.get("tags") or []) if t.startswith(REPO_PREFIX)]
+    return tags
+
 
 def user_id(value: str) -> int:
     """argparse type for --assign: a numeric user id. A username like 'admin'
@@ -101,12 +133,30 @@ def build_payload(args: argparse.Namespace) -> dict:
         raise ValueError("--code-block is only valid with --type code_review")
 
     root = Path(args.root).resolve()
+    tags = list(args.tag or [])
+
+    # `parent` may be absent on a Namespace from the /ticket directive parser, which
+    # doesn't expose --parent (delegation is filed via the full CLI parser, not /ticket).
+    parent = getattr(args, "parent", None)
+    if parent is not None:
+        # A delegated sub-task. Make it self-driving (skip the plan-approval gate)
+        # and link it to its parent, but keep it a LEAF: a child may never carry
+        # `delegate`, so it can't fan out further (one level only).
+        if TAG_DELEGATE in tags:
+            raise ValueError(
+                "a delegated sub-task (--parent) may not be tagged 'delegate' — "
+                "fan-out is one level only"
+            )
+        if TAG_DANGEROUS not in tags:
+            tags.append(TAG_DANGEROUS)
+        tags.append(f"{PARENT_PREFIX}{parent}")
+
     payload: dict = {
         "type": args.type,
         "title": title,
         "description": args.description or "",
         "priority": args.priority,
-        "tags": args.tag or [],
+        "tags": tags,
         "code_blocks": [parse_code_block(s, root) for s in specs],
     }
     if args.assign is not None:
@@ -124,6 +174,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--priority", default="medium", choices=PRIORITIES, help="default: medium")
     p.add_argument("--tag", action="append", metavar="TAG", help="repeatable")
     p.add_argument("--assign", type=user_id, metavar="USER_ID", help="assign to this user id")
+    p.add_argument(
+        "--parent", type=int, metavar="TICKET_ID",
+        help="file as a delegated sub-task of this ticket: links it (parent:<id>), "
+             "forces the 'dangerous' tag so the assignee implements without a plan "
+             "gate, and forbids re-delegation (one level only)",
+    )
     p.add_argument(
         "--code-block", action="append", dest="code_block", metavar="PATH:LANG:START-END",
         help="repeatable; reads the lines from disk (code_review only)",
@@ -152,6 +208,26 @@ def main(argv: list[str] | None = None) -> int:
     logger = audit.setup_logging(cfg, sweep_id=f"file-ticket-{ts}")
     client = StingrayClient(cfg.stingray_url, cfg.api_key,
                             max_retries=cfg.stingray_max_retries, logger=logger)
+
+    if args.parent is not None:
+        # Fan-out cap: bound how many sub-tasks one delegation run may file, so a single
+        # orchestration can't spawn unbounded tickets / agent cost. Count this parent's
+        # existing children (created_by this bot, so visible to its non-admin key).
+        if cfg.max_delegations > 0:
+            existing = sum(1 for _ in client.iter_tickets(tag=f"{PARENT_PREFIX}{args.parent}"))
+            if existing >= cfg.max_delegations:
+                print(
+                    f"error: delegation cap reached — ticket #{args.parent} already has "
+                    f"{existing} sub-task(s) (RESOLVER_MAX_DELEGATIONS={cfg.max_delegations})",
+                    file=sys.stderr,
+                )
+                return 1
+        # Inherit review owner + the target repo from the parent while we can still
+        # read it — the worker that finishes the child cannot.
+        for t in inherited_parent_tags(client, args.parent):
+            if t not in payload["tags"]:
+                payload["tags"].append(t)
+
     try:
         ticket = client.create_ticket(**payload)
     except requests.HTTPError as exc:
