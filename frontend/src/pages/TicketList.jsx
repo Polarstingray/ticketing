@@ -175,6 +175,15 @@ export default function TicketList() {
                   <PriorityBadge priority={t.priority} />
                   <StatusBadge status={t.status} />
                   <span className={styles.assignee}>{userName(t.assigned_to)}</span>
+                  {t.due_date && (
+                    <span className={styles.date}>Due {formatDate(t.due_date)}</span>
+                  )}
+                  {t.due_date &&
+                    new Date(t.due_date) < new Date() &&
+                    t.status !== "resolved" &&
+                    t.status !== "closed" && (
+                      <span className={styles.tag}>Overdue</span>
+                    )}
                   <span className={styles.date}>{formatDate(t.updated_at)}</span>
                 </div>
               </div>
