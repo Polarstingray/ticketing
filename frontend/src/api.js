@@ -67,6 +67,10 @@ export const api = {
 
   listComments: (id) => request("GET", `/tickets/${id}/comments`),
   addComment: (id, body) => request("POST", `/tickets/${id}/comments`, { body }),
+  editComment: (id, commentId, body) =>
+    request("PATCH", `/tickets/${id}/comments/${commentId}`, { body }),
+  deleteComment: (id, commentId) =>
+    request("DELETE", `/tickets/${id}/comments/${commentId}`),
 
   // Notifications (the bell/inbox). listNotifications returns
   // { items, total, unread_count, limit, offset }.
