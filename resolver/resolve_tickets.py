@@ -55,7 +55,11 @@ TAG_IMPL_READY = "resolver:impl-ready"         # escalated with approved plan; s
 TAG_DANGEROUS = "dangerous"
 TAG_FIX = "fix"                             # on a code_review ticket: also apply fixes
 TAG_ESCALATE = "claude"                     # free bot: manual "send this to Claude" tag
+TAG_DELEGATE = "delegate"                   # opt a ticket into resolver-to-resolver fan-out
+TAG_DELEGATING = "resolver:delegating"      # delegation/orchestration run in flight
 REPO_TAG_PREFIX = "repo:"
+PARENT_TAG_PREFIX = "parent:"               # parent:<id> links a sub-task to its lead ticket
+REVIEW_BY_TAG_PREFIX = "review-by:"         # review-by:<id> = who a sub-task's PR goes back to
 
 PLAN_MARKER = "📋 **Proposed plan**"
 IMPL_MARKER = "✅ **Implemented**"
@@ -65,6 +69,8 @@ REVIEW_MARKER = "🔎 **Code review**"
 ESCALATE_MARKER = "⤴️ **Routed to Claude**"
 VERIFY_FAIL_MARKER = "⚠️ **Tests failing**"
 QUOTA_BACKOFF_MARKER = "⏳ Quota backoff"
+DELEGATE_MARKER = "🧭 **Delegated**"
+DELEGATE_OFF_MARKER = "ℹ️ Delegation not enabled"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Per-event audit truncation, set from config at sweep start (see main()).
@@ -166,8 +172,16 @@ def _should_escalate(cfg, ticket: dict) -> tuple[bool, str]:
     unset so it never escalates to itself). A ticket is out of the free bot's scope
     when it's high/critical priority, carries the `dangerous` tag (can apply changes
     without the approval gate), or is manually tagged `claude`. Returns (False, "")
-    when it should stay on the free bot."""
+    when it should stay on the free bot.
+
+    Exception: a delegated sub-task (a `parent:<id>` tag) was explicitly routed to THIS
+    resolver by a lead — the lead is the difficulty router for delegated work, so we
+    don't second-guess it. On a child, `dangerous` only means "skip the plan gate", not
+    "escalate to Claude"; without this, every delegated child would be clawed straight
+    back to the Claude bot and the free resolvers would never do their assigned work."""
     if not getattr(cfg, "escalate_to_user_id", 0):
+        return False, ""
+    if parent_id_of(ticket) is not None:
         return False, ""
     tags = ticket.get("tags", [])
     if TAG_ESCALATE in tags:
@@ -186,6 +200,38 @@ def repo_name_of(ticket: dict) -> str | None:
         if t.startswith(REPO_TAG_PREFIX):
             return t[len(REPO_TAG_PREFIX):].strip()
     return None
+
+
+def parent_id_of(ticket: dict) -> int | None:
+    """The id from this ticket's `parent:<id>` tag (a delegated sub-task), else None."""
+    for t in ticket.get("tags", []):
+        if t.startswith(PARENT_TAG_PREFIX):
+            try:
+                return int(t[len(PARENT_TAG_PREFIX):].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def handback_user(client: StingrayClient, ticket: dict) -> int:
+    """Who a finished result should be handed back to. For a delegated sub-task that's
+    the human who asked for the audit, not the lead bot that filed the child. We read
+    it from the child's own `review-by:<id>` tag (stamped at creation, since the worker
+    finishing the child can't read the parent). Fall back to a live parent lookup, then
+    to the ticket's own creator (unchanged behavior for normal tickets)."""
+    for t in ticket.get("tags", []):
+        if t.startswith(REVIEW_BY_TAG_PREFIX):
+            try:
+                return int(t[len(REVIEW_BY_TAG_PREFIX):].strip())
+            except ValueError:
+                break
+    pid = parent_id_of(ticket)
+    if pid is not None:
+        try:
+            return client.get_ticket(pid).get("created_by") or ticket["created_by"]
+        except Exception:
+            return ticket["created_by"]
+    return ticket["created_by"]
 
 
 def set_state(client: StingrayClient, ticket: dict, new_claude_tags: list[str],
@@ -590,6 +636,13 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
         # never reaches the result. Granting only read tools and asking for the
         # output as the final message captures it cleanly while guaranteeing no edits.
         cmd += ["--permission-mode", "default", "--allowedTools", "Read", "Glob", "Grep"]
+    elif mode == "delegate":
+        # Orchestration: read the repo to audit it (Read/Glob/Grep) AND run Bash so it
+        # can invoke file_ticket.py to file sub-tasks — but no Edit/Write, so it can't
+        # change the code itself. Isolation still comes from the worktree + the
+        # post-run main-checkout escape check in do_delegate.
+        cmd += ["--permission-mode", "default",
+                "--allowedTools", "Read", "Glob", "Grep", "Bash"]
     else:
         cmd += ["--permission-mode", "acceptEdits"]
         if cfg.implement_tools:
@@ -830,7 +883,10 @@ def _run_opencode_once(cfg: Config, prompt: str, cwd: Path, mode: str,
     cmd = [cfg.agent_bin, "run", prompt, "--format", "json", "--dir", str(cwd)]
     if model:
         cmd += ["--model", model]
-    if mode in ("plan", "review"):
+    if mode in ("plan", "review", "delegate"):
+        # delegate is read-only here too; the opencode `plan` agent has no Bash, so an
+        # opencode resolver can't file sub-tasks — delegation is meant for a Bash-capable
+        # lead (the Claude resolver). Kept safe (no edits) rather than edit-capable.
         cmd += ["--agent", cfg.opencode_plan_agent]
     else:
         cmd += ["--agent", cfg.opencode_build_agent, "--dangerously-skip-permissions"]
@@ -1438,6 +1494,69 @@ def review_prompt(ticket: dict, repo: Path | None, want_fix: bool) -> str:
     return "\n".join(x for x in p if x is not None)
 
 
+def _render_roster(cfg: Config) -> str:
+    """Render the delegatable-resolver roster (cfg.workers) as `--assign` choices for
+    the orchestration prompt, so the lead agent picks a target by capability."""
+    lines = []
+    for w in cfg.workers:
+        desc = f" — {w['desc']}" if w.get("desc") else ""
+        lines.append(f"  --assign {w['id']}   ({w['name']}){desc}")
+    return "\n".join(lines)
+
+
+def orchestrate_prompt(ticket: dict, repo: Path, cfg: Config) -> str:
+    """Prompt for a delegation run: audit the repo read-only, then decompose the work
+    into self-contained sub-tasks and file each (assigned to a chosen resolver) via
+    file_ticket.py --parent. The agent makes no code edits and opens no PRs."""
+    tid = ticket["id"]
+    filer = f"{sys.executable} {HERE / 'file_ticket.py'}"
+    p = [
+        f"You are the LEAD resolver for Stingray ticket #{tid}.",
+        f"Your working directory is a read-only checkout at {repo}. Audit the code there",
+        "to carry out this ticket, then DECOMPOSE the work into independent sub-tasks and",
+        "DELEGATE each to another resolver by filing it as a Stingray ticket.",
+        "",
+        "This is an explicitly sanctioned, autonomous workflow: you do NOT need human",
+        "approval to create or assign these sub-tasks — the human reviews the resulting",
+        "PRs. Filing and assigning the sub-tasks IS the deliverable for this run. Do NOT",
+        "edit any files yourself and do NOT open PRs; your only side effect is filing the",
+        "sub-task tickets with the command below.",
+        "",
+        "File each sub-task with the resolver's validated filer (never hand-write curl),",
+        "run from the repo root:",
+        f"  {filer} \\",
+        "    --type task --title \"<concise outcome>\" \\",
+        "    --description \"<which file(s) and exactly what to change>\" \\",
+        "    --priority low|medium|high|critical \\",
+        f"    --assign <RESOLVER_ID> --parent {tid} [--tag NAME ...]",
+        "",
+        f"  --parent {tid} links the sub-task to this ticket, makes it self-driving (the",
+        "  assignee implements and opens a PR with no separate plan-approval step) and",
+        "  keeps it a LEAF: a sub-task can never itself delegate. Do NOT pass",
+        "  `--tag delegate`. `--code-block` is only valid with `--type code_review`.",
+        "",
+        "Choose the right resolver per sub-task from this roster:",
+        _render_roster(cfg) or "  (no resolvers configured — you cannot delegate)",
+        "",
+        "Keep each sub-task SELF-CONTAINED and scoped to ONE fix, with a clear title and a",
+        "description naming the file(s) and the change so the assignee can act without",
+        "more context. Route heavy / multi-file / refactor work to a capable resolver and",
+        f"cheap mechanical single-file fixes to a cheaper one. File at most",
+        f"{cfg.max_delegations} sub-task(s); only those clearly warranted by the ticket —",
+        "quality over quantity.",
+        "",
+        "Original ticket:",
+        f"Title: {ticket['title']}",
+        "Description:",
+        ticket.get("description") or "(none)",
+        render_code_blocks(ticket),
+        "",
+        "When done, output a short summary: the issues you found and, for each sub-task",
+        "you filed, its title and which resolver you assigned it to.",
+    ]
+    return "\n".join(p)
+
+
 # --- phase handlers ------------------------------------------------------
 def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             revise_notes: str | None) -> None:
@@ -1684,7 +1803,7 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                 client.add_comment(ticket["id"],
                     f"{IMPL_MARKER} — no code changes were needed; filed {ids}.\n\n{summary}")
                 set_state(client, ticket, [], status="in_review",
-                          assigned_to=ticket["created_by"])
+                          assigned_to=handback_user(client, ticket))
                 phase("filed-no-code", ticket,
                       f"#{ticket['id']}: filed {ids}, no code changes — handed back")
                 return
@@ -1695,6 +1814,75 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         stat = run(["git", "-C", str(wt), "diff", "--stat", f"{base_ref}..HEAD"])[1].strip()
         publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch,
                 summary, stat, origin=origin, pr_ok=pr_ok)
+    finally:
+        remove_worktree(repo, wt)
+
+
+def _delegation_rollup(client: StingrayClient, cfg: Config, filed: list[int],
+                       summary: str) -> str:
+    """Compose the roll-up comment posted on the parent after a delegation run: the
+    sub-tasks filed, who each was assigned to, and the lead agent's summary."""
+    name_by_id = {w["id"]: w["name"] for w in cfg.workers}
+    if filed:
+        lines = [f"{DELEGATE_MARKER} — audited and delegated {len(filed)} sub-task(s). Each "
+                 "runs on its own branch and opens a PR; I'll route each finished PR back to "
+                 "you for review (nothing merges automatically).", ""]
+        for cid in filed:
+            try:
+                c = client.get_ticket(cid)
+                who = c.get("assigned_to")
+                who_label = name_by_id.get(who) or (f"user {who}" if who else "unassigned")
+                lines.append(f"- #{cid} → {who_label}: {c.get('title', '')}")
+            except Exception:
+                lines.append(f"- #{cid}")
+    else:
+        lines = [f"{DELEGATE_MARKER} — no sub-tasks were filed (nothing clearly warranted "
+                 "delegating, or the configured resolver could not file them).", ""]
+    lines += ["", "---", summary or ""]
+    return "\n".join(lines)
+
+
+def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path | None") -> None:
+    """Lead/orchestration run: audit the repo read-only, file one self-driving
+    (`dangerous`) sub-task per issue assigned to a chosen resolver, post a roll-up,
+    and hand the ticket back to its creator. Makes no code changes and no PR."""
+    tid = ticket["id"]
+    if repo is None:
+        fail(client, ticket, "Delegation needs a target repo to audit — add a `repo:<name>` "
+             "tag or set DEFAULT_REPO.")
+        return
+    set_state(client, ticket, [TAG_DELEGATING])
+    agent_label = agents.get_runner(cfg.agent).label
+    client.add_comment(tid, f"🧭 {agent_label} is auditing this and delegating sub-tasks to "
+        "other resolvers — read-only, no changes to this repo. I'll post a roll-up and hand "
+        "it back to you when done.")
+    phase("delegating", ticket, f"#{tid}: delegating")
+    base_ref, base_branch = resolve_base(repo)
+    wt, branch = prepare_worktree(repo, tid, base_ref)
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        log_path = cfg.logs_dir / f"ticket-{tid}-delegate-{ts}.log"
+        dirty_before = _tracked_dirty(repo)
+        ok, summary = run_agent_tracked(
+            cfg, client, ticket, orchestrate_prompt(ticket, wt, cfg), wt, "delegate", log_path)
+        escaped = _tracked_dirty(repo) - dirty_before
+        if escaped:
+            _handle_escape(repo, escaped, ticket)
+            fail(client, ticket,
+                 f"{agent_label} escaped its worktree during delegation; aborting.")
+            return
+        if not ok:
+            if _is_quota_failure(summary):
+                quota_backoff(cfg, client, ticket, TAG_DELEGATING, summary)
+            else:
+                fail(client, ticket, f"Delegation failed.\n\n```\n{tail(summary)}\n```")
+            return
+        filed = filed_tickets_in_log(log_path)
+        client.add_comment(tid, _delegation_rollup(client, cfg, filed, summary))
+        set_state(client, ticket, [], status="in_review", assigned_to=ticket["created_by"])
+        phase("delegated", ticket,
+              f"#{tid}: delegated {len(filed)} sub-task(s), handed back to user "
+              f"{ticket['created_by']}")
     finally:
         remove_worktree(repo, wt)
 
@@ -1946,9 +2134,10 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
     if not want_fix:
         # Findings-only: post the review and hand the ticket back to the reporter.
         client.add_comment(ticket["id"], f"{REVIEW_MARKER} (Stingray resolver)\n\n{result}")
-        set_state(client, ticket, [], status="in_review", assigned_to=ticket["created_by"])
+        handback = handback_user(client, ticket)
+        set_state(client, ticket, [], status="in_review", assigned_to=handback)
         phase("reviewed", ticket, f"#{ticket['id']}: posted review, handed back to "
-              f"user {ticket['created_by']}")
+              f"user {handback}")
         return
 
     # `fix` requested: the findings are the plan. Tagged `dangerous` skips the gate
@@ -2012,9 +2201,12 @@ def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summar
                 f"{summary}\n\nChanged files:\n```\n{stat}\n```")
 
     client.add_comment(tid, body)
-    set_state(client, ticket, [TAG_AWAIT_PR], status="in_review", assigned_to=ticket["created_by"])
+    # A delegated sub-task's PR goes back to the human who requested the audit (the
+    # parent's creator), not the lead bot that filed it; normal tickets are unchanged.
+    handback = handback_user(client, ticket)
+    set_state(client, ticket, [TAG_AWAIT_PR], status="in_review", assigned_to=handback)
     phase("awaiting-pr-review", ticket,
-          f"#{tid}: implemented, handed back to user {ticket['created_by']}")
+          f"#{tid}: implemented, handed back to user {handback}")
 
 
 def _quota_backoff_elapsed(comments: list[dict], cfg: Config) -> bool:
@@ -2185,7 +2377,22 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     # into also applying the fixes after the read-only review.
     want_fix = TAG_FIX in ticket.get("tags", [])
 
-    if TAG_AWAIT_PLAN in tags:
+    # Delegation (fan-out): a `delegate`-tagged ticket lets this lead resolver
+    # decompose the work and hand sub-tasks to other resolvers. Strictly opt-in —
+    # the flag must be on AND a worker roster configured. If it's tagged but not
+    # enabled, say so once and fall through to normal handling.
+    delegate_requested = TAG_DELEGATE in ticket.get("tags", [])
+    if delegate_requested and not (cfg.allow_delegation and cfg.workers):
+        if not dry_run and not any(
+                DELEGATE_OFF_MARKER in (c.get("body") or "") for c in comments):
+            client.add_comment(tid, f"{DELEGATE_OFF_MARKER} — this ticket is tagged "
+                "`delegate` but fan-out is not enabled here (needs RESOLVER_ALLOW_DELEGATION=1 "
+                "and RESOLVER_WORKERS). Handling it as a normal ticket.")
+        delegate_requested = False
+
+    if delegate_requested:
+        action, kw = "delegate", {}
+    elif TAG_AWAIT_PLAN in tags:
         if cmd.startswith("/approve"):
             plan = find_approved_plan(comments, cfg.bot_user_id)
             action, kw = "implement", {"plan": plan}
@@ -2229,13 +2436,16 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     # Attempt cap (B3): a ticket that keeps failing the same phase shouldn't be
     # auto-retried forever, burning tokens on every cron tick. Once the streak of
     # recent failures hits the cap, hand it to a human and leave the bot's queue.
-    if cfg.max_attempts > 0 and action in ("plan", "replan", "implement", "rework", "review"):
+    if cfg.max_attempts > 0 and action in (
+            "plan", "replan", "implement", "rework", "review", "delegate"):
         failures = recent_failures(comments, cfg.bot_user_id)
         if failures >= cfg.max_attempts:
             give_up(client, ticket, failures)
             return
 
-    if action == "plan":
+    if action == "delegate":
+        do_delegate(cfg, client, ticket, repo)
+    elif action == "plan":
         do_plan(cfg, client, ticket, repo, kw["revise_notes"])
     elif action == "replan":
         do_plan(cfg, client, ticket, repo, kw["revise_notes"])

@@ -3,7 +3,9 @@
 > **Resolver runs:** if you are a `resolver/` agent, don't hand-write the `curl`
 > below — run `resolver/file_ticket.py` instead. It reads the URL/key from the
 > resolver config, validates the fields, and reads `--code-block` content off disk.
-> See `resolver/README.md`.
+> Use `--assign <user_id>` to hand the new ticket to another resolver, and
+> `--parent <ticket_id>` when delegating a sub-task (it links the child and makes it
+> self-driving). See `resolver/README.md` → "Delegation / fan-out".
 
 When asked to file a review, create a ticket in **Stingray Tickets** via its REST API.
 

@@ -23,9 +23,15 @@ import os
 from models import User, UserRole
 
 # Reserved tag *prefixes* (any tag starting with one of these is reserved).
-RESERVED_PREFIXES = ("claude:", "repo:")
-# Reserved *exact* tags.
-RESERVED_EXACT = frozenset({"dangerous", "fix"})
+# `parent:<id>` links a delegated sub-task back to the ticket that spawned it, and
+# `review-by:<id>` records who its finished PR is handed back to; both must be trusted
+# so a user can't forge them to redirect another ticket's PR handoff. See the
+# resolver's delegation flow.
+RESERVED_PREFIXES = ("claude:", "repo:", "parent:", "review-by:")
+# Reserved *exact* tags. `delegate` opts a ticket into resolver-to-resolver
+# fan-out (the lead may decompose it and assign sub-tasks to other resolvers); like
+# `dangerous` it must be trusted so a user can't self-trigger autonomous fan-out.
+RESERVED_EXACT = frozenset({"dangerous", "fix", "delegate"})
 
 # Trusted resolver bot user ids. Accepts a comma-separated list so multiple
 # resolver identities (claude-bot, gemini-bot, open-bot, …) can all manage
