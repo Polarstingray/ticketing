@@ -129,6 +129,7 @@ def _parser() -> argparse.ArgumentParser:
         help="repeatable; reads the lines from disk (code_review only)",
     )
     p.add_argument("--root", default=".", help="base dir for --code-block paths (default: cwd)")
+    p.add_argument("--cost", type=float, default=0.0, help="cost of ticket creation/delegation")
     p.add_argument("--dry-run", action="store_true", help="print the payload, don't POST")
     return p
 
@@ -165,6 +166,30 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"created ticket #{ticket['id']}: {ticket['title']}")
     print(f"{cfg.stingray_url}/tickets/{ticket['id']}")
+
+    if args.cost > 0.0:
+        logger.debug(f"recording delegation cost {args.cost} for ticket {ticket['id']}")
+        try:
+            client.create_agent_run(
+                ticket_id=ticket['id'],
+                agent=cfg.agent,
+                phase="delegation_cost",
+                model=cfg.agent_model,
+                cost=args.cost,
+                status="completed",
+                token_usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                started_at=datetime.now(timezone.utc).isoformat(),
+                ended_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except requests.RequestException as exc:
+            print(f"warning: could not record delegation cost: {exc}", file=sys.stderr)
+            # The delegation itself succeeded, so don't fail the overall run.
+            # Just log a warning and continue.
+
     return 0
 
 
