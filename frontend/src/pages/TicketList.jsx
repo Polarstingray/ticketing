@@ -169,7 +169,16 @@ export default function TicketList() {
       {loading ? (
         <div className="muted">Loading…</div>
       ) : tickets.length === 0 ? (
-        <div className={`card ${styles.empty}`}>No tickets match these filters.</div>
+        Object.values(filters).some((v) => v) ? (
+          <div className={`card ${styles.empty}`}>No tickets match these filters.</div>
+        ) : (
+          <div className={`card ${styles.empty}`}>
+            <p>No tickets yet.</p>
+            <p>
+              <Link to="/tickets/new">Create your first ticket</Link> to get started.
+            </p>
+          </div>
+        )
       ) : (
         <div className={styles.list}>
           {tickets.map((t) => (

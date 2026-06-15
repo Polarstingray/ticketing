@@ -57,9 +57,15 @@ def reserved_subset(tags) -> set[str]:
 def can_manage_reserved_tags(user: User) -> bool:
     """Whether ``user`` may add/remove/alter reserved control tags.
 
-    Admins always may; resolver bots may (matched by id) so their state
-    machines keep working without widening their role to admin.
+    Admins always may; resolver bots may, so their state machines keep working
+    without widening their role to admin. A bot is recognized by the DB flag
+    ``is_resolver_bot`` (set at seed time — see ``seed.seed_resolver_bot``),
+    which removes the old requirement that ``RESOLVER_BOT_USER_ID`` be kept in
+    sync between the backend and the resolver. The legacy env-id list is still
+    honored for backward compatibility with existing deployments.
     """
     if user.role == UserRole.admin.value:
+        return True
+    if getattr(user, "is_resolver_bot", False):
         return True
     return user.id in RESOLVER_BOT_USER_IDS

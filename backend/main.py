@@ -16,7 +16,7 @@ from routers import notifications as notifications_router
 from routers import preferences as preferences_router
 from routers import tickets as tickets_router
 from routers import users as users_router
-from seed import seed_admin
+from seed import seed_admin, seed_resolver_bot
 from startup import check_startup_security
 
 
@@ -30,6 +30,7 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         seed_admin(db)
+        seed_resolver_bot(db)
     finally:
         db.close()
     yield
