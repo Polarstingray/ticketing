@@ -170,6 +170,44 @@ next sweep:
   planning it. Put `/ticket` in a comment (or alongside real content) if you want the
   host ticket worked on too.
 
+## Standard commands (premade prompts)
+
+For tasks you want run the same way across **all** your projects — a security audit
+is the canonical example — the resolver ships a library of named, premade prompts.
+Invoke one by putting a single slash-command line in a bot-assigned ticket's
+**description or a comment**:
+
+```
+/security-audit
+
+Focus on the new auth router.
+```
+
+When the resolver sees `/security-audit`, it loads `commands/security-audit.md`,
+injects its body as the ticket's **primary objective**, and runs the normal
+lifecycle. The ticket's own title/description (the "Focus on…" line) are kept as
+supporting context. Detection is deterministic — the model never decides which
+command ran — mirroring the `/ticket` directive above.
+
+- **One library, every project.** Commands live in `resolver/commands/*.md`, so a
+  recurring cross-project task is defined once. The seeded set includes
+  `/security-audit`, `/dependency-audit`, and `/test-coverage`.
+- **`type` controls routing.** A command's frontmatter `type: code_review` runs the
+  read-only review lifecycle (findings posted, no PR) — even on a ticket whose own
+  type is `task`. `type: task` (the default) runs plan → approve → implement.
+- **Composes with `delegate`.** A ticket tagged `delegate` that also invokes a
+  command (e.g. `/security-audit` + `delegate`) has the lead resolver audit the repo
+  using the premade prompt, then fan out one fix sub-task per finding to other
+  resolvers (see "Delegation / fan-out"). The command's body drives the audit; the
+  sub-tasks are filed as `task` tickets regardless of the command's `type`.
+- **Unknown command?** If a `/foo` line matches no template, the resolver posts a
+  one-time comment listing the available commands and handles the ticket normally.
+- **Authoring:** see `commands/README.md` for the file format. Drop in a new
+  `<name>.md` and it's picked up on the next sweep.
+
+`/ticket`, `/approve`, `/revise`, and `/review` are reserved control verbs and are
+never treated as standard commands.
+
 ## Running it
 
 ```bash
