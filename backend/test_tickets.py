@@ -268,6 +268,29 @@ def test_resolver_bot_can_set_reserved_tags(client, make_user, monkeypatch):
     assert _tags(r.json()) == {"repo:app", "claude:implementing"}
 
 
+def test_resolver_bot_flag_can_set_reserved_tags(client, make_user):
+    """A non-admin user flagged is_resolver_bot may manage control tags even when
+    RESOLVER_BOT_USER_IDS is empty — the DB flag is authoritative, so there is no
+    RESOLVER_BOT_USER_ID env to keep in sync."""
+    from database import SessionLocal
+    from models import User
+    bot = make_user()
+    db = SessionLocal()
+    try:
+        db.query(User).filter(User.id == bot.id).update({"is_resolver_bot": True})
+        db.commit()
+    finally:
+        db.close()
+    t = _create(client, bot.key, tags=["repo:app", "claude:planning"])
+    assert _tags(t) == {"repo:app", "claude:planning"}
+    r = client.patch(
+        f"/tickets/{t['id']}", json={"tags": ["repo:app", "claude:implementing"]},
+        headers={"X-API-Key": bot.key},
+    )
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"repo:app", "claude:implementing"}
+
+
 def test_tag_validation_rejects_bad_payloads(client, admin_key):
     t = _create(client, admin_key)
     # Too many tags.
