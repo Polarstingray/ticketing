@@ -84,6 +84,11 @@ class User(Base):
     email = Column(String, nullable=False)
     role = Column(String, nullable=False, default=UserRole.member.value)
     hashed_password = Column(String, nullable=False)
+    # Trusted automation identity: a resolver bot may set the reserved control
+    # tags (claude:*, repo:*, dangerous, fix, delegate) without being an admin.
+    # Set at seed time (see seed.seed_resolver_bot) so the trust is recorded in
+    # the DB instead of a RESOLVER_BOT_USER_ID env var that must be kept in sync.
+    is_resolver_bot = Column(Boolean, nullable=False, default=False)
     # Bumped whenever existing sessions must be invalidated (logout, password
     # change, role change). Embedded in the session token and checked on every
     # request, so a stale/leaked cookie stops working once this changes.

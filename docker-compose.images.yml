@@ -1,0 +1,61 @@
+# Run Stingray from prebuilt GHCR images — no source build required.
+#
+#   cp .env.example .env        # edit ADMIN_* and SESSION_SECRET
+#   docker compose -f docker-compose.images.yml up -d
+#
+# Pin a version with STINGRAY_TAG (defaults to latest), e.g. STINGRAY_TAG=v1.0.0.
+services:
+  backend:
+    image: ghcr.io/polarstingray/stingray-backend:${STINGRAY_TAG:-latest}
+    container_name: stingray-backend
+    restart: unless-stopped
+    environment:
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      APP_ENV: ${APP_ENV:-dev}
+      SESSION_SECRET: ${SESSION_SECRET:-please-change-me}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      DATABASE_PATH: /data/stingray.db
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      SEED_RESOLVER_BOT: ${SEED_RESOLVER_BOT:-false}
+      RESOLVER_BOT_USERNAME: ${RESOLVER_BOT_USERNAME:-claude-bot}
+      RESOLVER_BOT_USER_ID: ${RESOLVER_BOT_USER_ID:-0}
+      RATELIMIT_STORAGE_URI: ${RATELIMIT_STORAGE_URI:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-stingray@localhost}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_SSL: ${SMTP_SSL:-false}
+    volumes:
+      - stingray-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    image: ghcr.io/polarstingray/stingray-frontend:${STINGRAY_TAG:-latest}
+    container_name: stingray-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - internal
+    ports:
+      - "3000:3000"
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  stingray-data:
