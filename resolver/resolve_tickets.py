@@ -332,9 +332,9 @@ def _directive_parser() -> _DirectiveParser:
 def body_is_directive_only(ticket: dict) -> bool:
     """True when the ticket description is nothing but `/ticket` directive line(s)
     (and whitespace) — i.e. a pure filing request with no real work to plan."""
-    nonempty = [l.strip() for l in (ticket.get("description") or "").splitlines() if l.strip()]
+    nonempty = [ln.strip() for ln in (ticket.get("description") or "").splitlines() if ln.strip()]
     return bool(nonempty) and all(
-        l == "/ticket" or l.startswith("/ticket ") for l in nonempty
+        ln == "/ticket" or ln.startswith("/ticket ") for ln in nonempty
     )
 
 
@@ -1572,7 +1572,7 @@ def orchestrate_prompt(ticket: dict, repo: Path, cfg: Config,
         "Keep each sub-task SELF-CONTAINED and scoped to ONE fix, with a clear title and a",
         "description naming the file(s) and the change so the assignee can act without",
         "more context. Route heavy / multi-file / refactor work to a capable resolver and",
-        f"cheap mechanical single-file fixes to a cheaper one. File at most",
+        "cheap mechanical single-file fixes to a cheaper one. File at most",
         f"{cfg.max_delegations} sub-task(s); only those clearly warranted by the ticket —",
         "quality over quantity.",
         "",
