@@ -18,6 +18,15 @@ FastAPI + SQLite backend, React/Vite frontend, deployed via Docker Compose behin
 
 ## Quick start (Docker)
 
+One command — generates a `SESSION_SECRET`, prompts for an admin password, brings
+everything up, and (optionally) provisions the resolver bot and writes `resolver/.env`:
+
+```bash
+./install.sh
+```
+
+Or do it by hand:
+
 ```bash
 cp .env.example .env        # then edit ADMIN_* and SESSION_SECRET
 docker compose up --build
@@ -25,6 +34,8 @@ docker compose up --build
 
 - Frontend: http://localhost:3000
 - Log in with the `ADMIN_USERNAME` / `ADMIN_PASSWORD` you set in `.env`.
+
+`make help` lists common tasks (`make up`, `make down`, `make test`, `make lint`).
 
 The initial admin is created automatically on first run (only when the database is empty),
 along with a first API key named `default` whose plaintext is printed **once** in the backend
