@@ -19,10 +19,11 @@ for p in (RESOLVER_DIR, EVAL_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from harness import backend as backend_mod   # noqa: E402
-from harness import score                    # noqa: E402
-from stingray import StingrayClient          # noqa: E402
-import run_eval                              # noqa: E402
+import run_eval  # noqa: E402
+from harness import backend as backend_mod  # noqa: E402
+from harness import score  # noqa: E402
+
+from stingray import StingrayClient  # noqa: E402
 
 ACCEPTANCE = {
     "command": "python -m pytest tests/test_acceptance.py -q",

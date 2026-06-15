@@ -1,4 +1,4 @@
-from calc import add, subtract, divide
+from calc import add, divide, subtract
 
 
 def test_add():

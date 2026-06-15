@@ -49,8 +49,8 @@ jobs:
       - run: pip install ruff==0.15.16
       - run: ruff check backend resolver
 
-  frontend-build:
-    name: Frontend build
+  frontend:
+    name: Frontend lint, test & build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -63,4 +63,6 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - run: npm run lint
+      - run: npm test
       - run: npm run build

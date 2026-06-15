@@ -30,6 +30,9 @@ services:
       # Still honored for older deployments. MUST match the resolver's
       # RESOLVER_BOT_USER_ID if you rely on it.
       RESOLVER_BOT_USER_ID: ${RESOLVER_BOT_USER_ID:-0}
+      # Shared rate-limit storage for multi-worker/replica deploys (e.g.
+      # redis://redis:6379). Empty => per-process in-memory (fine for one worker).
+      RATELIMIT_STORAGE_URI: ${RATELIMIT_STORAGE_URI:-}
       # Email notifications (optional). Leave SMTP_HOST empty to disable.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       SMTP_HOST: ${SMTP_HOST:-}
