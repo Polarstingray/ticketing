@@ -92,6 +92,20 @@ cp .env.example .env        # set APP_ENV=production, a real SESSION_SECRET, etc
 docker compose up --build -d
 ```
 
+### Scaling
+
+The default deployment is a **single backend worker**, which is plenty for a team and keeps
+things simple (SQLite + in-process rate limiting). If you scale to multiple workers or
+replicas, the per-IP rate-limit/throttle counters must be shared, or each process counts
+independently. Point them at Redis with one env var — no code change:
+
+```bash
+RATELIMIT_STORAGE_URI=redis://redis:6379
+```
+
+For heavy concurrent write load you'd also want to move off SQLite; that's a larger change
+and not currently provided.
+
 ### Backups
 
 The database is a single SQLite file on the `stingray-data` volume. Take consistent
