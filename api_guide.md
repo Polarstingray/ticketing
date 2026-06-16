@@ -150,6 +150,7 @@ List tickets, newest first, **paginated**. All filters are optional query params
 | `created_by`  | user id (int) |
 | `priority`    | `low` `medium` `high` `critical` |
 | `tag`         | a single tag string; matches tickets containing that exact tag |
+| `q`           | free-text search; case-insensitive substring match over `title` or `description` (blank/whitespace-only ignored) |
 | `archived`    | `true` `false`; omitted by default, which **hides** archived tickets. Pass `true` for the archive view, `false` to list only non-archived. |
 | `limit`       | page size, 1–200 (default `50`) |
 | `offset`      | number to skip (default `0`) |

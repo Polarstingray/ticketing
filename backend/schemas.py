@@ -1,6 +1,6 @@
 """Pydantic request/response schemas."""
-from datetime import datetime, timezone
 import re
+from datetime import datetime, timezone
 from typing import Annotated, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer, field_validator
@@ -176,6 +176,10 @@ class TicketOut(BaseModel):
 # --- Comments ----------------------------------------------------------------
 
 class CommentCreate(BaseModel):
+    body: str = Field(min_length=1)
+
+
+class CommentUpdate(BaseModel):
     body: str = Field(min_length=1)
 
 

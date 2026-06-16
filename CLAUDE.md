@@ -7,6 +7,11 @@
 > `--parent <ticket_id>` when delegating a sub-task (it links the child and makes it
 > self-driving). See `resolver/README.md` → "Delegation / fan-out".
 
+> **Recurring cross-project tasks** (e.g. a security audit you want on every project)
+> can be invoked with a **standard command** — put a `/security-audit` line in the
+> ticket's description and the resolver injects a premade prompt and runs it. See
+> `resolver/README.md` → "Standard commands" and the library in `resolver/commands/`.
+
 When asked to file a review, create a ticket in **Stingray Tickets** via its REST API.
 
 - **Endpoint:** `POST $STINGRAY_URL/api/tickets`

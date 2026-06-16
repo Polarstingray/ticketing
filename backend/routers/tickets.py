@@ -74,40 +74,47 @@ def list_tickets(
     created_by: Optional[int] = Query(default=None),
     priority: Optional[TicketPriority] = Query(default=None),
     tag: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
     archived: Optional[bool] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    q = db.query(Ticket)
+    query = db.query(Ticket)
     # Non-admins may only see tickets they created or are assigned to;
     # code_review tickets embed private source in code_blocks.
     if not is_admin(user):
-        q = q.filter(or_(Ticket.created_by == user.id, Ticket.assigned_to == user.id))
+        query = query.filter(or_(Ticket.created_by == user.id, Ticket.assigned_to == user.id))
     if status is not None:
-        q = q.filter(Ticket.status == status.value)
+        query = query.filter(Ticket.status == status.value)
     if type is not None:
-        q = q.filter(Ticket.type == type.value)
+        query = query.filter(Ticket.type == type.value)
     if assigned_to is not None:
-        q = q.filter(Ticket.assigned_to == assigned_to)
+        query = query.filter(Ticket.assigned_to == assigned_to)
     if created_by is not None:
-        q = q.filter(Ticket.created_by == created_by)
+        query = query.filter(Ticket.created_by == created_by)
     if priority is not None:
-        q = q.filter(Ticket.priority == priority.value)
+        query = query.filter(Ticket.priority == priority.value)
     # Archived tickets are hidden by default; pass archived=true for the archive view.
     if archived is None:
-        q = q.filter(Ticket.archived == False)  # noqa: E712
+        query = query.filter(Ticket.archived == False)  # noqa: E712
     else:
-        q = q.filter(Ticket.archived == archived)
+        query = query.filter(Ticket.archived == archived)
     if tag is not None:
         # tags are stored as a JSON text array (e.g. '["auth", "urgent"]'); match the
         # quoted token in SQL so the filter composes with LIMIT/OFFSET. This is a
         # substring match, so a tag that is a substring of another could over-match —
         # acceptable for our exact-token usage.
-        q = q.filter(Ticket.tags.like(f'%"{tag}"%'))
+        query = query.filter(Ticket.tags.like(f'%"{tag}"%'))
+    # Free-text search over title/description; ignore an empty/whitespace-only term.
+    if q is not None and q.strip():
+        term = q.strip()
+        query = query.filter(
+            or_(Ticket.title.ilike(f"%{term}%"), Ticket.description.ilike(f"%{term}%"))
+        )
 
-    total = q.count()
+    total = query.count()
     items = (
-        q.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
+        query.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
     )
     return PaginatedTickets(items=items, total=total, limit=limit, offset=offset)
 

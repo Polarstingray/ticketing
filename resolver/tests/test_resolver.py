@@ -1017,7 +1017,7 @@ def _review_ticket(**over):
 
 def test_process_routes_code_review_to_review_not_plan(fake_cfg, monkeypatch):
     called = {}
-    monkeypatch.setattr(rt, "do_review", lambda c, cl, t, r, want_fix: called.update(review=True, want_fix=want_fix))
+    monkeypatch.setattr(rt, "do_review", lambda c, cl, t, r, want_fix, cmd=None: called.update(review=True, want_fix=want_fix))
     monkeypatch.setattr(rt, "do_plan", lambda *a, **k: called.update(plan=True))
     rt.process(fake_cfg, FakeClient(), _review_ticket(), dry_run=False)
     assert called.get("review") and "plan" not in called
@@ -1026,7 +1026,7 @@ def test_process_routes_code_review_to_review_not_plan(fake_cfg, monkeypatch):
 
 def test_process_code_review_fix_tag_sets_want_fix(fake_cfg, monkeypatch):
     called = {}
-    monkeypatch.setattr(rt, "do_review", lambda c, cl, t, r, want_fix: called.update(want_fix=want_fix))
+    monkeypatch.setattr(rt, "do_review", lambda c, cl, t, r, want_fix, cmd=None: called.update(want_fix=want_fix))
     rt.process(fake_cfg, FakeClient(), _review_ticket(tags=["repo:x", "fix"]), dry_run=False)
     assert called.get("want_fix") is True
 
@@ -1036,7 +1036,7 @@ def test_process_code_review_without_repo_tag_still_reviews(fake_cfg, monkeypatc
     # carries code_blocks — it must reach do_review with repo=None, not be rejected.
     seen = {}
     monkeypatch.setattr(rt, "do_review",
-                        lambda c, cl, t, r, want_fix: seen.update(repo=r, want_fix=want_fix))
+                        lambda c, cl, t, r, want_fix, cmd=None: seen.update(repo=r, want_fix=want_fix))
     ticket = _review_ticket(tags=[], code_blocks=[
         {"filename": "a.py", "language": "python", "line_start": 1, "line_end": 2, "content": "x"}])
     client = FakeClient()
@@ -1110,7 +1110,7 @@ def test_process_does_not_escalate_delegated_subtask(fake_cfg, monkeypatch):
 def test_process_does_not_escalate_when_disabled(fake_cfg, monkeypatch):
     fake_cfg.escalate_to_user_id = 0   # disabled
     called = {}
-    monkeypatch.setattr(rt, "do_plan", lambda c, cl, t, r, notes: called.update(plan=True))
+    monkeypatch.setattr(rt, "do_plan", lambda c, cl, t, r, notes, cmd=None: called.update(plan=True))
     ticket = {"id": 81, "type": "task", "title": "x", "priority": "critical",
               "tags": ["repo:x"], "status": "open", "created_by": 9}
     rt.process(fake_cfg, FakeClient(), ticket, dry_run=False)
@@ -1130,7 +1130,7 @@ def test_process_does_not_escalate_midflight(fake_cfg, monkeypatch):
 
 def test_process_task_ticket_still_plans(fake_cfg, monkeypatch):
     called = {}
-    monkeypatch.setattr(rt, "do_plan", lambda c, cl, t, r, notes: called.update(plan=True))
+    monkeypatch.setattr(rt, "do_plan", lambda c, cl, t, r, notes, cmd=None: called.update(plan=True))
     monkeypatch.setattr(rt, "do_review", lambda *a, **k: called.update(review=True))
     rt.process(fake_cfg, FakeClient(), _review_ticket(type="task"), dry_run=False)
     assert called.get("plan") and "review" not in called
@@ -2211,7 +2211,7 @@ def test_process_retries_after_quota_backoff_window(fake_cfg, monkeypatch):
     # Window elapsed: strip the backoff tag and resume the preserved phase.
     fake_cfg.quota_backoff_minutes = 60
     seen = []
-    monkeypatch.setattr(rt, "do_plan", lambda cfg, client, ticket, repo, notes: seen.append("replan"))
+    monkeypatch.setattr(rt, "do_plan", lambda cfg, client, ticket, repo, notes, cmd=None: seen.append("replan"))
     client = FakeClient([_backoff_comment(120)])
     ticket = {"id": 14, "tags": ["repo:x", rt.TAG_PLANNING, rt.TAG_QUOTA_BACKOFF],
               "status": "open", "created_by": 9}
@@ -2301,7 +2301,7 @@ def test_dispatch_routes_delegate_when_enabled(fake_cfg, monkeypatch):
     fake_cfg.workers = [{"id": 3, "name": "open", "desc": ""}]
     called = {}
     monkeypatch.setattr(rt, "do_delegate",
-                        lambda cfg, client, ticket, repo: called.setdefault("delegate", ticket["id"]))
+                        lambda cfg, client, ticket, repo, cmd=None: called.setdefault("delegate", ticket["id"]))
     monkeypatch.setattr(rt, "do_plan",
                         lambda *a, **k: called.setdefault("plan", True))
     monkeypatch.setattr(rt, "handle_ticket_directives", lambda *a, **k: None)
