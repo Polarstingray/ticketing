@@ -37,6 +37,8 @@ def test_adds_missing_columns():
 
         assert "session_version" in _columns(engine, "users")
         assert "archived" in _columns(engine, "tickets")
+        # The resolver-bot trust flag is added to legacy users tables.
+        assert "is_resolver_bot" in _columns(engine, "users")
         # The settings panel's table is created (idempotently) by a migration too.
         assert "notification_preferences" in inspect(engine).get_table_names()
     finally:

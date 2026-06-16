@@ -37,6 +37,7 @@ from pathlib import Path
 
 import agents
 import audit
+import commands
 import file_ticket
 from config import Config, RepoNotAllowed, RepoNotFound
 from stingray import StingrayClient
@@ -71,6 +72,7 @@ VERIFY_FAIL_MARKER = "⚠️ **Tests failing**"
 QUOTA_BACKOFF_MARKER = "⏳ Quota backoff"
 DELEGATE_MARKER = "🧭 **Delegated**"
 DELEGATE_OFF_MARKER = "ℹ️ Delegation not enabled"
+UNKNOWN_CMD_MARKER = "ℹ️ Unknown command"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Per-event audit truncation, set from config at sweep start (see main()).
@@ -330,9 +332,9 @@ def _directive_parser() -> _DirectiveParser:
 def body_is_directive_only(ticket: dict) -> bool:
     """True when the ticket description is nothing but `/ticket` directive line(s)
     (and whitespace) — i.e. a pure filing request with no real work to plan."""
-    nonempty = [l.strip() for l in (ticket.get("description") or "").splitlines() if l.strip()]
+    nonempty = [ln.strip() for ln in (ticket.get("description") or "").splitlines() if ln.strip()]
     return bool(nonempty) and all(
-        l == "/ticket" or l.startswith("/ticket ") for l in nonempty
+        ln == "/ticket" or ln.startswith("/ticket ") for ln in nonempty
     )
 
 
@@ -1316,10 +1318,30 @@ def _files_mentioned_in_plan(plan: str, repo: Path, limit: int = 20) -> list[str
     return out
 
 
-def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
+def command_block(command: "commands.Command | None") -> list[str]:
+    """Render a standard command's premade prompt as the primary-objective
+    section injected ahead of the ticket's own title/description. Empty list
+    when the ticket invokes no command — so the prompt is byte-identical to a
+    non-command run."""
+    if command is None:
+        return []
+    return [
+        f'This ticket invokes the standard "{command.name}" command. Treat the '
+        "following as the primary objective:",
+        "",
+        command.body,
+        "",
+        "The ticket's own title/description below add specifics or scope — honor them.",
+        "",
+    ]
+
+
+def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None,
+                command: "commands.Command | None" = None) -> str:
     p = [
         f"You are resolving Stingray ticket #{ticket['id']} in the repository at {repo}.",
         "",
+        *command_block(command),
         f"Title: {ticket['title']}",
         f"Priority: {ticket.get('priority')}",
         "Description:",
@@ -1353,7 +1375,8 @@ def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None) -> str:
 def implement_prompt(ticket: dict, repo: Path, plan: str | None,
                      reviewer_notes: str | None = None,
                      main_repo: "Path | None" = None,
-                     verify_feedback: str | None = None) -> str:
+                     verify_feedback: str | None = None,
+                     command: "commands.Command | None" = None) -> str:
     # The plan/reviewer notes were written against the main checkout and carry its
     # absolute paths; reanchor them to this worktree so the agent doesn't follow
     # them out of the sandbox and edit the real tree. main_repo defaults to None
@@ -1435,6 +1458,7 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
             "",
         ]
     p += [
+        *command_block(command),
         "Original ticket:",
         f"Title: {ticket['title']}",
         "Description:",
@@ -1446,7 +1470,8 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
     return "\n".join(x for x in p if x is not None)
 
 
-def review_prompt(ticket: dict, repo: Path | None, want_fix: bool) -> str:
+def review_prompt(ticket: dict, repo: Path | None, want_fix: bool,
+                  command: "commands.Command | None" = None) -> str:
     # repo is None for a code_review filed without a `repo:` tag (and no
     # DEFAULT_REPO): there's no checkout to explore, so the review works purely
     # off the embedded code_blocks.
@@ -1455,6 +1480,7 @@ def review_prompt(ticket: dict, repo: Path | None, want_fix: bool) -> str:
     p = [
         header,
         "",
+        *command_block(command),
         f"Title: {ticket['title']}",
         f"Priority: {ticket.get('priority')}",
         "Description:",
@@ -1504,10 +1530,14 @@ def _render_roster(cfg: Config) -> str:
     return "\n".join(lines)
 
 
-def orchestrate_prompt(ticket: dict, repo: Path, cfg: Config) -> str:
+def orchestrate_prompt(ticket: dict, repo: Path, cfg: Config,
+                       command: "commands.Command | None" = None) -> str:
     """Prompt for a delegation run: audit the repo read-only, then decompose the work
     into self-contained sub-tasks and file each (assigned to a chosen resolver) via
-    file_ticket.py --parent. The agent makes no code edits and opens no PRs."""
+    file_ticket.py --parent. The agent makes no code edits and opens no PRs.
+
+    When the ticket invokes a standard command (e.g. `/security-audit`), its premade
+    prompt becomes the audit objective the lead decomposes into sub-tasks."""
     tid = ticket["id"]
     filer = f"{sys.executable} {HERE / 'file_ticket.py'}"
     p = [
@@ -1516,6 +1546,7 @@ def orchestrate_prompt(ticket: dict, repo: Path, cfg: Config) -> str:
         "to carry out this ticket, then DECOMPOSE the work into independent sub-tasks and",
         "DELEGATE each to another resolver by filing it as a Stingray ticket.",
         "",
+        *command_block(command),
         "This is an explicitly sanctioned, autonomous workflow: you do NOT need human",
         "approval to create or assign these sub-tasks — the human reviews the resulting",
         "PRs. Filing and assigning the sub-tasks IS the deliverable for this run. Do NOT",
@@ -1541,7 +1572,7 @@ def orchestrate_prompt(ticket: dict, repo: Path, cfg: Config) -> str:
         "Keep each sub-task SELF-CONTAINED and scoped to ONE fix, with a clear title and a",
         "description naming the file(s) and the change so the assignee can act without",
         "more context. Route heavy / multi-file / refactor work to a capable resolver and",
-        f"cheap mechanical single-file fixes to a cheaper one. File at most",
+        "cheap mechanical single-file fixes to a cheaper one. File at most",
         f"{cfg.max_delegations} sub-task(s); only those clearly warranted by the ticket —",
         "quality over quantity.",
         "",
@@ -1559,7 +1590,8 @@ def orchestrate_prompt(ticket: dict, repo: Path, cfg: Config) -> str:
 
 # --- phase handlers ------------------------------------------------------
 def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
-            revise_notes: str | None) -> None:
+            revise_notes: str | None,
+            command: "commands.Command | None" = None) -> None:
     # Ack first, then claim: a transient failure posting the ack shouldn't leave
     # the ticket claimed (resolver:planning) but silent.
     agent_label = agents.get_runner(cfg.agent).label
@@ -1572,7 +1604,7 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{ts}.log"
     ok, result = run_agent_tracked(cfg, client, ticket,
-                                   plan_prompt(ticket, repo, revise_notes), repo, "plan", log_path)
+                                   plan_prompt(ticket, repo, revise_notes, command), repo, "plan", log_path)
     if not ok:
         if _is_quota_failure(result):
             quota_backoff(cfg, client, ticket, TAG_PLANNING, result)
@@ -1603,7 +1635,7 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                 rts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
                 r_log = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{rts}.log"
                 ok, result = run_agent_tracked(cfg, client, ticket,
-                    plan_prompt(ticket, repo, notes), repo, "plan", r_log)
+                    plan_prompt(ticket, repo, notes, command), repo, "plan", r_log)
                 if not ok:
                     if _is_quota_failure(result):
                         quota_backoff(cfg, client, ticket, TAG_PLANNING, result)
@@ -1664,7 +1696,8 @@ def _run_verify(cfg: Config, wt: Path) -> tuple[bool, str]:
 
 
 def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
-                 plan: str | None, reviewer_notes: str | None = None) -> None:
+                 plan: str | None, reviewer_notes: str | None = None,
+                 command: "commands.Command | None" = None) -> None:
     set_state(client, ticket, [TAG_IMPLEMENTING])
     agent_label = agents.get_runner(cfg.agent).label
     client.add_comment(ticket["id"], f"🔧 {agent_label} is implementing this — working on a "
@@ -1711,7 +1744,8 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         dirty_before = _tracked_dirty(repo)
         ok, summary = run_agent_tracked(
             cfg, client, ticket,
-            implement_prompt(ticket, wt, plan, reviewer_notes, main_repo=repo),
+            implement_prompt(ticket, wt, plan, reviewer_notes, main_repo=repo,
+                             command=command),
             wt, "implement", log_path)
         escaped = _tracked_dirty(repo) - dirty_before
         if escaped:
@@ -1842,7 +1876,8 @@ def _delegation_rollup(client: StingrayClient, cfg: Config, filed: list[int],
     return "\n".join(lines)
 
 
-def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path | None") -> None:
+def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path | None",
+                command: "commands.Command | None" = None) -> None:
     """Lead/orchestration run: audit the repo read-only, file one self-driving
     (`dangerous`) sub-task per issue assigned to a chosen resolver, post a roll-up,
     and hand the ticket back to its creator. Makes no code changes and no PR."""
@@ -1864,7 +1899,7 @@ def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path |
         log_path = cfg.logs_dir / f"ticket-{tid}-delegate-{ts}.log"
         dirty_before = _tracked_dirty(repo)
         ok, summary = run_agent_tracked(
-            cfg, client, ticket, orchestrate_prompt(ticket, wt, cfg), wt, "delegate", log_path)
+            cfg, client, ticket, orchestrate_prompt(ticket, wt, cfg, command), wt, "delegate", log_path)
         escaped = _tracked_dirty(repo) - dirty_before
         if escaped:
             _handle_escape(repo, escaped, ticket)
@@ -2049,7 +2084,7 @@ def run_critique(cfg, client: StingrayClient, ticket: dict, plan: str,
 
 
 def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | None,
-              want_fix: bool) -> None:
+              want_fix: bool, command: "commands.Command | None" = None) -> None:
     """Resolve a `code_review` ticket by actually reviewing it (read-only) and
     posting findings — no PR, no edits. With the `fix` tag, the findings double as
     a plan and the ticket routes into the normal implement gate.
@@ -2079,7 +2114,7 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
           + (" (+fix)" if want_fix else ""))
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-review-{ts}.log"
-    prompt = review_prompt(ticket, repo, want_fix)
+    prompt = review_prompt(ticket, repo, want_fix, command)
     # Surface the review as an AgentRun too (#56), uniformly for either backend: a
     # _RUN_USAGE sink collects whatever _emit_token_usage records (single-shot fills
     # it from the API response; the agent path from its runner) and we POST once.
@@ -2289,9 +2324,32 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     tags = resolver_tags(ticket)
     dangerous = TAG_DANGEROUS in ticket.get("tags", [])
     status = ticket.get("status")
+
+    # Fetch comments once and derive everything from the single list (B7).
+    comments = client.list_comments(tid)
+
+    # Standard command: a `/<name>` line in the body/comments invokes a premade
+    # prompt (commands/<name>.md) that becomes the ticket's objective. Detected
+    # deterministically (no model in the loop), re-derived from the immutable body
+    # each sweep so it survives the plan -> /approve -> implement handoff with no
+    # extra state. A `code_review`-type command makes even a `task` ticket route
+    # into the read-only review lifecycle.
+    command, unknown_cmd = commands.detect_command(ticket, comments, cfg.bot_user_id)
+    if unknown_cmd and not any(
+            UNKNOWN_CMD_MARKER in (c.get("body") or "") for c in comments):
+        avail = commands.available_commands()
+        listing = ("\n".join(f"- `/{n}`" for n in avail)
+                   if avail else "_(no commands are defined)_")
+        if not dry_run:
+            client.add_comment(tid, f"{UNKNOWN_CMD_MARKER} — `/{unknown_cmd}` is not a "
+                f"known standard command, so I'm handling this ticket normally. "
+                f"Available commands:\n\n{listing}")
+        log(f"#{tid}: unknown command /{unknown_cmd}")
+
     # A code_review ticket carries its own code_blocks, so it can be reviewed with
     # no repo at all; plan/implement still require a checkout to edit.
-    is_review = ticket.get("type") == "code_review"
+    is_review = ticket.get("type") == "code_review" or (
+        command is not None and command.type == "code_review")
 
     # Resolve & sandbox-check the target repo up front.
     repo_named = bool((repo_name_of(ticket) or cfg.default_repo or "").strip())
@@ -2316,9 +2374,6 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
         else:
             fail(client, ticket, f"Cannot resolve target repo: {e}")
         return
-
-    # Fetch comments once and derive everything from the single list (B7).
-    comments = client.list_comments(tid)
 
     # Quota backoff: skip tickets that are waiting for an API quota window to reset.
     # Once the window expires, strip the tag and fall through to normal dispatch —
@@ -2444,15 +2499,16 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
             return
 
     if action == "delegate":
-        do_delegate(cfg, client, ticket, repo)
+        do_delegate(cfg, client, ticket, repo, command)
     elif action == "plan":
-        do_plan(cfg, client, ticket, repo, kw["revise_notes"])
+        do_plan(cfg, client, ticket, repo, kw["revise_notes"], command)
     elif action == "replan":
-        do_plan(cfg, client, ticket, repo, kw["revise_notes"])
+        do_plan(cfg, client, ticket, repo, kw["revise_notes"], command)
     elif action == "review":
-        do_review(cfg, client, ticket, repo, kw["want_fix"])
+        do_review(cfg, client, ticket, repo, kw["want_fix"], command)
     elif action in ("implement", "rework"):
-        do_implement(cfg, client, ticket, repo, kw.get("plan"), kw.get("reviewer_notes"))
+        do_implement(cfg, client, ticket, repo, kw.get("plan"), kw.get("reviewer_notes"),
+                     command)
     elif action == "nudge":
         client.add_comment(tid, "I need an explicit `/approve` or `/revise <notes>` comment "
                                 "to proceed. Re-assign to me with one of those.")

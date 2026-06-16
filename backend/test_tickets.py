@@ -104,6 +104,35 @@ def test_pagination_limit_bounds_enforced(client, admin_key):
     assert client.get("/tickets?limit=999", headers={"X-API-Key": admin_key}).status_code == 422
 
 
+# --- Full-text search (q) ----------------------------------------------------
+
+def test_search_matches_title_and_description_case_insensitive(client, admin_key):
+    title_hit = _create(client, admin_key, title="Payment gateway timeout", priority="high")
+    desc_hit = _create(
+        client, admin_key, title="Unrelated", description="intermittent GATEWAY error", priority="low"
+    )
+    miss = _create(client, admin_key, title="Totally different", description="nothing here")
+
+    # Lowercase query matches both the title and the (uppercase) description term.
+    r = client.get("/tickets?q=gateway", headers={"X-API-Key": admin_key})
+    assert r.status_code == 200
+    ids = [x["id"] for x in r.json()["items"]]
+    assert title_hit["id"] in ids
+    assert desc_hit["id"] in ids
+    assert miss["id"] not in ids
+
+    # q composes (ANDs) with another filter: same term, narrowed to priority=high.
+    r = client.get("/tickets?q=gateway&priority=high", headers={"X-API-Key": admin_key})
+    ids = [x["id"] for x in r.json()["items"]]
+    assert title_hit["id"] in ids
+    assert desc_hit["id"] not in ids
+
+    # Whitespace-only q is ignored (acts as no search filter).
+    r = client.get("/tickets?q=%20%20", headers={"X-API-Key": admin_key})
+    ids = [x["id"] for x in r.json()["items"]]
+    assert miss["id"] in ids
+
+
 # --- IDOR / visibility -------------------------------------------------------
 
 def test_member_cannot_view_others_ticket(client, admin_key, make_user):
@@ -229,6 +258,29 @@ def test_resolver_bot_can_set_reserved_tags(client, make_user, monkeypatch):
     import control_tags
     bot = make_user()
     monkeypatch.setattr(control_tags, "RESOLVER_BOT_USER_IDS", frozenset({bot.id}))
+    t = _create(client, bot.key, tags=["repo:app", "claude:planning"])
+    assert _tags(t) == {"repo:app", "claude:planning"}
+    r = client.patch(
+        f"/tickets/{t['id']}", json={"tags": ["repo:app", "claude:implementing"]},
+        headers={"X-API-Key": bot.key},
+    )
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"repo:app", "claude:implementing"}
+
+
+def test_resolver_bot_flag_can_set_reserved_tags(client, make_user):
+    """A non-admin user flagged is_resolver_bot may manage control tags even when
+    RESOLVER_BOT_USER_IDS is empty — the DB flag is authoritative, so there is no
+    RESOLVER_BOT_USER_ID env to keep in sync."""
+    from database import SessionLocal
+    from models import User
+    bot = make_user()
+    db = SessionLocal()
+    try:
+        db.query(User).filter(User.id == bot.id).update({"is_resolver_bot": True})
+        db.commit()
+    finally:
+        db.close()
     t = _create(client, bot.key, tags=["repo:app", "claude:planning"])
     assert _tags(t) == {"repo:app", "claude:planning"}
     r = client.patch(

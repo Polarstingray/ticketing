@@ -36,9 +36,10 @@ for p in (RESOLVER_DIR, EVAL_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from harness import backend as backend_mod    # noqa: E402
-from harness import driver, report, score     # noqa: E402
-from stingray import StingrayClient           # noqa: E402
+from harness import backend as backend_mod  # noqa: E402
+from harness import driver, report, score  # noqa: E402
+
+from stingray import StingrayClient  # noqa: E402
 
 
 def load_cases(cases_dir: Path, only: list[str] | None) -> list[dict]:

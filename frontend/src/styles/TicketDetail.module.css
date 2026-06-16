@@ -145,6 +145,17 @@
 .commentBody {
   white-space: pre-wrap;
 }
+.commentControls {
+  display: flex;
+  gap: 10px;
+}
+.commentControls button {
+  width: auto;
+  font-size: 12px;
+}
+.commentEdit textarea {
+  width: 100%;
+}
 
 .commentForm {
   margin-top: 8px;
@@ -152,6 +163,7 @@
 .commentActions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   margin-top: 8px;
 }
 .commentActions button {

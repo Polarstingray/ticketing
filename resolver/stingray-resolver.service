@@ -1,0 +1,21 @@
+# Stingray resolver — oneshot sweep, driven by stingray-resolver.timer.
+#
+# Install:
+#   sed "s#/opt/ticketing/resolver#$(pwd)#" stingray-resolver.service \
+#     | sudo tee /etc/systemd/system/stingray-resolver.service
+#   sudo cp stingray-resolver.timer /etc/systemd/system/
+#   sudo systemctl enable --now stingray-resolver.timer
+#
+# Edit User= to the account that owns the checkout and the agent CLI's credentials.
+[Unit]
+Description=Stingray ticket resolver (one sweep)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=stingray
+WorkingDirectory=/opt/ticketing/resolver
+ExecStart=/opt/ticketing/resolver/.venv/bin/python /opt/ticketing/resolver/resolve_tickets.py
+# Don't let a wedged sweep run forever; the timer will start the next one.
+TimeoutStartSec=3600

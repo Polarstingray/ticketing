@@ -10,6 +10,28 @@ It talks only to the existing Stingray REST API (see `../api_guide.md`) — no
 backend changes. All code execution happens in an isolated `git worktree`, so
 your live checkouts under `PROJECTS_ROOT` are never touched.
 
+> **This is an optional, advanced add-on.** The core Stingray ticketing app runs
+> fine without it. Enable the resolver only if you want tickets resolved by an AI
+> agent.
+
+## Prerequisites
+
+Before you start, you need:
+
+- **A coding-agent CLI on the resolver host.** Built-in support: [Claude Code]
+  (`claude`) or [opencode] (model-agnostic, e.g. Gemini). Set which one with
+  `RESOLVER_AGENT`. Register others in `agents.py`.
+- **Provider API keys / credentials for that CLI**, configured the way the CLI
+  expects (e.g. logged into Claude Code, or an `opencode` provider key). **These
+  are yours to supply, and agent runs cost money** — the resolver does not manage
+  billing or keys.
+- **`git` and (for PRs) the `gh` CLI authenticated** on the host, plus the repos
+  you want it to touch checked out under `PROJECTS_ROOT`.
+- **Python 3.12+.**
+
+[Claude Code]: https://docs.claude.com/en/docs/claude-code
+[opencode]: https://opencode.ai
+
 ## Flow
 
 ```
@@ -33,6 +55,27 @@ implements and opens a PR directly (one review gate instead of two).
 
 ## One-time setup
 
+### Recommended: automatic provisioning
+
+The root [`install.sh`](../install.sh) can do all of this for you. With
+`SEED_RESOLVER_BOT=true` (the installer sets it), the backend seeds the bot user,
+mints its API key, and the installer writes `resolver/.env` for you. Then just
+build the venv:
+
+```bash
+cd resolver
+./setup.sh                       # creates .venv, installs deps, sanity-checks .env
+```
+
+The seeded bot is flagged `is_resolver_bot` in the database, so it can manage the
+reserved control tags **without** you matching any `RESOLVER_BOT_USER_ID` between
+the backend and the resolver.
+
+### Manual alternative
+
+If you're attaching a resolver to an existing instance (no fresh seed), create the
+bot yourself:
+
 1. **Create the bot user** (as an admin):
    ```bash
    curl -s -X POST "$STINGRAY_URL/api/users" -H "X-API-Key: $ADMIN_KEY" \
@@ -40,7 +83,9 @@ implements and opens a PR directly (one review gate instead of two).
      -d '{"username":"claude-bot","display_name":"Claude","email":"claude-bot@localhost","password":"<random>","role":"member"}'
    ```
    Note the returned `id` — that's `RESOLVER_BOT_USER_ID`. A `member` (not admin)
-   is correct: it can only modify tickets assigned to it (least privilege).
+   is correct: it can only modify tickets assigned to it (least privilege). For it
+   to manage control tags, either set the backend's `RESOLVER_BOT_USER_ID` to this
+   id, or set the user's `is_resolver_bot` flag.
 
 2. **Mint its API key:**
    ```bash
@@ -53,7 +98,7 @@ implements and opens a PR directly (one review gate instead of two).
    ```bash
    cd resolver
    cp .env.example .env          # fill in URL, key, bot id, PROJECTS_ROOT
-   python -m venv .venv && .venv/bin/pip install -r requirements.txt
+   ./setup.sh                    # or: python -m venv .venv && .venv/bin/pip install -r requirements.txt
    ```
    `STINGRAY_URL` for the resolver should point at the backend directly (no
    `/api` prefix) — e.g. `http://localhost:8000`.
@@ -170,6 +215,44 @@ next sweep:
   planning it. Put `/ticket` in a comment (or alongside real content) if you want the
   host ticket worked on too.
 
+## Standard commands (premade prompts)
+
+For tasks you want run the same way across **all** your projects — a security audit
+is the canonical example — the resolver ships a library of named, premade prompts.
+Invoke one by putting a single slash-command line in a bot-assigned ticket's
+**description or a comment**:
+
+```
+/security-audit
+
+Focus on the new auth router.
+```
+
+When the resolver sees `/security-audit`, it loads `commands/security-audit.md`,
+injects its body as the ticket's **primary objective**, and runs the normal
+lifecycle. The ticket's own title/description (the "Focus on…" line) are kept as
+supporting context. Detection is deterministic — the model never decides which
+command ran — mirroring the `/ticket` directive above.
+
+- **One library, every project.** Commands live in `resolver/commands/*.md`, so a
+  recurring cross-project task is defined once. The seeded set includes
+  `/security-audit`, `/dependency-audit`, and `/test-coverage`.
+- **`type` controls routing.** A command's frontmatter `type: code_review` runs the
+  read-only review lifecycle (findings posted, no PR) — even on a ticket whose own
+  type is `task`. `type: task` (the default) runs plan → approve → implement.
+- **Composes with `delegate`.** A ticket tagged `delegate` that also invokes a
+  command (e.g. `/security-audit` + `delegate`) has the lead resolver audit the repo
+  using the premade prompt, then fan out one fix sub-task per finding to other
+  resolvers (see "Delegation / fan-out"). The command's body drives the audit; the
+  sub-tasks are filed as `task` tickets regardless of the command's `type`.
+- **Unknown command?** If a `/foo` line matches no template, the resolver posts a
+  one-time comment listing the available commands and handles the ticket normally.
+- **Authoring:** see `commands/README.md` for the file format. Drop in a new
+  `<name>.md` and it's picked up on the next sweep.
+
+`/ticket`, `/approve`, `/revise`, and `/review` are reserved control verbs and are
+never treated as standard commands.
+
 ## Running it
 
 ```bash
@@ -178,14 +261,28 @@ next sweep:
 .venv/bin/python resolve_tickets.py --ticket 42  # just ticket 42
 ```
 
-Cron (under `flock` so sweeps never overlap):
+**Cron** (under `flock` so sweeps never overlap). Set `RESOLVER_DIR` to wherever
+you checked the repo out — no absolute paths to hand-edit:
 
 ```cron
+RESOLVER_DIR=/opt/ticketing/resolver
 */10 * * * * /usr/bin/flock -n /tmp/stingray-resolver.lock \
-  /home/penguin/projects/ticketing/resolver/.venv/bin/python \
-  /home/penguin/projects/ticketing/resolver/resolve_tickets.py \
-  >> /home/penguin/projects/ticketing/resolver/logs/cron.log 2>&1
+  $RESOLVER_DIR/.venv/bin/python $RESOLVER_DIR/resolve_tickets.py \
+  >> $RESOLVER_DIR/logs/cron.log 2>&1
 ```
+
+**systemd** (a service + timer that does the same thing) — copy the templates and
+fill in the two `User=`/`WorkingDirectory=` placeholders:
+
+```bash
+sed "s#/opt/ticketing/resolver#$(pwd)#" stingray-resolver.service \
+  | sudo tee /etc/systemd/system/stingray-resolver.service
+sudo cp stingray-resolver.timer /etc/systemd/system/
+sudo systemctl enable --now stingray-resolver.timer
+```
+
+See [`stingray-resolver.service`](./stingray-resolver.service) and
+[`stingray-resolver.timer`](./stingray-resolver.timer).
 
 Bound a busy sweep with `--max-tickets N` (or `MAX_TICKETS_PER_SWEEP`) so one
 tick does a fixed amount of work under the lock and the next tick continues.
@@ -198,7 +295,7 @@ own bot user and route tickets by assignment. No shared coordination is needed �
 the `flock` only serializes sweeps **on one machine**, and distinct bot ids mean
 two resolvers never see the same ticket.
 
-This covers both shapes the homelab might take:
+This covers both common shapes:
 
 - **2–3 stations:** one bot user per station (`claude-bot-vm1`, `claude-bot-vm2`,
   …); assign a ticket to whichever station should do it.

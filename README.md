@@ -1,12 +1,28 @@
 # 🐟 Stingray Tickets
 
-A lightweight, self-hosted ticketing system for a homelab. Two use cases:
+[![CI](https://github.com/Polarstingray/ticketing/actions/workflows/ci.yml/badge.svg)](https://github.com/Polarstingray/ticketing/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Release](https://img.shields.io/github/v/release/Polarstingray/ticketing?sort=semver)](https://github.com/Polarstingray/ticketing/releases)
 
-1. **Code review tickets** — created programmatically by Claude Code after finishing a task,
-   attaching code snapshots (file paths, line ranges, content) and review notes.
-2. **General task tickets** — created by family members for household task assignment.
+A lightweight, **self-hosted ticketing system** you can stand up in one command — plus an
+**optional AI resolver** that can pick up tickets, write the code, and open pull requests.
 
-FastAPI + SQLite backend, React/Vite frontend, deployed via Docker Compose behind Traefik.
+- **Core ticketing app (everyone):** issues/tasks and code-review tickets with status,
+  priority, assignees, tags, due dates, comments, an activity trail, in-app + email
+  notifications, and multi-key API access. Browser auth via signed-cookie sessions;
+  programmatic auth via `X-API-Key`.
+- **AI resolver (optional, advanced):** a headless agent in [`resolver/`](./resolver) that
+  drives a coding-agent CLI (Claude Code or opencode) against your repos to plan, implement,
+  review, and PR bot-assigned tickets. It needs an agent CLI and your own provider API keys,
+  so it's strictly opt-in — the core app runs fine without it.
+
+A common topology: run Stingray on a server (behind a reverse proxy/HTTPS) and run the
+optional resolver on a dev station that pulls bot-assigned tickets and opens PRs.
+
+## Screenshots
+
+> _Add images under `docs/img/` and reference them here, e.g._
+> `![Ticket list](docs/img/tickets.png)` _and_ `![Ticket detail](docs/img/ticket-detail.png)`.
 
 ## Stack
 
@@ -18,6 +34,15 @@ FastAPI + SQLite backend, React/Vite frontend, deployed via Docker Compose behin
 
 ## Quick start (Docker)
 
+One command — generates a `SESSION_SECRET`, prompts for an admin password, brings
+everything up, and (optionally) provisions the resolver bot and writes `resolver/.env`:
+
+```bash
+./install.sh
+```
+
+Or do it by hand:
+
 ```bash
 cp .env.example .env        # then edit ADMIN_* and SESSION_SECRET
 docker compose up --build
@@ -26,17 +51,33 @@ docker compose up --build
 - Frontend: http://localhost:3000
 - Log in with the `ADMIN_USERNAME` / `ADMIN_PASSWORD` you set in `.env`.
 
+`make help` lists common tasks (`make up`, `make down`, `make test`, `make lint`).
+
 The initial admin is created automatically on first run (only when the database is empty),
 along with a first API key named `default` whose plaintext is printed **once** in the backend
 logs — copy it then. Manage keys afterwards on the **Profile** page.
+
+### Run from prebuilt images (no source build)
+
+Tagged releases publish images to GHCR, so you can run without building from source — just
+`docker-compose.images.yml` and a `.env`:
+
+```bash
+curl -O https://raw.githubusercontent.com/Polarstingray/ticketing/main/docker-compose.images.yml
+curl -O https://raw.githubusercontent.com/Polarstingray/ticketing/main/.env.example
+cp .env.example .env        # edit ADMIN_* and SESSION_SECRET
+docker compose -f docker-compose.images.yml up -d
+```
+
+Pin a version with `STINGRAY_TAG` (defaults to `latest`), e.g. `STINGRAY_TAG=v1.0.0`.
 
 To put it behind Traefik, see [`traefik-labels.md`](./traefik-labels.md).
 
 ## Deploying to a server (production)
 
-The typical homelab topology: **Stingray runs on a server** (behind Traefik/HTTPS), and
-**resolver(s) run on dev stations** (see [`resolver/`](./resolver)) that pull bot-assigned
-tickets and open PRs. To harden a real deployment, set these in `.env`:
+A common topology: **Stingray runs on a server** (behind a reverse proxy with HTTPS, e.g.
+Traefik), and the optional **resolver(s) run on dev stations** (see [`resolver/`](./resolver))
+that pull bot-assigned tickets and open PRs. To harden a real deployment, set these in `.env`:
 
 | Var | Production value |
 |-----|------------------|
@@ -50,6 +91,20 @@ tickets and open PRs. To harden a real deployment, set these in `.env`:
 cp .env.example .env        # set APP_ENV=production, a real SESSION_SECRET, etc.
 docker compose up --build -d
 ```
+
+### Scaling
+
+The default deployment is a **single backend worker**, which is plenty for a team and keeps
+things simple (SQLite + in-process rate limiting). If you scale to multiple workers or
+replicas, the per-IP rate-limit/throttle counters must be shared, or each process counts
+independently. Point them at Redis with one env var — no code change:
+
+```bash
+RATELIMIT_STORAGE_URI=redis://redis:6379
+```
+
+For heavy concurrent write load you'd also want to move off SQLite; that's a larger change
+and not currently provided.
 
 ### Backups
 
@@ -135,14 +190,27 @@ create tickets.
 ticketing/
   backend/      FastAPI app, models, auth, routers, migrations, backup
   frontend/     React/Vite SPA
-  resolver/     headless agent that resolves bot-assigned tickets on dev stations
-  docker-compose.yml
+  resolver/     optional headless agent that resolves bot-assigned tickets
+  install.sh    guided one-command setup
+  Makefile      common tasks (make help)
+  docker-compose.yml          build-from-source compose
+  docker-compose.images.yml   run prebuilt GHCR images
   traefik-labels.md
   api_guide.md
   .env.example
 ```
 
-## Out of scope (for now)
+## Out of scope
 
-File attachments beyond code blocks, OAuth/SSO, multi-workspace, per-user notification
-preferences.
+Single-organization by design: no multi-tenancy/workspaces, OAuth/SSO, or billing. File
+attachments are limited to code blocks.
+
+## Contributing
+
+Issues and PRs welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for dev setup and
+conventions, and [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Release history is in
+[`CHANGELOG.md`](./CHANGELOG.md).
+
+## License
+
+[MIT](./LICENSE) © Polarstingray. SPDX-License-Identifier: `MIT`.

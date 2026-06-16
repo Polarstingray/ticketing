@@ -25,7 +25,10 @@ export default function TicketList() {
     assigned_to: "",
     priority: "",
     archived: "",
+    q: "",
   });
+  // Search box is debounced into filters.q so each keystroke doesn't refetch.
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -38,6 +41,14 @@ export default function TicketList() {
       .then(setUsers)
       .catch(() => setUsers([]));
   }, []);
+
+  // Debounce the search box (~300ms) into the q filter, which triggers a refetch.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setFilters((f) => (f.q === search ? f : { ...f, q: search }));
+    }, 300);
+    return () => clearTimeout(id);
+  }, [search]);
 
   // (Re)load the first page whenever filters change.
   useEffect(() => {
@@ -85,6 +96,12 @@ export default function TicketList() {
       </div>
 
       <div className={styles.filters}>
+        <input
+          type="search"
+          placeholder="Search title or description…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
         <select value={filters.type} onChange={(e) => setFilter("type", e.target.value)}>
           <option value="">All types</option>
           {TYPES.map((t) => (
@@ -132,15 +149,17 @@ export default function TicketList() {
           Show archived
         </label>
         <button
-          onClick={() =>
+          onClick={() => {
+            setSearch("");
             setFilters({
               status: "",
               type: "",
               assigned_to: "",
               priority: "",
               archived: "",
-            })
-          }
+              q: "",
+            });
+          }}
         >
           Clear
         </button>
@@ -150,7 +169,16 @@ export default function TicketList() {
       {loading ? (
         <div className="muted">Loading…</div>
       ) : tickets.length === 0 ? (
-        <div className={`card ${styles.empty}`}>No tickets match these filters.</div>
+        Object.values(filters).some((v) => v) ? (
+          <div className={`card ${styles.empty}`}>No tickets match these filters.</div>
+        ) : (
+          <div className={`card ${styles.empty}`}>
+            <p>No tickets yet.</p>
+            <p>
+              <Link to="/tickets/new">Create your first ticket</Link> to get started.
+            </p>
+          </div>
+        )
       ) : (
         <div className={styles.list}>
           {tickets.map((t) => (
@@ -175,6 +203,15 @@ export default function TicketList() {
                   <PriorityBadge priority={t.priority} />
                   <StatusBadge status={t.status} />
                   <span className={styles.assignee}>{userName(t.assigned_to)}</span>
+                  {t.due_date && (
+                    <span className={styles.date}>Due {formatDate(t.due_date)}</span>
+                  )}
+                  {t.due_date &&
+                    new Date(t.due_date) < new Date() &&
+                    t.status !== "resolved" &&
+                    t.status !== "closed" && (
+                      <span className={styles.tag}>Overdue</span>
+                    )}
                   <span className={styles.date}>{formatDate(t.updated_at)}</span>
                 </div>
               </div>

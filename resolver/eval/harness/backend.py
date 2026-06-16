@@ -58,10 +58,10 @@ def _seed(db_path: Path) -> tuple[str, int, str, int]:
         sys.path.insert(0, str(BACKEND_DIR))
 
     # Import only after DATABASE_PATH is set (database.py reads it at import time).
-    from database import Base, engine, SessionLocal  # type: ignore
-    from migrations import run_migrations            # type: ignore
     from auth import generate_api_key, hash_api_key, hash_password  # type: ignore
-    from models import ApiKey, User, UserRole        # type: ignore
+    from database import Base, SessionLocal, engine  # type: ignore
+    from migrations import run_migrations  # type: ignore
+    from models import ApiKey, User, UserRole  # type: ignore
 
     Base.metadata.create_all(bind=engine)
     run_migrations(engine)

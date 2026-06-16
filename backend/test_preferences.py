@@ -6,8 +6,8 @@ overrides; that should_notify gates the in-app path; and per-user scoping.
 """
 from types import SimpleNamespace
 
-from inbox import should_notify
 from database import SessionLocal
+from inbox import should_notify
 from models import NotificationPreference, Ticket, User
 from notifications import notify_comment_email
 

@@ -64,6 +64,12 @@ def _migrate_notification_preferences(engine: Engine) -> None:
     NotificationPreference.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_is_resolver_bot(engine: Engine) -> None:
+    """users.is_resolver_bot — added so the resolver bot is recognized as a
+    trusted control-tag identity by a DB flag instead of a synced env id."""
+    _add_column(engine, "users", "is_resolver_bot", "BOOLEAN NOT NULL DEFAULT 0")
+
+
 def _migrate_agent_runs(engine: Engine) -> None:
     """agent_runs table — added with resolver token-usage surfacing (#56).
 
@@ -79,6 +85,7 @@ MIGRATIONS = [
     _migrate_session_version,
     _migrate_archived,
     _migrate_notification_preferences,
+    _migrate_is_resolver_bot,
     _migrate_agent_runs,
 ]
 
