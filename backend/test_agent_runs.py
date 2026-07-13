@@ -160,6 +160,53 @@ def test_assignee_can_post(client, admin_key, make_user):
     assert r.status_code == 201, r.text
 
 
+def test_cost_rollup_sums_own_and_children(client, admin_key):
+    """The rollup sums a ticket's own runs plus those of any child tagged
+    parent:<id>, exposing the whole delegation fan-out's spend."""
+    parent = _create(client, admin_key)
+    # Parent's own run.
+    client.post(
+        f"/tickets/{parent['id']}/agent-runs",
+        json=_run_payload(phase="plan", cost_usd=0.10, input_tokens=100),
+        headers={"X-API-Key": admin_key},
+    )
+    # A delegated child carries a parent:<id> tag (admin may set reserved tags).
+    child = _create(client, admin_key, tags=[f"parent:{parent['id']}"])
+    client.post(
+        f"/tickets/{child['id']}/agent-runs",
+        json=_run_payload(phase="implement", cost_usd=0.25, input_tokens=400),
+        headers={"X-API-Key": admin_key},
+    )
+
+    r = client.get(f"/tickets/{parent['id']}/cost-rollup", headers={"X-API-Key": admin_key})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["own"]["cost_usd"] == 0.10
+    assert body["own"]["input_tokens"] == 100
+    child_ids = [c["ticket_id"] for c in body["children"]]
+    assert child["id"] in child_ids
+    assert body["total"]["cost_usd"] == 0.35
+    assert body["total"]["input_tokens"] == 500
+    assert body["total"]["run_count"] == 2
+
+
+def test_cost_rollup_no_runs_is_zero(client, admin_key):
+    t = _create(client, admin_key)
+    body = client.get(
+        f"/tickets/{t['id']}/cost-rollup", headers={"X-API-Key": admin_key}
+    ).json()
+    assert body["own"]["cost_usd"] == 0.0
+    assert body["total"]["run_count"] == 0
+    assert body["children"] == []
+
+
+def test_cost_rollup_hidden_from_outsider(client, admin_key, make_user):
+    t = _create(client, admin_key)
+    outsider = make_user()
+    r = client.get(f"/tickets/{t['id']}/cost-rollup", headers={"X-API-Key": outsider.key})
+    assert r.status_code == 404
+
+
 def test_delete_ticket_cascades_runs(client, admin_key):
     t = _create(client, admin_key)
     r = client.post(
