@@ -1,0 +1,59 @@
+import { test, expect } from "@playwright/test";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Screenshots land in docs/img/ so the README can embed the real UI.
+const IMG = path.resolve(__dirname, "../../docs/img");
+
+// A stable title so we can find the ticket again on the list page.
+const TITLE = "Batch the activity-feed queries";
+
+test("log in, create a ticket, comment, and resolve it", async ({ page }) => {
+  // --- Login -----------------------------------------------------------------
+  await page.goto("/login");
+  await expect(page.getByText("Stingray Tickets")).toBeVisible();
+  await page.screenshot({ path: path.join(IMG, "login.png") });
+
+  await page.locator('input[autocomplete="username"]').fill("admin");
+  await page.locator('input[type="password"]').fill("adminpass123");
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  await expect(page).toHaveURL(/\/tickets$/);
+  await expect(page.getByRole("heading", { name: /^Tickets/ })).toBeVisible();
+
+  // --- Create a ticket -------------------------------------------------------
+  await page.getByRole("button", { name: "New ticket" }).click();
+  await expect(page).toHaveURL(/\/tickets\/new$/);
+
+  await page.locator("form input[required]").fill(TITLE);
+  await page.getByPlaceholder(/Describe the task/).fill(
+    "Listing activity issues one query per row. Please batch it."
+  );
+  // Labels aren't associated with inputs, so target the select by its sibling label.
+  await page.locator('label:text-is("Priority") + select').selectOption("high");
+  await page.getByRole("button", { name: "Create ticket" }).click();
+
+  // Lands on the new ticket's detail page.
+  await expect(page.getByRole("heading", { name: new RegExp(TITLE) })).toBeVisible();
+  await expect(page.getByText("High")).toBeVisible();
+
+  // --- Comment ---------------------------------------------------------------
+  await page.getByPlaceholder("Add a comment…").fill("On it — batching with a single IN query.");
+  await page.getByRole("button", { name: "Comment" }).click();
+  await expect(page.getByText("On it — batching with a single IN query.")).toBeVisible();
+
+  // --- Resolve ---------------------------------------------------------------
+  await page.locator('label:text-is("Status") + select').selectOption("resolved");
+  await expect(page.locator('label:text-is("Status") + select')).toHaveValue("resolved");
+  // Status change is recorded on the activity trail.
+  await expect(page.getByText(/changed status .* to Resolved/)).toBeVisible();
+
+  await page.screenshot({ path: path.join(IMG, "ticket-detail.png"), fullPage: true });
+
+  // --- Back to the list ------------------------------------------------------
+  await page.getByRole("link", { name: /Tickets/ }).first().click();
+  await expect(page).toHaveURL(/\/tickets$/);
+  await expect(page.getByText(TITLE)).toBeVisible();
+  await page.screenshot({ path: path.join(IMG, "tickets.png"), fullPage: true });
+});
