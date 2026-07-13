@@ -141,6 +141,13 @@ class StingrayClient:
             "POST", f"/tickets/{ticket_id}/agent-runs", json=fields
         ).json()
 
+    def list_agent_runs(self, ticket_id: int) -> list[dict]:
+        return self._request("GET", f"/tickets/{ticket_id}/agent-runs").json()
+
+    def cost_rollup(self, ticket_id: int) -> dict:
+        """A ticket's own agent-run cost plus that of its delegated children."""
+        return self._request("GET", f"/tickets/{ticket_id}/cost-rollup").json()
+
     # --- comments --------------------------------------------------------
     def list_comments(self, ticket_id: int) -> list[dict]:
         return self._request("GET", f"/tickets/{ticket_id}/comments").json()

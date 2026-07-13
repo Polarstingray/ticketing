@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { PriorityBadge, StatusBadge, TypeBadge } from "../components/Badges";
@@ -29,6 +29,9 @@ export default function TicketDetail() {
   const [comments, setComments] = useState([]);
   const [activity, setActivity] = useState([]);
   const [agentRuns, setAgentRuns] = useState([]);
+  // Delegation cost rollup: this ticket's cost plus every child's. Only surfaced
+  // when the ticket actually has delegated children.
+  const [rollup, setRollup] = useState(null);
   const [commentBody, setCommentBody] = useState("");
   const [editingCommentId, setEditingCommentId] = useState(null);
   const [editingBody, setEditingBody] = useState("");
@@ -44,16 +47,19 @@ export default function TicketDetail() {
   async function load() {
     setLoading(true);
     try {
-      const [t, c, a, runs] = await Promise.all([
+      const [t, c, a, runs, roll] = await Promise.all([
         api.getTicket(id),
         api.listComments(id),
         api.listActivity(id),
         api.listAgentRuns(id),
+        // Non-critical: a rollup failure must not blank the whole page.
+        api.costRollup(id).catch(() => null),
       ]);
       setTicket(t);
       setComments(c);
       setActivity(a);
       setAgentRuns(runs);
+      setRollup(roll);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -414,6 +420,41 @@ export default function TicketDetail() {
                 </li>
               ))}
             </ul>
+          )}
+          {rollup && rollup.children.length > 0 && (
+            <div className={styles.rollup}>
+              <div className={styles.rollupHead}>
+                Delegation total ({rollup.children.length} sub-task
+                {rollup.children.length === 1 ? "" : "s"}):{" "}
+                <strong>{formatUsd(rollup.total.cost_usd)}</strong>{" "}
+                <span className="muted">
+                  ({formatTokens(
+                    rollup.total.input_tokens + rollup.total.output_tokens
+                  )}{" "}
+                  tok across {rollup.total.run_count} run
+                  {rollup.total.run_count === 1 ? "" : "s"})
+                </span>
+              </div>
+              <ul className={styles.runs}>
+                {rollup.children.map((c) => (
+                  <li key={c.ticket_id} className={styles.runItem}>
+                    <Link to={`/tickets/${c.ticket_id}`} className={styles.runPhase}>
+                      #{c.ticket_id}
+                    </Link>
+                    <span className={styles.runMeta}>{c.title}</span>
+                    <span className={styles.runTokens}>
+                      {formatTokens(
+                        c.totals.input_tokens + c.totals.output_tokens
+                      )}{" "}
+                      tok
+                    </span>
+                    <span className={styles.runCost}>
+                      {formatUsd(c.totals.cost_usd)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
         {error && <div className="error">{error}</div>}

@@ -19,11 +19,14 @@ from schemas import (
     ApiKeyCreate,
     ApiKeyCreated,
     ApiKeyMeta,
+    ResolverBotCreate,
+    ResolverBotCreated,
     UserCreate,
     UserPublic,
     UserSelf,
     UserUpdate,
 )
+from seed import create_resolver_bot
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -66,6 +69,35 @@ def create_user(
         raise HTTPException(status_code=400, detail="Username already exists")
     db.refresh(user)
     return user
+
+
+@router.post(
+    "/resolver-bot",
+    response_model=ResolverBotCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_resolver_bot_user(
+    payload: ResolverBotCreate,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """Provision a resolver bot + its first API key in one admin call.
+
+    The returned `api_key` is shown exactly once. Used by the `resolver` CLI's
+    `bot create` so operators don't hand-create bots or sync `RESOLVER_BOT_USER_ID`.
+    """
+    if db.query(User).filter(User.username == payload.username).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+    bot, raw_key = create_resolver_bot(
+        db, payload.username, display_name=payload.display_name, email=payload.email
+    )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Username already exists")
+    db.refresh(bot)
+    return ResolverBotCreated(user_id=bot.id, username=bot.username, api_key=raw_key)
 
 
 @router.patch("/{user_id}", response_model=UserSelf)

@@ -214,6 +214,15 @@
   flex-direction: column;
   gap: 8px;
 }
+.rollup {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.rollupHead {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
 .runItem {
   display: flex;
   align-items: center;
