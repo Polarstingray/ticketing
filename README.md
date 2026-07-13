@@ -21,8 +21,24 @@ optional resolver on a dev station that pulls bot-assigned tickets and opens PRs
 
 ## Screenshots
 
-> _Add images under `docs/img/` and reference them here, e.g._
-> `![Ticket list](docs/img/tickets.png)` _and_ `![Ticket detail](docs/img/ticket-detail.png)`.
+| Ticket list | Ticket detail |
+|---|---|
+| [![Ticket list](docs/img/tickets.png)](docs/img/tickets.png) | [![Ticket detail](docs/img/ticket-detail.png)](docs/img/ticket-detail.png) |
+
+A filterable backlog with color-coded priority/status badges, tags and assignees;
+each ticket page carries highlighted code snapshots, threaded comments, an activity
+trail, and — when the AI resolver has worked it — a costed timeline of agent runs.
+
+> Screenshots are generated from the real UI by the Playwright E2E test
+> (`docs/img/` — see [Testing](#testing)), not hand-drawn mockups.
+
+## How it works
+
+- **[docs/architecture.md](docs/architecture.md)** — system topology, module map, and
+  the ticket lifecycle (with diagrams).
+- **[docs/resolver-design.md](docs/resolver-design.md)** — a design write-up of the
+  optional AI resolver: the plan→implement→verify→PR loop, worktree isolation,
+  provider-agnostic runners, cost accounting, and the eval harness.
 
 ## Stack
 
@@ -170,6 +186,28 @@ ADMIN_USERNAME=admin ADMIN_PASSWORD=adminpass ADMIN_EMAIL=admin@example.com \
 cd frontend
 npm install
 npm run dev      # http://localhost:5173, proxies /api -> localhost:8000
+```
+
+## Testing
+
+The CI matrix runs on every push (see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)):
+
+- **Backend** — `pytest` (`backend/`), ~100 tests covering auth, RBAC, tickets,
+  comments, notifications, migrations, and backups.
+- **Resolver** — `pytest` (`resolver/`), 200+ tests of the agent loop with the CLI
+  and API mocked (lifecycle, tag gating, path-allowlist, delegation, backoff).
+- **Frontend unit/component** — Vitest + Testing Library (`frontend/src`), covering
+  permission gating, list filtering/debounce, and pure helpers.
+- **Frontend E2E** — Playwright (`frontend/e2e`) drives a real browser through the
+  full stack (login → create → comment → resolve) and captures the README
+  screenshots as a byproduct.
+
+```bash
+cd backend   && python -m pytest -q
+cd resolver  && python -m pytest -q
+cd frontend  && npm test                       # unit/component
+cd frontend  && npm run test:e2e:install        # one-time: fetch the browser
+cd frontend  && npm run test:e2e                # end-to-end (boots backend + Vite itself)
 ```
 
 ## API
