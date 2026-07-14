@@ -18,7 +18,6 @@ const backendEnv = {
 
 export default defineConfig({
   testDir: "./e2e",
-  globalSetup: "./e2e/global-setup.js",
   timeout: 30_000,
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
@@ -35,9 +34,13 @@ export default defineConfig({
   // another app squatting on :8000 — doesn't collide with the E2E run.
   webServer: [
     {
-      // Prefer the local venv; fall back to a system python (CI installs deps there).
+      // Wipe any prior E2E DB *before* the server opens it (a clean run each time),
+      // then start uvicorn. Doing the wipe here — not in a globalSetup — avoids
+      // unlinking the SQLite file out from under a running server (which SQLite
+      // reports as "attempt to write a readonly database"). Prefer the local venv;
+      // fall back to a system python (CI installs deps there).
       command:
-        'sh -c "cd ../backend && { [ -x .venv/bin/python ] && .venv/bin/python -m uvicorn main:app --port 8123 || python -m uvicorn main:app --port 8123; }"',
+        'sh -c "rm -f $DATABASE_PATH $DATABASE_PATH-journal $DATABASE_PATH-wal; cd ../backend && { [ -x .venv/bin/python ] && .venv/bin/python -m uvicorn main:app --port 8123 || python -m uvicorn main:app --port 8123; }"',
       url: "http://localhost:8123/health",
       reuseExistingServer: false,
       timeout: 60_000,
