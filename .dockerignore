@@ -1,0 +1,21 @@
+# The demo image (deploy/demo/Dockerfile) builds from the repo root, so keep the
+# context lean. The per-service builds have their own .dockerignore files.
+.git
+.github
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/test-results
+frontend/playwright-report
+frontend/playwright/.cache
+frontend/e2e/.data
+backend/.venv
+backend/data
+resolver/.venv
+resolver/.env
+**/__pycache__
+**/*.pyc
+.pytest_cache
+docs
+*.md
+.env

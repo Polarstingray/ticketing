@@ -114,6 +114,32 @@ cp .env.example .env        # set APP_ENV=production, a real SESSION_SECRET, etc
 docker compose up --build -d
 ```
 
+### Public demo instance
+
+[`deploy/demo/`](./deploy/demo) hosts a throwaway instance anyone can click around in.
+It differs from a real deployment in three deliberate ways:
+
+- **One container.** Hosts like Fly.io deploy a single image per app, so
+  [`deploy/demo/Dockerfile`](./deploy/demo/Dockerfile) collapses the two compose services
+  into one: nginx serves the built SPA and proxies `/api` to uvicorn on loopback.
+- **Ephemeral, self-resetting data.** No volume is mounted, and the entrypoint runs
+  `seed_demo --force` on boot — so every restart (including a scale-to-zero cold start)
+  repaints the same illustrative dataset. That *is* the reset mechanism for a public
+  instance, and the published login is throwaway by design.
+- **No resolver.** The AI resolver needs provider API keys and push access to a real repo,
+  so it isn't deployed; the demo ships illustrative agent-run data instead.
+
+```bash
+# Build/run it locally exactly as the host will (context is the repo root):
+docker build -f deploy/demo/Dockerfile -t stingray-demo .
+docker run --rm -p 3000:3000 stingray-demo        # http://localhost:3000 — admin / demopass123
+
+# Or ship it to Fly.io:
+fly launch --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile \
+           --no-deploy --copy-config --name stingray-tickets-demo
+fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
+```
+
 ### Scaling
 
 The default deployment is a **single backend worker**, which is plenty for a team and keeps
