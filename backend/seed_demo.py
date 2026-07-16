@@ -39,6 +39,7 @@ from models import (
     Ticket,
     TicketPriority,
     TicketStatus,
+    TicketType,
     User,
     UserRole,
 )
@@ -118,7 +119,7 @@ def seed_demo(db: Session) -> None:
         return t
 
     t_login = ticket(
-        type="bug", title="Login form rejects valid emails with a '+' alias",
+        type=TicketType.task.value, title="Login form rejects valid emails with a '+' alias",
         description="Users with Gmail '+' aliases (e.g. me+stingray@gmail.com) "
                     "can't sign in — the client-side regex is too strict.",
         status=TicketStatus.in_review.value, priority=TicketPriority.high.value,
@@ -131,7 +132,7 @@ def seed_demo(db: Session) -> None:
               {"from": "open", "to": "in_review"}, _ago(hours=6))
 
     ticket(
-        type="feature", title="Add CSV export to the ticket list",
+        type=TicketType.task.value, title="Add CSV export to the ticket list",
         description="Let admins export the current filtered view as CSV for "
                     "reporting. Should respect the active status/assignee filters.",
         status=TicketStatus.open.value, priority=TicketPriority.medium.value,
@@ -139,7 +140,7 @@ def seed_demo(db: Session) -> None:
         created_at=_ago(days=2, hours=5), updated_at=_ago(days=2, hours=5))
 
     ticket(
-        type="task", title="Upgrade to SQLAlchemy 2.0 typing style",
+        type=TicketType.task.value, title="Upgrade to SQLAlchemy 2.0 typing style",
         description="Migrate the models to the 2.0 Mapped[]/mapped_column API for "
                     "better type-checking. Low risk, incremental.",
         status=TicketStatus.open.value, priority=TicketPriority.low.value,
@@ -147,7 +148,7 @@ def seed_demo(db: Session) -> None:
         created_at=_ago(days=5), updated_at=_ago(days=5))
 
     ticket(
-        type="bug", title="Notification badge count lags after marking all read",
+        type=TicketType.task.value, title="Notification badge count lags after marking all read",
         description="The unread badge keeps its old number until a full reload. "
                     "Likely a stale query cache after the bulk mark-read call.",
         status=TicketStatus.resolved.value, priority=TicketPriority.medium.value,
@@ -156,7 +157,7 @@ def seed_demo(db: Session) -> None:
 
     # ---- CENTERPIECE: a code-review ticket the resolver actually worked --------
     hero = ticket(
-        type="code_review",
+        type=TicketType.code_review.value,
         title="Review: batch the activity-feed queries (fix N+1)",
         description="The ticket detail page loads each activity's actor with a "
                     "separate query (classic N+1). Batch them with a single IN "
@@ -225,7 +226,7 @@ def seed_demo(db: Session) -> None:
 
     # ---- Delegated fan-out: a parent that decomposed into a sub-task ------------
     parent = ticket(
-        type="task",
+        type=TicketType.task.value,
         title="Harden the resolver's git-worktree isolation",
         description="Audit and fix the ways an agent run could escape its worktree "
                     "(absolute paths in plans, symlink traversal). Decompose as "
@@ -246,7 +247,7 @@ def seed_demo(db: Session) -> None:
          started=p_plan, dur_s=140)
 
     child = ticket(
-        type="code_review",
+        type=TicketType.code_review.value,
         title="Reject absolute paths in resolver plan file lists",
         description="Sub-task of #{}: the implement phase must refuse plan entries "
                     "that resolve outside the worktree root.".format(parent.id),
