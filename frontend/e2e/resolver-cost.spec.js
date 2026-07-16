@@ -7,6 +7,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const IMG = path.resolve(__dirname, "../../docs/img");
 
 const TITLE = "Review: batch the activity-feed queries (fix N+1)";
+// The title carries regex-special chars ("(", "+"), so escape before RegExp.
+const TITLE_RE = new RegExp(TITLE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 
 // The per-phase agent runs a resolver would post as it works a ticket. The
 // admin session can write these (the endpoint lets admins backfill runs), so we
@@ -40,7 +42,7 @@ test("resolver cost UI: agent-run timeline and cost badge", async ({ page }) => 
   );
   await page.locator('label:text-is("Priority") + select').selectOption("high");
   await page.getByRole("button", { name: "Create ticket" }).click();
-  await expect(page.getByRole("heading", { name: new RegExp(TITLE) })).toBeVisible();
+  await expect(page.getByRole("heading", { name: TITLE_RE })).toBeVisible();
 
   // The ticket id is the last path segment of the detail URL.
   const ticketId = page.url().split("/").pop();
