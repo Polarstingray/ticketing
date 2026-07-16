@@ -25,9 +25,15 @@ optional resolver on a dev station that pulls bot-assigned tickets and opens PRs
 |---|---|
 | [![Ticket list](docs/img/tickets.png)](docs/img/tickets.png) | [![Ticket detail](docs/img/ticket-detail.png)](docs/img/ticket-detail.png) |
 
+| Resolver cost timeline |
+|---|
+| [![Agent-run cost timeline](docs/img/resolver-cost.png)](docs/img/resolver-cost.png) |
+
 A filterable backlog with color-coded priority/status badges, tags and assignees;
 each ticket page carries highlighted code snapshots, threaded comments, an activity
-trail, and — when the AI resolver has worked it — a costed timeline of agent runs.
+trail, and — when the AI resolver has worked it — a per-phase, costed timeline of
+agent runs (plan → implement → review) with token usage and a rolled-up spend that
+follows the resolver's delegated sub-tasks.
 
 > Screenshots are generated from the real UI by the Playwright E2E test
 > (`docs/img/` — see [Testing](#testing)), not hand-drawn mockups.
@@ -188,6 +194,16 @@ npm install
 npm run dev      # http://localhost:5173, proxies /api -> localhost:8000
 ```
 
+**Demo data** (for a screenshot/walkthrough or a hosted demo — a lived-in board
+with a resolved code-review ticket, its per-phase agent-run cost timeline, and a
+delegated parent→child fan-out):
+
+```bash
+cd backend
+DATABASE_PATH=data/demo.db python -m seed_demo   # login: admin / demopass123
+DATABASE_PATH=data/demo.db uvicorn main:app --port 8000
+```
+
 ## Testing
 
 The CI matrix runs on every push (see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)):
@@ -200,7 +216,8 @@ The CI matrix runs on every push (see [`.github/workflows/ci.yml`](./.github/wor
   permission gating, list filtering/debounce, and pure helpers.
 - **Frontend E2E** — Playwright (`frontend/e2e`) drives a real browser through the
   full stack (login → create → comment → resolve) and captures the README
-  screenshots as a byproduct.
+  screenshots as a byproduct. A second spec seeds a few agent runs through the API
+  and captures the resolver cost timeline.
 
 ```bash
 cd backend   && python -m pytest -q
