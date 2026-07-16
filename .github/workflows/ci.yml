@@ -100,3 +100,11 @@ jobs:
           name: playwright-report
           path: frontend/playwright-report/
           retention-days: 7
+      # The specs render the README screenshots from the real UI; publish them so
+      # they can be refreshed in docs/img/ without a local (Vite) build.
+      - uses: actions/upload-artifact@v4
+        if: ${{ success() }}
+        with:
+          name: ui-screenshots
+          path: docs/img/*.png
+          retention-days: 7
