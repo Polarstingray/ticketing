@@ -34,9 +34,10 @@ test("log in, create a ticket, comment, and resolve it", async ({ page }) => {
   await page.locator('label:text-is("Priority") + select').selectOption("high");
   await page.getByRole("button", { name: "Create ticket" }).click();
 
-  // Lands on the new ticket's detail page.
+  // Lands on the new ticket's detail page. Assert the priority carried through via
+  // the sidebar select's value (unambiguous — "High" also appears as the badge text).
   await expect(page.getByRole("heading", { name: new RegExp(TITLE) })).toBeVisible();
-  await expect(page.getByText("High")).toBeVisible();
+  await expect(page.locator('label:text-is("Priority") + select')).toHaveValue("high");
 
   // --- Comment ---------------------------------------------------------------
   await page.getByPlaceholder("Add a comment…").fill("On it — batching with a single IN query.");
@@ -47,13 +48,13 @@ test("log in, create a ticket, comment, and resolve it", async ({ page }) => {
   await page.locator('label:text-is("Status") + select').selectOption("resolved");
   await expect(page.locator('label:text-is("Status") + select')).toHaveValue("resolved");
   // Status change is recorded on the activity trail.
-  await expect(page.getByText(/changed status .* to Resolved/)).toBeVisible();
+  await expect(page.getByText(/changed status .* to Resolved/).first()).toBeVisible();
 
   await page.screenshot({ path: path.join(IMG, "ticket-detail.png"), fullPage: true });
 
   // --- Back to the list ------------------------------------------------------
   await page.getByRole("link", { name: /Tickets/ }).first().click();
   await expect(page).toHaveURL(/\/tickets$/);
-  await expect(page.getByText(TITLE)).toBeVisible();
+  await expect(page.getByText(TITLE).first()).toBeVisible();
   await page.screenshot({ path: path.join(IMG, "tickets.png"), fullPage: true });
 });
