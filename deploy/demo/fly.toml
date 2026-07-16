@@ -1,9 +1,9 @@
 # Fly.io config for the public demo instance.
 #
-# Deploy from the REPO ROOT (the image needs both backend/ and frontend/):
+# Deploy from the REPO ROOT (the image needs both backend/ and frontend/). `app`
+# below must be globally unique across Fly — rename it (and PUBLIC_BASE_URL) first.
 #
-#   fly launch --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile \
-#              --no-deploy --copy-config --name stingray-tickets-demo
+#   fly apps create stingray-tickets-demo
 #   fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
 #
 # No [mounts] section: the SQLite DB is ephemeral on purpose, so every machine

@@ -134,9 +134,9 @@ It differs from a real deployment in three deliberate ways:
 docker build -f deploy/demo/Dockerfile -t stingray-demo .
 docker run --rm -p 3000:3000 stingray-demo        # http://localhost:3000 — admin / demopass123
 
-# Or ship it to Fly.io:
-fly launch --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile \
-           --no-deploy --copy-config --name stingray-tickets-demo
+# Or ship it to Fly.io. `app`/`PUBLIC_BASE_URL` in fly.toml must be renamed first:
+# the app name has to be globally unique across Fly.
+fly apps create stingray-tickets-demo
 fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
 ```
 
