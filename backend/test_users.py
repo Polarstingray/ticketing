@@ -107,3 +107,49 @@ def test_member_cannot_manage_others_api_keys(client, admin_key, make_user):
 def test_admin_cannot_delete_self(client, admin_key, admin_id):
     r = client.delete(f"/users/{admin_id}", headers={"X-API-Key": admin_key})
     assert r.status_code == 400
+
+
+def test_admin_can_create_resolver_bot(client, admin_key):
+    """The resolver-bot endpoint provisions a flagged member + a usable key in one
+    call. The returned key authenticates and the user shows is_resolver_bot=True."""
+    r = client.post(
+        "/users/resolver-bot",
+        headers={"X-API-Key": admin_key},
+        json={"username": "botA", "display_name": "Bot A"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["username"] == "botA"
+    assert body["api_key"].startswith("sk_")
+
+    # The minted key authenticates.
+    me = client.get("/auth/me", headers={"X-API-Key": body["api_key"]})
+    assert me.status_code == 200
+    assert me.json()["id"] == body["user_id"]
+
+    # The user is flagged as a resolver bot in the admin listing.
+    listed = client.get("/users", headers={"X-API-Key": admin_key}).json()
+    bot = next(u for u in listed if u["id"] == body["user_id"])
+    assert bot["is_resolver_bot"] is True
+    assert bot["role"] == "member"
+
+
+def test_resolver_bot_duplicate_username_rejected(client, admin_key):
+    body = {"username": "botDupe"}
+    assert client.post(
+        "/users/resolver-bot", headers={"X-API-Key": admin_key}, json=body
+    ).status_code == 201
+    again = client.post(
+        "/users/resolver-bot", headers={"X-API-Key": admin_key}, json=body
+    )
+    assert again.status_code == 400
+
+
+def test_member_cannot_create_resolver_bot(client, make_user):
+    member = make_user()
+    r = client.post(
+        "/users/resolver-bot",
+        headers={"X-API-Key": member.key},
+        json={"username": "botX"},
+    )
+    assert r.status_code == 403

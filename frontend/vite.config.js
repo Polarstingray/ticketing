@@ -10,7 +10,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        // Overridable so the E2E stack can point at its own backend port.
+        target: process.env.VITE_PROXY_TARGET || "http://localhost:8000",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ""),
       },
@@ -20,5 +21,8 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: "./src/test/setup.js",
+    // Unit/component tests live under src/; Playwright E2E specs under e2e/ are
+    // run by Playwright, not Vitest.
+    include: ["src/**/*.{test,spec}.{js,jsx}"],
   },
 });

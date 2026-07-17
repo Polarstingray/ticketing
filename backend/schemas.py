@@ -76,6 +76,7 @@ class UserPublic(BaseModel):
     display_name: str
     email: str
     role: UserRole
+    is_resolver_bot: bool = False
     created_at: UTCDateTime
 
 
@@ -100,6 +101,22 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     password: Optional[str] = Field(default=None, min_length=6)
     role: Optional[UserRole] = None  # only honored for admin callers
+
+
+class ResolverBotCreate(BaseModel):
+    """Provision a resolver bot (a least-privilege member flagged
+    ``is_resolver_bot``) plus its first API key in one admin call. Used by the
+    ``resolver`` CLI so operators don't hand-create bots or sync ids."""
+    username: str = Field(min_length=1)
+    display_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+
+class ResolverBotCreated(BaseModel):
+    """Returned exactly once: the new bot's id and its raw API key."""
+    user_id: int
+    username: str
+    api_key: str
 
 
 # --- Auth --------------------------------------------------------------------
@@ -248,6 +265,31 @@ class AgentRunOut(BaseModel):
     started_at: Optional[UTCDateTime] = None
     finished_at: UTCDateTime
     created_at: UTCDateTime
+
+
+class AgentRunTotals(BaseModel):
+    """Summed token usage + cost over a set of agent runs."""
+    cost_usd: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    run_count: int = 0
+
+
+class CostRollupChild(BaseModel):
+    ticket_id: int
+    title: str
+    totals: AgentRunTotals
+
+
+class CostRollup(BaseModel):
+    """A ticket's own agent-run cost plus the cost of every delegated child
+    (tickets tagged ``parent:<id>``), and the combined total."""
+    ticket_id: int
+    own: AgentRunTotals
+    children: List[CostRollupChild]
+    total: AgentRunTotals
 
 
 # --- Notifications -----------------------------------------------------------

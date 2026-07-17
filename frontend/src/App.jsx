@@ -9,6 +9,7 @@ import AdminUsers from "./pages/AdminUsers";
 import Notifications from "./pages/Notifications";
 import Profile from "./pages/Profile";
 import Settings from "./pages/Settings";
+import Guide from "./pages/Guide";
 
 function Protected({ children, adminOnly = false }) {
   const { user, loading } = useAuth();
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/tickets/new" element={<TicketNew />} />
         <Route path="/tickets/:id" element={<TicketDetail />} />
         <Route path="/notifications" element={<Notifications />} />
+        <Route path="/guide" element={<Guide />} />
         <Route path="/profile" element={<Profile />} />
         <Route path="/settings" element={<Settings />} />
         <Route

@@ -37,7 +37,6 @@ TYPES = ("code_review", "task")
 PRIORITIES = ("low", "medium", "high", "critical")
 
 # Delegation control tags (mirrors resolve_tickets.py / backend control_tags.py).
-TAG_DANGEROUS = "dangerous"
 TAG_DELEGATE = "delegate"
 PARENT_PREFIX = "parent:"
 REVIEW_BY_PREFIX = "review-by:"
@@ -139,16 +138,18 @@ def build_payload(args: argparse.Namespace) -> dict:
     # doesn't expose --parent (delegation is filed via the full CLI parser, not /ticket).
     parent = getattr(args, "parent", None)
     if parent is not None:
-        # A delegated sub-task. Make it self-driving (skip the plan-approval gate)
-        # and link it to its parent, but keep it a LEAF: a child may never carry
+        # A delegated sub-task. The `parent:<id>` link makes it self-driving: the
+        # worker that picks it up plans it and lets its review AI auto-approve the
+        # plan (falling back to dangerous, no-plan implement when no review AI is
+        # configured) — see resolve_tickets.do_plan/process. We deliberately do NOT
+        # force `dangerous` here anymore: the old behavior implemented children with
+        # no plan and no review at all. Keep it a LEAF: a child may never carry
         # `delegate`, so it can't fan out further (one level only).
         if TAG_DELEGATE in tags:
             raise ValueError(
                 "a delegated sub-task (--parent) may not be tagged 'delegate' — "
                 "fan-out is one level only"
             )
-        if TAG_DANGEROUS not in tags:
-            tags.append(TAG_DANGEROUS)
         tags.append(f"{PARENT_PREFIX}{parent}")
 
     payload: dict = {
@@ -176,16 +177,16 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--assign", type=user_id, metavar="USER_ID", help="assign to this user id")
     p.add_argument(
         "--parent", type=int, metavar="TICKET_ID",
-        help="file as a delegated sub-task of this ticket: links it (parent:<id>), "
-             "forces the 'dangerous' tag so the assignee implements without a plan "
-             "gate, and forbids re-delegation (one level only)",
+        help="file as a delegated sub-task of this ticket: links it (parent:<id>) so "
+             "the assignee plans it and its review AI auto-approves the plan (with a "
+             "dangerous no-plan fallback when no review AI is configured), and forbids "
+             "re-delegation (one level only)",
     )
     p.add_argument(
         "--code-block", action="append", dest="code_block", metavar="PATH:LANG:START-END",
         help="repeatable; reads the lines from disk (code_review only)",
     )
     p.add_argument("--root", default=".", help="base dir for --code-block paths (default: cwd)")
-    p.add_argument("--cost", type=float, default=0.0, help="cost of ticket creation/delegation")
     p.add_argument("--dry-run", action="store_true", help="print the payload, don't POST")
     return p
 
@@ -242,30 +243,6 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"created ticket #{ticket['id']}: {ticket['title']}")
     print(f"{cfg.stingray_url}/tickets/{ticket['id']}")
-
-    if args.cost > 0.0:
-        logger.debug(f"recording delegation cost {args.cost} for ticket {ticket['id']}")
-        try:
-            client.create_agent_run(
-                ticket_id=ticket['id'],
-                agent=cfg.agent,
-                phase="delegation_cost",
-                model=cfg.agent_model,
-                cost=args.cost,
-                status="completed",
-                token_usage={
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-                started_at=datetime.now(timezone.utc).isoformat(),
-                ended_at=datetime.now(timezone.utc).isoformat(),
-            )
-        except requests.RequestException as exc:
-            print(f"warning: could not record delegation cost: {exc}", file=sys.stderr)
-            # The delegation itself succeeded, so don't fail the overall run.
-            # Just log a warning and continue.
-
     return 0
 
 

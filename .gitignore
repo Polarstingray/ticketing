@@ -13,6 +13,13 @@ node_modules/
 node_modules
 frontend/dist/
 
+# Playwright E2E artifacts (the browser-generated screenshots under docs/img/ are
+# committed intentionally; these are per-run outputs and are not)
+frontend/e2e/.data/
+frontend/test-results/
+frontend/playwright-report/
+frontend/playwright/.cache/
+
 # Env / secrets
 .env
 
@@ -20,3 +27,5 @@ frontend/dist/
 .DS_Store
 
 guide.html
+# Raw Playwright capture; the committed GIF/MP4 are the deliverables.
+docs/video/*.webm

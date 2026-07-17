@@ -2,7 +2,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from activity import record_activity
@@ -25,6 +25,9 @@ from schemas import (
     ActivityOut,
     AgentRunCreate,
     AgentRunOut,
+    AgentRunTotals,
+    CostRollup,
+    CostRollupChild,
     PaginatedTickets,
     TicketCreate,
     TicketOut,
@@ -361,6 +364,68 @@ def list_agent_runs(
         .order_by(AgentRun.started_at.asc().nullslast(), AgentRun.id.asc())
         .all()
     )
+
+
+def _agent_run_totals(db: Session, ticket_ids: list[int]) -> AgentRunTotals:
+    """Sum cost + token usage across every agent run on the given tickets."""
+    if not ticket_ids:
+        return AgentRunTotals()
+    row = (
+        db.query(
+            func.coalesce(func.sum(AgentRun.cost_usd), 0.0),
+            func.coalesce(func.sum(AgentRun.input_tokens), 0),
+            func.coalesce(func.sum(AgentRun.output_tokens), 0),
+            func.coalesce(func.sum(AgentRun.cache_read_tokens), 0),
+            func.coalesce(func.sum(AgentRun.cache_write_tokens), 0),
+            func.count(AgentRun.id),
+        )
+        .filter(AgentRun.ticket_id.in_(ticket_ids))
+        .one()
+    )
+    return AgentRunTotals(
+        cost_usd=float(row[0]),
+        input_tokens=int(row[1]),
+        output_tokens=int(row[2]),
+        cache_read_tokens=int(row[3]),
+        cache_write_tokens=int(row[4]),
+        run_count=int(row[5]),
+    )
+
+
+@router.get("/{ticket_id}/cost-rollup", response_model=CostRollup)
+def cost_rollup(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """This ticket's own agent-run cost plus the cost of every delegated child.
+
+    Children are sub-tasks filed by the resolver carrying a ``parent:<id>`` tag;
+    we sum their runs too so a delegating ticket shows the whole fan-out's spend.
+    """
+    ticket = _get_ticket_or_404(ticket_id, db)
+    # 404 (not 403) so non-members can't probe ticket existence — same as get_ticket.
+    if not can_view_ticket(user, ticket):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
+
+    own = _agent_run_totals(db, [ticket_id])
+    # Same JSON-array substring match the list endpoint uses for tag filtering.
+    children = (
+        db.query(Ticket)
+        .filter(Ticket.tags.like(f'%"parent:{ticket_id}"%'))
+        .order_by(Ticket.id.asc())
+        .all()
+    )
+    child_out = [
+        CostRollupChild(
+            ticket_id=c.id,
+            title=c.title,
+            totals=_agent_run_totals(db, [c.id]),
+        )
+        for c in children
+    ]
+    total = _agent_run_totals(db, [ticket_id] + [c.id for c in children])
+    return CostRollup(ticket_id=ticket_id, own=own, children=child_out, total=total)
 
 
 @router.post("/{ticket_id}/archive", response_model=TicketOut)

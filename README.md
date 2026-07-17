@@ -1,5 +1,6 @@
 # 🐟 Stingray Tickets
 
+[![Live demo](https://img.shields.io/badge/demo-live-2ea44f)](https://stingray-tickets-demo.fly.dev)
 [![CI](https://github.com/Polarstingray/ticketing/actions/workflows/ci.yml/badge.svg)](https://github.com/Polarstingray/ticketing/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Release](https://img.shields.io/github/v/release/Polarstingray/ticketing?sort=semver)](https://github.com/Polarstingray/ticketing/releases)
@@ -19,10 +20,58 @@ A lightweight, **self-hosted ticketing system** you can stand up in one command 
 A common topology: run Stingray on a server (behind a reverse proxy/HTTPS) and run the
 optional resolver on a dev station that pulls bot-assigned tickets and opens PRs.
 
+## Live demo
+
+**[stingray-tickets-demo.fly.dev](https://stingray-tickets-demo.fly.dev)** — sign in as
+`admin` / `demopass123`. The API is browsable too, via live Swagger docs at
+**[/api/docs](https://stingray-tickets-demo.fly.dev/api/docs)**.
+
+Start with **“Review: batch the activity-feed queries”** — a code-review ticket the AI
+resolver worked, showing what each phase of the run cost. Then open **“Harden the
+resolver's git-worktree isolation”** to see cost roll up across the sub-tasks it
+delegated.
+
+> The agent-run data on the demo is **illustrative**: the resolver itself isn't deployed
+> there, since it needs provider API keys and push access to a real repo. Everything else
+> is the real app. The database is wiped and re-seeded on every restart, so poke at it —
+> you can't break anything that won't fix itself.
+
+## Walkthrough
+
+![Walkthrough: the backlog, a resolver-worked ticket's cost timeline, the delegation rollup, and a create → comment → resolve loop](docs/video/walkthrough.gif)
+
+Forty seconds, no narration: sign in → the backlog → a code-review ticket **the AI resolver
+worked**, showing what each phase cost → the **delegation rollup** totalling the spend of
+sub-tasks it fanned out → a human create → comment → resolve loop.
+([Higher-quality MP4](docs/video/walkthrough.mp4) · recorded from the real app by
+[`frontend/scripts/record-walkthrough.mjs`](./frontend/scripts/record-walkthrough.mjs).)
+
 ## Screenshots
 
-> _Add images under `docs/img/` and reference them here, e.g._
-> `![Ticket list](docs/img/tickets.png)` _and_ `![Ticket detail](docs/img/ticket-detail.png)`.
+| Ticket list | Ticket detail |
+|---|---|
+| [![Ticket list](docs/img/tickets.png)](docs/img/tickets.png) | [![Ticket detail](docs/img/ticket-detail.png)](docs/img/ticket-detail.png) |
+
+| Resolver cost timeline |
+|---|
+| [![Agent-run cost timeline](docs/img/resolver-cost.png)](docs/img/resolver-cost.png) |
+
+A filterable backlog with color-coded priority/status badges, tags and assignees;
+each ticket page carries highlighted code snapshots, threaded comments, an activity
+trail, and — when the AI resolver has worked it — a per-phase, costed timeline of
+agent runs (plan → implement → review) with token usage and a rolled-up spend that
+follows the resolver's delegated sub-tasks.
+
+> Screenshots are generated from the real UI by the Playwright E2E test
+> (`docs/img/` — see [Testing](#testing)), not hand-drawn mockups.
+
+## How it works
+
+- **[docs/architecture.md](docs/architecture.md)** — system topology, module map, and
+  the ticket lifecycle (with diagrams).
+- **[docs/resolver-design.md](docs/resolver-design.md)** — a design write-up of the
+  optional AI resolver: the plan→implement→verify→PR loop, worktree isolation,
+  provider-agnostic runners, cost accounting, and the eval harness.
 
 ## Stack
 
@@ -90,6 +139,49 @@ that pull bot-assigned tickets and open PRs. To harden a real deployment, set th
 ```bash
 cp .env.example .env        # set APP_ENV=production, a real SESSION_SECRET, etc.
 docker compose up --build -d
+```
+
+### Public demo instance
+
+[`deploy/demo/`](./deploy/demo) hosts a throwaway instance anyone can click around in.
+It differs from a real deployment in three deliberate ways:
+
+- **One container.** Hosts like Fly.io deploy a single image per app, so
+  [`deploy/demo/Dockerfile`](./deploy/demo/Dockerfile) collapses the two compose services
+  into one: nginx serves the built SPA and proxies `/api` to uvicorn on loopback.
+- **Ephemeral, self-resetting data.** No volume is mounted, and the entrypoint runs
+  `seed_demo --force` on boot — so every restart (including a scale-to-zero cold start)
+  repaints the same illustrative dataset. That *is* the reset mechanism for a public
+  instance, and the published login is throwaway by design.
+- **No resolver.** The AI resolver needs provider API keys and push access to a real repo,
+  so it isn't deployed; the demo ships illustrative agent-run data instead.
+
+```bash
+# Build/run it locally exactly as the host will (context is the repo root):
+docker build -f deploy/demo/Dockerfile -t stingray-demo .
+docker run --rm -p 3000:3000 stingray-demo        # http://localhost:3000 — admin / demopass123
+
+# Or ship it to Fly.io. `app`/`PUBLIC_BASE_URL` in fly.toml must be renamed first:
+# the app name has to be globally unique across Fly.
+fly apps create stingray-tickets-demo
+
+# Required. Session cookies are signed with this; unset, each machine would sign
+# with its own key and the app would appear to log users out at random.
+fly secrets set SESSION_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+
+fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
+
+# Required. The demo's SQLite DB is ephemeral and machine-local, so a second
+# machine would serve a second, divergent dataset.
+fly scale count 1
+```
+
+The walkthrough at the top of this README is recorded from that same container, so it can
+be regenerated whenever the UI changes:
+
+```bash
+docker run -d --name stingray-demo-rec -p 3200:3000 stingray-demo
+cd frontend && node scripts/record-walkthrough.mjs   # -> docs/video/walkthrough.webm
 ```
 
 ### Scaling
@@ -170,6 +262,39 @@ ADMIN_USERNAME=admin ADMIN_PASSWORD=adminpass ADMIN_EMAIL=admin@example.com \
 cd frontend
 npm install
 npm run dev      # http://localhost:5173, proxies /api -> localhost:8000
+```
+
+**Demo data** (for a screenshot/walkthrough or a hosted demo — a lived-in board
+with a resolved code-review ticket, its per-phase agent-run cost timeline, and a
+delegated parent→child fan-out):
+
+```bash
+cd backend
+DATABASE_PATH=data/demo.db python -m seed_demo   # login: admin / demopass123
+DATABASE_PATH=data/demo.db uvicorn main:app --port 8000
+```
+
+## Testing
+
+The CI matrix runs on every push (see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)):
+
+- **Backend** — `pytest` (`backend/`), ~100 tests covering auth, RBAC, tickets,
+  comments, notifications, migrations, and backups.
+- **Resolver** — `pytest` (`resolver/`), 200+ tests of the agent loop with the CLI
+  and API mocked (lifecycle, tag gating, path-allowlist, delegation, backoff).
+- **Frontend unit/component** — Vitest + Testing Library (`frontend/src`), covering
+  permission gating, list filtering/debounce, and pure helpers.
+- **Frontend E2E** — Playwright (`frontend/e2e`) drives a real browser through the
+  full stack (login → create → comment → resolve) and captures the README
+  screenshots as a byproduct. A second spec seeds a few agent runs through the API
+  and captures the resolver cost timeline.
+
+```bash
+cd backend   && python -m pytest -q
+cd resolver  && python -m pytest -q
+cd frontend  && npm test                       # unit/component
+cd frontend  && npm run test:e2e:install        # one-time: fetch the browser
+cd frontend  && npm run test:e2e                # end-to-end (boots backend + Vite itself)
 ```
 
 ## API

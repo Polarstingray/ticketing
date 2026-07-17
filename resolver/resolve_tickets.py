@@ -1594,11 +1594,17 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             command: "commands.Command | None" = None) -> None:
     # Ack first, then claim: a transient failure posting the ack shouldn't leave
     # the ticket claimed (resolver:planning) but silent.
+    # A delegated sub-task (carries a `parent:<id>` tag, which only a trusted bot can
+    # set) is autonomous: instead of handing the plan back for a human `/approve`, its
+    # review AI auto-approves it and we implement straight away. The `parent:` tag is
+    # the security boundary — `resolver:*` tags aren't reserved server-side, so we must
+    # not key autonomy off a forgeable tag.
+    auto_approve = parent_id_of(ticket) is not None
     agent_label = agents.get_runner(cfg.agent).label
     client.add_comment(ticket["id"], f"🔧 {agent_label} is " +
         ("revising the plan" if revise_notes else "planning this ticket") +
-        " — read-only, this can take a few minutes. I'll post the plan and "
-        "reassign it back to you when done.")
+        " — read-only, this can take a few minutes." +
+        ("" if auto_approve else " I'll post the plan and reassign it back to you when done."))
     set_state(client, ticket, [TAG_PLANNING])
     phase("planning", ticket, f"#{ticket['id']}: planning ({'revise' if revise_notes else 'fresh'})")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -1615,7 +1621,10 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     # expensive implement run) sees it. A REVISE verdict re-invokes the planner with
     # the critique notes, up to critique_max_revisions times. Fail-open throughout — a
     # flaky/quota'd critique must never block a produced plan.
+    # `final_verdict` defaults to APPROVE so a disabled/unavailable critique never
+    # blocks a plan (fail-open) — and, for an autonomous child, proceeds to implement.
     critique_summary = ""
+    final_verdict = "APPROVE"
     if _critique_enabled(cfg):
         for rev in range(cfg.critique_max_revisions + 1):
             cts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -1643,9 +1652,34 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                         fail(client, ticket, f"Re-planning after critique failed.\n\n```\n{tail(result)}\n```")
                     return
             else:
+                final_verdict = "REVISE"
                 critique_summary = f"🧭 _Plan critique still flags concerns:_\n\n{notes}"
                 phase("plan-critique-flagged", ticket,
                       f"#{ticket['id']}: critique still flagged after {cfg.critique_max_revisions} revision(s)")
+
+    # Autonomous delegated child: act on the verdict without a human in the loop.
+    if auto_approve:
+        client.add_comment(ticket["id"], f"{PLAN_MARKER} (auto-approved by review AI)\n\n"
+            f"{result}\n\n" + (f"{critique_summary}\n" if critique_summary else ""))
+        if final_verdict == "APPROVE":
+            phase("plan-auto-approved", ticket,
+                  f"#{ticket['id']}: plan auto-approved, implementing")
+            do_implement(cfg, client, ticket, repo, plan=result, command=command)
+        else:
+            # The review AI still flags the plan after every revision — implementing a
+            # contested plan unattended is exactly what we want to avoid, so hand this
+            # child to a human (the review owner) for an explicit /approve or /revise.
+            handback = handback_user(client, ticket)
+            client.add_comment(ticket["id"],
+                f"⚠️ The review AI still flags this plan after {cfg.critique_max_revisions} "
+                "revision(s), so I'm handing it to you. Reply `/approve` (and re-assign to "
+                "me) to implement anyway, or `/revise <notes>` to adjust.")
+            set_state(client, ticket, [TAG_AWAIT_PLAN], status="in_review",
+                      assigned_to=handback)
+            phase("plan-escalated", ticket,
+                  f"#{ticket['id']}: plan flagged by review AI, handed to user {handback}")
+        return
+
     body = (
         f"{PLAN_MARKER} (Stingray resolver)\n\n{result}\n\n"
         + (f"{critique_summary}\n\n" if critique_summary else "")
@@ -2323,6 +2357,9 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     audit.set_ticket(tid)
     tags = resolver_tags(ticket)
     dangerous = TAG_DANGEROUS in ticket.get("tags", [])
+    # A delegated sub-task: autonomous (plan + review-AI auto-approve, or dangerous
+    # fallback). The `parent:<id>` tag is reserved, so this can't be forged by a user.
+    is_child = parent_id_of(ticket) is not None
     status = ticket.get("status")
 
     # Fetch comments once and derive everything from the single list (B7).
@@ -2468,7 +2505,12 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
         action, kw = "replan", {"revise_notes": None}   # retry after a crashed plan run
     elif TAG_REVIEWING in tags:
         action, kw = "review", {"want_fix": want_fix}   # retry after a crashed review run
-    elif TAG_IMPLEMENTING in tags or (dangerous and not is_review):
+    elif TAG_IMPLEMENTING in tags or (dangerous and not is_review) or (
+            is_child and not is_review and not _critique_enabled(cfg)):
+        # Last clause is the dangerous fallback for an autonomous delegated child when
+        # no review AI is configured: with nothing to auto-approve a plan, behave like
+        # the old `dangerous` path and implement directly. A critique-enabled worker
+        # instead falls through to `plan`, where do_plan auto-approves (see above).
         action, kw = "implement", {"plan": find_approved_plan(comments, cfg.bot_user_id)}
     elif is_review:
         # Review a fresh code_review ticket; don't re-review an already-reviewed

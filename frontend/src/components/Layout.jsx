@@ -49,6 +49,9 @@ export default function Layout() {
           <NavLink to="/settings" className={linkClass}>
             Settings
           </NavLink>
+          <NavLink to="/guide" className={linkClass}>
+            Guide
+          </NavLink>
         </nav>
         <div className={styles.userbox}>
           <span className={styles.username}>{user?.display_name}</span>
