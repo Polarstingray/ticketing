@@ -4,7 +4,15 @@
 # below must be globally unique across Fly — rename it (and PUBLIC_BASE_URL) first.
 #
 #   fly apps create stingray-tickets-demo
+#   fly secrets set SESSION_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 #   fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
+#   fly scale count 1     # REQUIRED — see below
+#
+# This demo MUST run on exactly ONE machine. Its SQLite DB is ephemeral and
+# machine-local, so a second machine serves a second, divergent dataset (a ticket
+# created on one is missing from the other). SESSION_SECRET must be set for the
+# same reason cookies are signed with it: it has to be stable across restarts.
+# Fly has no fly.toml key for machine count — `fly scale count 1` is the control.
 #
 # No [mounts] section: the SQLite DB is ephemeral on purpose, so every machine
 # restart repaints a clean dataset (see deploy/demo/entrypoint.sh).
