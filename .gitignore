@@ -27,3 +27,5 @@ frontend/playwright/.cache/
 .DS_Store
 
 guide.html
+# Raw Playwright capture; the committed GIF/MP4 are the deliverables.
+docs/video/*.webm
