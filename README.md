@@ -19,6 +19,16 @@ A lightweight, **self-hosted ticketing system** you can stand up in one command 
 A common topology: run Stingray on a server (behind a reverse proxy/HTTPS) and run the
 optional resolver on a dev station that pulls bot-assigned tickets and opens PRs.
 
+## Walkthrough
+
+![Walkthrough: the backlog, a resolver-worked ticket's cost timeline, the delegation rollup, and a create → comment → resolve loop](docs/video/walkthrough.gif)
+
+Forty seconds, no narration: sign in → the backlog → a code-review ticket **the AI resolver
+worked**, showing what each phase cost → the **delegation rollup** totalling the spend of
+sub-tasks it fanned out → a human create → comment → resolve loop.
+([Higher-quality MP4](docs/video/walkthrough.mp4) · recorded from the real app by
+[`frontend/scripts/record-walkthrough.mjs`](./frontend/scripts/record-walkthrough.mjs).)
+
 ## Screenshots
 
 | Ticket list | Ticket detail |
@@ -138,6 +148,14 @@ docker run --rm -p 3000:3000 stingray-demo        # http://localhost:3000 — ad
 # the app name has to be globally unique across Fly.
 fly apps create stingray-tickets-demo
 fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
+```
+
+The walkthrough at the top of this README is recorded from that same container, so it can
+be regenerated whenever the UI changes:
+
+```bash
+docker run -d --name stingray-demo-rec -p 3200:3000 stingray-demo
+cd frontend && node scripts/record-walkthrough.mjs   # -> docs/video/walkthrough.webm
 ```
 
 ### Scaling
