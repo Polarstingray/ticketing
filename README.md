@@ -147,7 +147,16 @@ docker run --rm -p 3000:3000 stingray-demo        # http://localhost:3000 — ad
 # Or ship it to Fly.io. `app`/`PUBLIC_BASE_URL` in fly.toml must be renamed first:
 # the app name has to be globally unique across Fly.
 fly apps create stingray-tickets-demo
+
+# Required. Session cookies are signed with this; unset, each machine would sign
+# with its own key and the app would appear to log users out at random.
+fly secrets set SESSION_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+
 fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
+
+# Required. The demo's SQLite DB is ephemeral and machine-local, so a second
+# machine would serve a second, divergent dataset.
+fly scale count 1
 ```
 
 The walkthrough at the top of this README is recorded from that same container, so it can

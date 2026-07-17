@@ -9,14 +9,40 @@ set -euo pipefail
 : "${DATABASE_PATH:=/data/demo.db}"
 mkdir -p "$(dirname "$DATABASE_PATH")"
 
-# A throwaway demo has no secret worth persisting. If the host didn't inject one
-# (e.g. `fly secrets set SESSION_SECRET=...`), mint one per boot — APP_ENV=production
-# refuses to start on a default/known value, and sessions simply don't outlive a
-# restart (neither does the data).
+# Session cookies are signed with SESSION_SECRET, so it must be identical across
+# every instance and stable across restarts: a cookie signed with one value is
+# unverifiable with another, and the request silently falls back to "logged out".
+#
+# For a single local container a per-boot random value is fine and convenient. On
+# a real host it is a trap — several machines each mint their own, and a browser
+# round-robining between them appears to randomly log itself out. So on Fly we
+# refuse to boot rather than serve that bug.
 if [ -z "${SESSION_SECRET:-}" ]; then
+  if [ -n "${FLY_APP_NAME:-}" ]; then
+    cat >&2 <<MSG
+[demo] FATAL: SESSION_SECRET is not set.
+
+Session cookies are signed with it. Left unset, every machine would sign with a
+different key — a cookie minted by one machine 401s on the next, so the app
+appears to log users out at random — and every restart would invalidate all
+sessions issued before it.
+
+Set a persistent secret (this restarts the app automatically):
+
+  fly secrets set SESSION_SECRET="\$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" --app $FLY_APP_NAME
+
+Then pin the demo to ONE machine. Each machine keeps its own ephemeral SQLite
+database, so two of them serve two different datasets — a ticket created on one
+is missing from the other:
+
+  fly scale count 1 --app $FLY_APP_NAME
+MSG
+    exit 1
+  fi
   SESSION_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
   export SESSION_SECRET
-  echo "[demo] No SESSION_SECRET provided; generated an ephemeral one for this boot."
+  echo "[demo] No SESSION_SECRET set; generated an ephemeral one for this boot."
+  echo "[demo] Fine for one local container; sessions won't survive a restart."
 fi
 
 # Repaint the illustrative dataset (--force wipes whatever was there). Set
