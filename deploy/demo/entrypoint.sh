@@ -72,10 +72,29 @@ done
 nginx -g 'daemon off;' &
 NGINX_PID=$!
 
-# If either process dies the container should die too, so the host restarts it
-# (rather than leaving a half-up demo serving errors).
-trap 'kill -TERM "$UVICORN_PID" "$NGINX_PID" 2>/dev/null || true' TERM INT
-wait -n "$UVICORN_PID" "$NGINX_PID"
-echo "[demo] A process exited; shutting down." >&2
+# Exit status is load-bearing here. Fly stops an idle machine by sending SIGTERM,
+# and the machine's restart policy is `on-failure` — so exiting non-zero on a
+# *requested* shutdown looks like a crash, flyd boots the machine straight back
+# up, and scale-to-zero never happens (billing the demo as if it ran 24/7).
+#
+# So: a signalled shutdown exits 0. Only a process dying on its own is a failure
+# worth restarting for.
+shutting_down=0
+on_term() {
+  shutting_down=1
+  kill -TERM "$UVICORN_PID" "$NGINX_PID" 2>/dev/null || true
+}
+trap on_term TERM INT
+
+rc=0
+wait -n "$UVICORN_PID" "$NGINX_PID" || rc=$?
+
+if [ "$shutting_down" = "1" ]; then
+  echo "[demo] Shutdown signal received; stopping cleanly."
+  wait 2>/dev/null || true
+  exit 0
+fi
+
+echo "[demo] A process exited unexpectedly (rc=$rc); shutting down." >&2
 kill -TERM "$UVICORN_PID" "$NGINX_PID" 2>/dev/null || true
 exit 1

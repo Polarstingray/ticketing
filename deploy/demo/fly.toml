@@ -37,12 +37,20 @@ primary_region = "iad"
 [http_service]
   internal_port = 3000
   force_https = true
-  # Scale to zero when idle (free-tier friendly). A cold start also re-seeds, so
-  # the demo self-cleans after anyone pokes at it.
+  # Scale to zero when idle. A cold start re-seeds, so the demo self-cleans after
+  # anyone pokes at it — and an idle demo costs ~$0.05/mo instead of $3.19.
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0
 
+  # This check does NOT block autostop — measured, twice, by removing it and
+  # watching the machine still refuse to sleep.
+  #
+  # If this demo won't scale to zero, the cause is almost certainly an open
+  # browser tab: the notification bell polls /api/notifications/unread_count
+  # every 30s (60s once the tab is backgrounded and the browser throttles it),
+  # and each poll is real traffic that wakes the machine straight back up. One
+  # forgotten tab is the difference between ~$0.05/mo and $3.19/mo.
   [[http_service.checks]]
     # nginx strips /api, so this hits the backend's /health.
     path = "/api/health"
