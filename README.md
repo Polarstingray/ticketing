@@ -1,5 +1,6 @@
 # 🐟 Stingray Tickets
 
+[![Live demo](https://img.shields.io/badge/demo-live-2ea44f)](https://stingray-tickets-demo.fly.dev)
 [![CI](https://github.com/Polarstingray/ticketing/actions/workflows/ci.yml/badge.svg)](https://github.com/Polarstingray/ticketing/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Release](https://img.shields.io/github/v/release/Polarstingray/ticketing?sort=semver)](https://github.com/Polarstingray/ticketing/releases)
@@ -18,6 +19,22 @@ A lightweight, **self-hosted ticketing system** you can stand up in one command 
 
 A common topology: run Stingray on a server (behind a reverse proxy/HTTPS) and run the
 optional resolver on a dev station that pulls bot-assigned tickets and opens PRs.
+
+## Live demo
+
+**[stingray-tickets-demo.fly.dev](https://stingray-tickets-demo.fly.dev)** — sign in as
+`admin` / `demopass123`. The API is browsable too, via live Swagger docs at
+**[/api/docs](https://stingray-tickets-demo.fly.dev/api/docs)**.
+
+Start with **“Review: batch the activity-feed queries”** — a code-review ticket the AI
+resolver worked, showing what each phase of the run cost. Then open **“Harden the
+resolver's git-worktree isolation”** to see cost roll up across the sub-tasks it
+delegated.
+
+> The agent-run data on the demo is **illustrative**: the resolver itself isn't deployed
+> there, since it needs provider API keys and push access to a real repo. Everything else
+> is the real app. The database is wiped and re-seeded on every restart, so poke at it —
+> you can't break anything that won't fix itself.
 
 ## Walkthrough
 
