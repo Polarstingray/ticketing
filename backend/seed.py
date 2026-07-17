@@ -49,6 +49,44 @@ def _truthy(val: str | None) -> bool:
     return (val or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def create_resolver_bot(
+    db: Session,
+    username: str,
+    *,
+    display_name: str | None = None,
+    email: str | None = None,
+) -> tuple[User, str]:
+    """Create a least-privilege ``member`` user flagged ``is_resolver_bot=True``
+    (so it may set the reserved control tags without being an admin) and mint its
+    first API key. Returns ``(bot, raw_key)``; the raw key is shown only here.
+
+    Does NOT commit — the caller owns the transaction (the seed path also writes a
+    bootstrap file; the admin API path returns the key over HTTP). Shared so both
+    entry points create identical bots.
+    """
+    bot = User(
+        username=username,
+        display_name=display_name or username,
+        email=email or f"{username}@localhost",
+        role=UserRole.member.value,
+        is_resolver_bot=True,
+        hashed_password=hash_password(generate_api_key()),  # random; bot logs in by API key
+    )
+    db.add(bot)
+    db.flush()  # assign bot.id
+
+    raw_key = generate_api_key()
+    db.add(
+        ApiKey(
+            user_id=bot.id,
+            name="resolver",
+            key_prefix=raw_key[:11],
+            key_hash=hash_api_key(raw_key),
+        )
+    )
+    return bot, raw_key
+
+
 def seed_resolver_bot(db: Session) -> None:
     """Provision the optional resolver bot when ``SEED_RESOLVER_BOT`` is truthy.
 
@@ -66,25 +104,8 @@ def seed_resolver_bot(db: Session) -> None:
     if db.query(User).filter(User.username == username).first():
         return  # already provisioned on an earlier boot
 
-    bot = User(
-        username=username,
-        display_name=username,
-        email=os.environ.get("RESOLVER_BOT_EMAIL", f"{username}@localhost"),
-        role=UserRole.member.value,
-        is_resolver_bot=True,
-        hashed_password=hash_password(generate_api_key()),  # random; bot logs in by API key
-    )
-    db.add(bot)
-    db.flush()  # assign bot.id
-
-    raw_key = generate_api_key()
-    db.add(
-        ApiKey(
-            user_id=bot.id,
-            name="resolver",
-            key_prefix=raw_key[:11],
-            key_hash=hash_api_key(raw_key),
-        )
+    bot, raw_key = create_resolver_bot(
+        db, username, email=os.environ.get("RESOLVER_BOT_EMAIL")
     )
     db.commit()
 

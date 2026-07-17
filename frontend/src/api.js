@@ -62,6 +62,9 @@ export const api = {
   deleteTicket: (id) => request("DELETE", `/tickets/${id}`),
   listActivity: (id) => request("GET", `/tickets/${id}/activity`),
   listAgentRuns: (id) => request("GET", `/tickets/${id}/agent-runs`),
+  // { own, children: [{ ticket_id, title, totals }], total } — own cost plus the
+  // cost of every delegated child (tickets tagged parent:<id>).
+  costRollup: (id) => request("GET", `/tickets/${id}/cost-rollup`),
   archiveTicket: (id) => request("POST", `/tickets/${id}/archive`),
   unarchiveTicket: (id) => request("POST", `/tickets/${id}/unarchive`),
 

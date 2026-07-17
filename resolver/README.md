@@ -253,6 +253,26 @@ command ran — mirroring the `/ticket` directive above.
 `/ticket`, `/approve`, `/revise`, and `/review` are reserved control verbs and are
 never treated as standard commands.
 
+## The `resolver` CLI (one-stop)
+
+`cli.py` is a single front door over the scripts below — creating/managing bots,
+running sweeps, the worker roster, logs, and cost stats:
+
+```bash
+.venv/bin/python cli.py bot create open-bot --desc "cheap mechanical fixes"
+.venv/bin/python cli.py bot list             # all resolver bots + their .env files
+.venv/bin/python cli.py roster               # build a RESOLVER_WORKERS string
+.venv/bin/python cli.py run --env .env.open --dry-run
+.venv/bin/python cli.py stats --ticket 42    # token usage + cost (incl. children)
+.venv/bin/python cli.py logs 42 --all        # wraps logs.py
+.venv/bin/python cli.py file --type task --title "…"   # wraps file_ticket.py
+```
+
+`bot create` provisions the bot **and** mints its key in one admin call (the
+`POST /users/resolver-bot` endpoint), then writes a ready-to-run `.env.<name>` —
+no hand-syncing `RESOLVER_BOT_USER_ID`. It needs an admin key via `--admin-key`
+or `$STINGRAY_ADMIN_KEY`; everything else uses a resolver `.env` identity.
+
 ## Running it
 
 ```bash
@@ -424,8 +444,21 @@ the resulting PRs.
 **What happens.** The lead audits the repo read-only, then files one sub-task per issue
 via `file_ticket.py --type task --assign <id> --parent <this-id>`, posts a roll-up on
 the parent listing each child + assignee, and hands the parent back to you. `--parent`
-makes each child self-driving (auto-tags it `dangerous`, so its assignee implements and
-opens a PR with no separate plan-approval step) and links it `parent:<id>`.
+links the child `parent:<id>` and makes it **self-driving**, with a safety gate:
+
+- the assignee **plans** the child like any ticket, then its **review AI auto-approves**
+  the plan and it implements + opens a PR — no human `/approve`, but never an
+  unreviewed change. This needs the [plan-critique gate](#plan-critique-gate-optional)
+  (`CRITIQUE_API_*`) configured on the worker.
+- if the review AI keeps flagging the plan (still `REVISE` after `CRITIQUE_MAX_REVISIONS`),
+  the child is handed to the review owner for an explicit `/approve` or `/revise` instead
+  of implementing a contested plan unattended.
+- **fallback:** with no review AI configured the child runs in `dangerous` mode (implements
+  with no plan), the legacy behavior — so delegation still works out of the box, just
+  without the auto-approval safety net.
+
+The autonomy is keyed off the reserved `parent:<id>` tag (which only a trusted bot/admin
+can set), not a user-settable flag, so a member can't make their own ticket self-driving.
 
 **Safe by construction.** Children are **one level only** — a delegated sub-task may
 never carry `delegate`, so it can't fan out again (enforced in `file_ticket.py`). Each

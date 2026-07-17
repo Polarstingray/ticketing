@@ -1482,6 +1482,96 @@ def test_do_plan_critique_error_proceeds_with_plan(fake_cfg, monkeypatch, tmp_pa
     assert "PLAN A" in body and "🧭" not in body     # no verdict line on skip
 
 
+# --- delegated-child auto-approve (do_plan) ------------------------------
+def _child_plan_ticket():
+    # A delegated sub-task: the reserved `parent:<id>` tag marks it autonomous, and
+    # `review-by:<id>` records who an escalation hands it back to.
+    return {"id": 5, "title": "t", "description": "d", "priority": "low",
+            "tags": ["parent:92", "review-by:9", "repo:x"], "created_by": 2}
+
+
+def test_do_plan_auto_approves_child_and_implements(fake_cfg, monkeypatch, tmp_path):
+    # Critique APPROVE on a delegated child → implement straight away, no human gate.
+    _enable_critique(fake_cfg)
+    _plan_harness(fake_cfg, monkeypatch, iter([(True, "PLAN A")]),
+                  critique_results=iter([(True, "APPROVE", "good")]))
+    implemented = {}
+    monkeypatch.setattr(rt, "do_implement",
+                        lambda cfg, client, ticket, repo, plan=None, **k:
+                        implemented.update(plan=plan, tid=ticket["id"]))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _child_plan_ticket(), tmp_path, None)
+    assert implemented == {"plan": "PLAN A", "tid": 5}
+    # The plan is posted for the audit trail, marked auto-approved.
+    assert any("auto-approved" in b for _, b in client.comments_added)
+
+
+def test_do_plan_child_no_review_ai_implements(fake_cfg, monkeypatch, tmp_path):
+    # Critique disabled but do_plan reached (e.g. a crash-recovery replan): the child
+    # is still autonomous, so it implements (fail-open APPROVE) rather than stalling.
+    _plan_harness(fake_cfg, monkeypatch, iter([(True, "PLAN A")]), critique_results=None)
+    implemented = {}
+    monkeypatch.setattr(rt, "do_implement",
+                        lambda cfg, client, ticket, repo, plan=None, **k:
+                        implemented.update(plan=plan, tid=ticket["id"]))
+    rt.do_plan(fake_cfg, FakeClient(), _child_plan_ticket(), tmp_path, None)
+    assert implemented == {"plan": "PLAN A", "tid": 5}
+
+
+def test_do_plan_child_persistent_revise_escalates_to_human(fake_cfg, monkeypatch, tmp_path):
+    # Critique keeps flagging the plan → don't implement unattended; hand the child to
+    # the review-by user (id 9) awaiting an explicit /approve.
+    _enable_critique(fake_cfg)
+    fake_cfg.critique_max_revisions = 1
+    _plan_harness(fake_cfg, monkeypatch,
+                  iter([(True, "PLAN1"), (True, "PLAN2")]),
+                  critique_results=iter([(True, "REVISE", "gap A"), (True, "REVISE", "gap B")]))
+    monkeypatch.setattr(rt, "do_implement",
+                        lambda *a, **k: pytest.fail("must not implement a flagged plan"))
+    states = []
+    monkeypatch.setattr(rt, "set_state",
+                        lambda client, ticket, tags, **k: states.append((tags, k)))
+    client = FakeClient()
+    rt.do_plan(fake_cfg, client, _child_plan_ticket(), tmp_path, None)
+    assert any(rt.TAG_AWAIT_PLAN in tags and k.get("assigned_to") == 9
+               for tags, k in states)
+    assert any("still flags this plan" in b for _, b in client.comments_added)
+
+
+# --- delegated-child routing (process) -----------------------------------
+def _fresh_child(**kw):
+    t = {"id": 70, "type": "task", "title": "x", "description": "d", "priority": "low",
+         "tags": ["parent:92", "review-by:9", "repo:x"], "status": "open", "created_by": 2}
+    t.update(kw)
+    return t
+
+
+def test_process_child_without_review_ai_implements(fake_cfg, monkeypatch):
+    # No review AI configured → dangerous fallback: implement directly (no plan).
+    called = {}
+    monkeypatch.setattr(rt, "do_implement",
+                        lambda cfg, client, ticket, repo, *a, **k:
+                        called.setdefault("implement", ticket["id"]))
+    monkeypatch.setattr(rt, "do_plan",
+                        lambda *a, **k: pytest.fail("should not plan without a review AI"))
+    monkeypatch.setattr(rt, "handle_ticket_directives", lambda *a, **k: None)
+    rt.process(fake_cfg, FakeClient(), _fresh_child(), dry_run=False)
+    assert called == {"implement": 70}
+
+
+def test_process_child_with_review_ai_plans(fake_cfg, monkeypatch):
+    # Review AI configured → plan first; do_plan then auto-approves it.
+    _enable_critique(fake_cfg)
+    called = {}
+    monkeypatch.setattr(rt, "do_plan",
+                        lambda c, cl, t, r, notes, cmd=None: called.setdefault("plan", t["id"]))
+    monkeypatch.setattr(rt, "do_implement",
+                        lambda *a, **k: pytest.fail("should plan first, then auto-approve"))
+    monkeypatch.setattr(rt, "handle_ticket_directives", lambda *a, **k: None)
+    rt.process(fake_cfg, FakeClient(), _fresh_child(), dry_run=False)
+    assert called == {"plan": 70}
+
+
 def test_do_review_uses_single_shot_when_configured(fake_cfg, monkeypatch):
     _enable_single_shot(fake_cfg)
     monkeypatch.setattr(rt, "run_agent", lambda *a, **k: pytest.fail("agent must not run"))
@@ -1849,10 +1939,13 @@ def test_build_payload_code_block_requires_code_review(tmp_path):
 
 
 # --- delegation: file_ticket --parent ------------------------------------
-def test_build_payload_parent_forces_dangerous_and_links():
+def test_build_payload_parent_links_without_forcing_dangerous():
+    # A child links to its parent but is NOT force-tagged `dangerous` anymore: the
+    # worker plans it and its review AI auto-approves (dangerous fallback only when
+    # no review AI is configured — decided at process time, not at filing time).
     args = _args(type="task", parent=85, assign=3)
     payload = ft.build_payload(args)
-    assert "dangerous" in payload["tags"]
+    assert "dangerous" not in payload["tags"]
     assert "parent:85" in payload["tags"]
     assert payload["assigned_to"] == 3
 
@@ -1860,7 +1953,8 @@ def test_build_payload_parent_forces_dangerous_and_links():
 def test_build_payload_parent_keeps_explicit_tags():
     args = _args(type="task", parent=85, tag=["backend"])
     payload = ft.build_payload(args)
-    assert set(["backend", "dangerous", "parent:85"]).issubset(set(payload["tags"]))
+    assert set(["backend", "parent:85"]).issubset(set(payload["tags"]))
+    assert "dangerous" not in payload["tags"]
 
 
 def test_build_payload_parent_rejects_delegate_tag():

@@ -29,4 +29,10 @@ export default [
     files: ["**/*.test.{js,jsx}", "src/test/**"],
     languageOptions: { globals: { ...globals.vitest } },
   },
+  {
+    // Node-context files: Vite/Playwright configs, the E2E specs, and the
+    // standalone demo-recording script.
+    files: ["*.config.js", "e2e/**", "scripts/**"],
+    languageOptions: { globals: { ...globals.node } },
+  },
 ];
