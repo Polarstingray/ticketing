@@ -309,12 +309,28 @@ create tickets.
 - **member** — create tickets, be assigned tickets, comment, and modify tickets they created
   or are assigned to.
 
+## Desktop app
+
+A native desktop client for Ubuntu Linux and macOS lives in [`desktop/`](./desktop),
+built with [Tauri 2](https://tauri.app). It asks for your server's address on first
+launch, then opens the normal web app in a native window and logs in exactly as the
+browser does — no backend or frontend changes required. Cross-platform installers
+(`.deb`/`.AppImage`/`.dmg`) are built and attached to GitHub Releases on tagged builds.
+
+```bash
+cd desktop && npm install && npm run tauri:dev    # develop
+cd desktop && npm run tauri:build                 # build installers
+```
+
+See [`desktop/README.md`](./desktop/README.md) for prerequisites and details.
+
 ## Project layout
 
 ```
 ticketing/
   backend/      FastAPI app, models, auth, routers, migrations, backup
   frontend/     React/Vite SPA
+  desktop/      Tauri desktop client (Ubuntu + macOS) for a self-hosted server
   resolver/     optional headless agent that resolves bot-assigned tickets
   install.sh    guided one-command setup
   Makefile      common tasks (make help)

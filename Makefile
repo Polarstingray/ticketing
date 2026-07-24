@@ -3,7 +3,7 @@ DC ?= docker compose
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install up down logs restart test lint backend-test resolver-test frontend-test
+.PHONY: help install up down logs restart test lint backend-test resolver-test frontend-test desktop-dev desktop-build
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -37,3 +37,14 @@ frontend-test: ## Run frontend tests
 
 lint: ## Ruff-lint the Python code
 	ruff check backend resolver
+
+desktop-dev: ## Run the desktop app in dev mode (needs Rust + Node)
+	cd desktop && npm install && npm run tauri:dev
+
+desktop-build: ## Build the desktop installers (.deb/.AppImage/.dmg)
+	# fakeroot makes the .deb bundler record root-owned (uid/gid 0) files; without
+	# it a large login UID overflows Debian's ar/tar header fields and corrupts the
+	# .deb. Falls back to a plain build where fakeroot isn't installed (e.g. macOS).
+	# APPIMAGE_EXTRACT_AND_RUN lets linuxdeploy run without FUSE, which many VMs lack.
+	cd desktop && npm ci && \
+		APPIMAGE_EXTRACT_AND_RUN=1 $$(command -v fakeroot) npm run tauri:build
