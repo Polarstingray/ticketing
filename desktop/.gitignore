@@ -1,0 +1,6 @@
+# Node
+node_modules/
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/

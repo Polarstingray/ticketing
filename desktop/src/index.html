@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src *"
+    />
+    <title>Stingray Tickets</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="connect">
+      <div class="logo" aria-hidden="true">🐟</div>
+      <h1>Stingray Tickets</h1>
+      <p class="sub">Connect to your self-hosted server to get started.</p>
+
+      <form id="connect-form" autocomplete="off">
+        <label for="server-url">Server URL</label>
+        <input
+          id="server-url"
+          name="server-url"
+          type="text"
+          inputmode="url"
+          placeholder="https://tickets.example.com"
+          spellcheck="false"
+          autocapitalize="off"
+          autofocus
+        />
+        <p id="error" class="error" role="alert" hidden></p>
+        <button id="connect-btn" type="submit" class="primary">Connect</button>
+      </form>
+
+      <p class="hint">
+        Point this at the same address you use in the browser. Your login is
+        handled on the server exactly as it is on the web.
+      </p>
+    </main>
+
+    <script type="module" src="connect.js"></script>
+  </body>
+</html>
