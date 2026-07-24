@@ -67,6 +67,17 @@ Artifacts land in `src-tauri/target/release/bundle/`:
 > and choose *Open* to get past Gatekeeper. Code signing / notarization is
 > planned for a later iteration.
 
+### Published releases
+
+Pushing a `desktop-v*` tag builds the installers on Ubuntu + macOS and attaches
+them to a GitHub Release (`.github/workflows/release-desktop.yml`), separate from
+the app/image release (`v*`):
+
+```bash
+git tag desktop-v0.1.0
+git push origin desktop-v0.1.0
+```
+
 ## Icons
 
 Placeholder icons live in `src-tauri/icons/`. To regenerate the full set from a
