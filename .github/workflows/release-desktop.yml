@@ -1,0 +1,64 @@
+name: Release Desktop
+
+# Build the desktop installers and publish them to a GitHub Release when a
+# desktop tag is pushed, e.g.:  git tag desktop-v0.1.0 && git push origin desktop-v0.1.0
+# This is independent of the app/image release (release.yml, `v*` tags).
+on:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: write # create the GitHub Release and upload installers
+
+jobs:
+  installers:
+    name: Installers (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux webview dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop deps
+        working-directory: desktop
+        run: npm ci
+
+      # tauri-action builds .deb/.AppImage (Linux) or .dmg (macOS) and creates the
+      # release for this tag if it doesn't exist yet, then uploads this platform's
+      # assets to it. Both matrix legs target the same tag, so they share one release.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPIMAGE_EXTRACT_AND_RUN: "1" # linuxdeploy without FUSE
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: Desktop ${{ github.ref_name }}
+          releaseBody: |
+            Desktop client for self-hosted Stingray Tickets.
+
+            - **Linux:** `.deb` and `.AppImage`
+            - **macOS:** `.dmg` (unsigned — right-click ▸ Open on first launch)
+          releaseDraft: false
+          prerelease: false
