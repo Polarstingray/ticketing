@@ -91,7 +91,20 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci
-      - run: npm run tauri:build
+        # APPIMAGE_EXTRACT_AND_RUN lets linuxdeploy run without FUSE on the runner.
+      - run: APPIMAGE_EXTRACT_AND_RUN=1 npm run tauri:build
+      # Publish the built installers so they can be downloaded from the run page.
+      # (These are CI test builds; official signed-per-tag artifacts come from
+      # release.yml.) GitHub runners have normal UIDs, so the .deb is well-formed.
+      - name: Upload desktop installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-installers
+          path: |
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          retention-days: 14
+          if-no-files-found: error
 
   e2e:
     name: Frontend E2E (Playwright)

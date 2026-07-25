@@ -2,6 +2,7 @@ name: Release
 
 # Build and publish multi-arch images to GHCR and cut a GitHub Release when a
 # semver tag is pushed, e.g.:  git tag v1.1.0 && git push origin v1.1.0
+# Desktop installers ship on their own `desktop-v*` tag — see release-desktop.yml.
 on:
   push:
     tags: ["v*"]
@@ -61,52 +62,9 @@ jobs:
     name: GitHub Release
     needs: images
     runs-on: ubuntu-latest
-    outputs:
-      id: ${{ steps.create.outputs.id }}
     steps:
       - uses: actions/checkout@v4
       - name: Create release
-        id: create
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-
-  desktop:
-    name: Desktop installers (${{ matrix.platform }})
-    needs: release
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Linux webview dependencies
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libssl-dev libayatana-appindicator3-dev librsvg2-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: desktop/src-tauri
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
-      - name: Install desktop deps
-        working-directory: desktop
-        run: npm ci
-      # Builds the .deb/.AppImage (Linux) or .dmg (macOS) and uploads them to the
-      # GitHub Release created by the `release` job for this tag.
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: desktop
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
-          releaseId: ${{ needs.release.outputs.id }}
