@@ -14,6 +14,7 @@ from routers import auth as auth_router
 from routers import comments as comments_router
 from routers import notifications as notifications_router
 from routers import preferences as preferences_router
+from routers import resolver_settings as resolver_settings_router
 from routers import tickets as tickets_router
 from routers import users as users_router
 from seed import seed_admin, seed_resolver_bot
@@ -60,6 +61,8 @@ app.include_router(tickets_router.router)
 app.include_router(comments_router.router)
 app.include_router(notifications_router.router)
 app.include_router(preferences_router.router)
+app.include_router(resolver_settings_router.router)
+app.include_router(resolver_settings_router.registry_router)
 app.include_router(users_router.router)
 
 

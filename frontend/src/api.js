@@ -97,6 +97,16 @@ export const api = {
   getNotificationPreferences: () => request("GET", "/preferences"),
   updateNotificationPreferences: (items) => request("PUT", "/preferences", { items }),
 
+  // Resolver settings (admin). Non-secret tunables the resolver daemon overlays
+  // on top of its .env at sweep start. Returns { bot_user_id, settings, secrets,
+  // updated_at, updated_by }; updateResolverSettings sends a partial values obj.
+  getResolverSettings: (botUserId) =>
+    request("GET", "/resolver-settings" + (botUserId ? `?bot_user_id=${botUserId}` : "")),
+  updateResolverSettings: (values, botUserId) =>
+    request("PUT", "/resolver-settings" + (botUserId ? `?bot_user_id=${botUserId}` : ""), values),
+  // The resolver-manager roster: each resolver bot + its live self-reported state.
+  listResolvers: () => request("GET", "/resolvers"),
+
   listUsers: () => request("GET", "/users"),
   createUser: (body) => request("POST", "/users", body),
   updateUser: (id, body) => request("PATCH", `/users/${id}`, body),

@@ -1099,7 +1099,7 @@ def run_agent_tracked(cfg: Config, client: StingrayClient, ticket: dict, prompt:
             ticket["id"],
             agent=collected.get("agent") or cfg.agent,
             phase=mode,
-            model=collected.get("model") or getattr(cfg, "claude_model", "") or "",
+            model=collected.get("model") or cfg.agent_model or "",
             input_tokens=collected.get("input_tokens", 0),
             output_tokens=collected.get("output_tokens", 0),
             cache_read_tokens=collected.get("cache_read_tokens", 0),
@@ -2608,6 +2608,60 @@ def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
     return processed
 
 
+# Non-secret resolver tunables the server-side settings API may override at sweep
+# start (see backend/routers/resolver_settings.py). Anything not listed here —
+# every secret (api_key, review_api_key, critique_api_key, provider keys) — is
+# never touched by the overlay and stays sourced from .env.
+_OVERLAY_INT_FIELDS = frozenset({
+    "escalate_to_user_id", "max_attempts", "max_tickets_per_sweep",
+    "verify_timeout", "verify_max_retries", "critique_max_revisions",
+    "quota_backoff_minutes", "max_delegations", "audit_output_tail_bytes",
+})
+_OVERLAY_STR_FIELDS = frozenset({
+    "agent_model", "agent_plan_model", "agent_implement_model",
+    "agent_review_model", "agent_implement_model_easy",
+    "agent_implement_model_hard", "verify_command", "default_repo",
+})
+# Lists/dicts/bools returned already-typed by the settings API (a serialized
+# ResolverSettingsValues), so they pass through as-is.
+_OVERLAY_PASSTHROUGH_FIELDS = frozenset({
+    "agent_fallback_models", "escalate_priorities", "repo_map", "workers",
+    "allow_delegation",
+})
+
+
+def _effective_snapshot(cfg: Config) -> dict:
+    """The non-secret config this resolver is actually running this sweep, as a
+    dict for the manager registry. Built only from the overlay whitelist, so it
+    can never carry a secret (api_key, review_api_key, ...)."""
+    fields = _OVERLAY_INT_FIELDS | _OVERLAY_STR_FIELDS | _OVERLAY_PASSTHROUGH_FIELDS
+    return {f: getattr(cfg, f) for f in fields if hasattr(cfg, f)}
+
+
+def _overlay_settings(cfg: Config, remote: dict) -> None:
+    """Layer server-managed non-secret tunables onto the .env-derived ``cfg``.
+
+    Only whitelisted, non-secret fields are applied; any key absent (or null) in
+    ``remote`` keeps its .env value, so a partially-configured or unreachable
+    server can never blank out a setting or override a secret. Changes take
+    effect on this sweep (the config dataclass is mutated in place, the same
+    runtime-mutation pattern the difficulty router already uses)."""
+    if not remote:
+        return
+    for field in _OVERLAY_INT_FIELDS:
+        if remote.get(field) is not None:
+            try:
+                setattr(cfg, field, int(remote[field]))
+            except (TypeError, ValueError):
+                pass  # ignore a malformed value rather than crash the sweep
+    for field in _OVERLAY_STR_FIELDS:
+        if remote.get(field) is not None:
+            setattr(cfg, field, str(remote[field]))
+    for field in _OVERLAY_PASSTHROUGH_FIELDS:
+        if remote.get(field) is not None:
+            setattr(cfg, field, remote[field])
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Stingray ticket resolver sweep")
     ap.add_argument("--ticket", type=int, help="process only this ticket id")
@@ -2625,9 +2679,30 @@ def main() -> None:
 
     # Fail fast on an unknown RESOLVER_AGENT before touching the network.
     runner = agents.get_runner(cfg.agent)
-    max_tickets = args.max_tickets if args.max_tickets is not None else cfg.max_tickets_per_sweep
     client = StingrayClient(cfg.stingray_url, cfg.api_key,
                             max_retries=cfg.stingray_max_retries, logger=logger)
+    # Overlay server-managed, non-secret tunables on top of the .env defaults.
+    # Must never brick the daemon: any failure falls back to the .env values.
+    try:
+        remote = client.get_resolver_settings(cfg.bot_user_id).get("settings", {})
+    except Exception as e:  # unreachable/misconfigured server, bad payload, ...
+        log(f"resolver-settings: using .env values ({e!r})")
+        remote = {}
+    _overlay_settings(cfg, remote)
+    AUDIT_TAIL_BYTES = cfg.audit_output_tail_bytes  # re-set: overlay may change it
+    # Self-report to the resolver-manager registry (best-effort; a registry
+    # failure must never affect resolution — same contract as run_agent_tracked).
+    try:
+        client.heartbeat(
+            label=cfg.env_file,
+            name=cfg.name,
+            agent=cfg.agent,
+            model=cfg.agent_model or cfg.agent_implement_model or cfg.agent_plan_model or "",
+            effective_config=_effective_snapshot(cfg),
+        )
+    except Exception as e:
+        log(f"resolver heartbeat failed (non-fatal): {e!r}")
+    max_tickets = args.max_tickets if args.max_tickets is not None else cfg.max_tickets_per_sweep
     log(f"sweep start (agent {runner.name}, bot user {cfg.bot_user_id}, "
         f"root {cfg.projects_root}, max_tickets={max_tickets or 'unlimited'})")
     processed = sweep(cfg, client, args.dry_run, args.ticket, max_tickets)

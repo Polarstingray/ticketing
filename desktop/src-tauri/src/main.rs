@@ -6,18 +6,96 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::menu::{MenuBuilder, SubmenuBuilder};
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_opener::OpenerExt;
 
-/// Persisted connection state, stored as JSON in the app config dir.
+/// One saved server the user can switch between.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct ServerProfile {
+    /// Stable id (the normalized URL doubles as the id — it's already unique).
+    id: String,
+    /// Human label shown in menus; defaults to the host.
+    label: String,
+    url: String,
+}
+
+/// Last-known window geometry, restored on the next launch so the app reopens
+/// where the user left it instead of the hardcoded default size.
+#[derive(Serialize, Deserialize, Clone)]
+struct WindowState {
+    w: f64,
+    h: f64,
+    x: Option<f64>,
+    y: Option<f64>,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        WindowState { w: 1100.0, h: 760.0, x: None, y: None }
+    }
+}
+
+/// Persisted native preferences, stored as JSON in the app config dir.
 ///
-/// `url` is remembered even after "Switch server…" so the connect screen can
-/// prefill it; `connected` gates whether we boot straight into the app.
+/// Extends the original single-URL `server.json`. Old files (with just
+/// `url`/`connected`) still deserialize thanks to `#[serde(default)]`, and are
+/// migrated into `servers`/`active` on first load (see `migrate_legacy`).
 #[derive(Serialize, Deserialize, Default)]
-struct ServerConfig {
+struct DesktopConfig {
+    #[serde(default)]
+    servers: Vec<ServerProfile>,
+    /// The active profile's id (== its url). None = show the connect screen.
+    #[serde(default)]
+    active: Option<String>,
+    #[serde(default)]
+    launch_on_login: bool,
+    #[serde(default)]
+    start_minimized: bool,
+    #[serde(default)]
+    window: WindowState,
+
+    // --- legacy fields, kept one release for migration ---
+    #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
     connected: bool,
+}
+
+impl DesktopConfig {
+    /// Fold a pre-profiles `{url, connected}` file into the profile list so an
+    /// upgrading user keeps their server and auto-connect state.
+    fn migrate_legacy(&mut self) {
+        if let Some(url) = self.url.take() {
+            if !self.servers.iter().any(|p| p.id == url) {
+                self.servers.push(ServerProfile {
+                    label: host_label(&url),
+                    id: url.clone(),
+                    url: url.clone(),
+                });
+            }
+            if self.connected && self.active.is_none() {
+                self.active = Some(url);
+            }
+        }
+        self.connected = false; // field retired; active drives auto-connect now
+    }
+
+    fn active_url(&self) -> Option<String> {
+        self.active.clone()
+    }
+
+    /// Insert (or move-to-front) a profile for `url` and mark it active.
+    fn upsert_active(&mut self, url: &str) {
+        self.servers.retain(|p| p.id != url);
+        self.servers.insert(
+            0,
+            ServerProfile { id: url.to_string(), label: host_label(url), url: url.to_string() },
+        );
+        self.active = Some(url.to_string());
+    }
 }
 
 static WINDOW_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -27,20 +105,30 @@ fn next_window_label() -> String {
     format!("win-{n}")
 }
 
+/// A short label for a server URL — its host, or the raw string if unparseable.
+fn host_label(url: &str) -> String {
+    tauri::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| url.to_string())
+}
+
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     Ok(dir.join("server.json"))
 }
 
-fn read_config(app: &tauri::AppHandle) -> ServerConfig {
-    config_path(app)
+fn read_config(app: &tauri::AppHandle) -> DesktopConfig {
+    let mut cfg: DesktopConfig = config_path(app)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    cfg.migrate_legacy();
+    cfg
 }
 
-fn write_config(app: &tauri::AppHandle, cfg: &ServerConfig) -> Result<(), String> {
+fn write_config(app: &tauri::AppHandle, cfg: &DesktopConfig) -> Result<(), String> {
     let path = config_path(app)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -123,77 +211,286 @@ fn open_app_window(app: &tauri::AppHandle, base: &str) -> Result<(), String> {
     let handle = app.clone();
     let label = next_window_label();
 
-    WebviewWindowBuilder::new(app, label.as_str(), WebviewUrl::External(parsed))
-        .title("Stingray Tickets")
-        .inner_size(1100.0, 760.0)
-        .min_inner_size(600.0, 400.0)
-        .on_navigation(move |url| {
-            // Keep top-level navigation on the server's origin; hand any external
-            // link (http/https to another host) to the user's real browser.
-            let same_origin = url.host_str() == Some(host.as_str());
-            let internal = !matches!(url.scheme(), "http" | "https");
-            if same_origin || internal {
-                true
-            } else {
-                let _ = handle.opener().open_url(url.to_string(), None::<&str>);
-                false
-            }
-        })
-        .build()
-        .map_err(|e| e.to_string())?;
+    let cfg = read_config(app);
+    let ws = cfg.window;
+    let mut builder =
+        WebviewWindowBuilder::new(app, label.as_str(), WebviewUrl::External(parsed))
+            .title("Stingray Tickets")
+            .inner_size(ws.w, ws.h)
+            .min_inner_size(600.0, 400.0)
+            .on_navigation(move |url| {
+                // Keep top-level navigation on the server's origin; hand any external
+                // link (http/https to another host) to the user's real browser.
+                let same_origin = url.host_str() == Some(host.as_str());
+                let internal = !matches!(url.scheme(), "http" | "https");
+                if same_origin || internal {
+                    true
+                } else {
+                    let _ = handle.opener().open_url(url.to_string(), None::<&str>);
+                    false
+                }
+            });
+    if let (Some(x), Some(y)) = (ws.x, ws.y) {
+        builder = builder.position(x, y);
+    }
+    if cfg.start_minimized {
+        builder = builder.visible(false);
+    }
+    let window = builder.build().map_err(|e| e.to_string())?;
+    attach_window_state_saver(&window);
     close_other_windows(app, &label);
     Ok(())
 }
 
+/// Persist window geometry as the user resizes/moves it, so the next launch
+/// restores it. Writes are cheap (a small JSON file) and only touch the
+/// `window` field, leaving profiles/prefs untouched.
+fn attach_window_state_saver(window: &WebviewWindow) {
+    let app = window.app_handle().clone();
+    let win = window.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Resized(_) | WindowEvent::Moved(_)) {
+            let size = win.outer_size().ok();
+            let pos = win.outer_position().ok();
+            let scale = win.scale_factor().unwrap_or(1.0);
+            let mut cfg = read_config(&app);
+            if let Some(s) = size {
+                let logical = s.to_logical::<f64>(scale);
+                // Ignore the (0,0) that some platforms report while minimizing.
+                if logical.width > 200.0 && logical.height > 200.0 {
+                    cfg.window.w = logical.width;
+                    cfg.window.h = logical.height;
+                }
+            }
+            if let Some(p) = pos {
+                let logical = p.to_logical::<f64>(scale);
+                cfg.window.x = Some(logical.x);
+                cfg.window.y = Some(logical.y);
+            }
+            let _ = write_config(&app, &cfg);
+        }
+    });
+}
+
+/// Build the app menu from the current config: a Server submenu that lists saved
+/// profiles (checkmark on the active one) plus add/switch, a Preferences submenu
+/// with native toggles, and a top-level "Resolver settings…" that deep-links the
+/// webview to the SPA admin page.
+fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let cfg = read_config(app);
+
+    let mut server = SubmenuBuilder::new(app, "Server");
+    for profile in &cfg.servers {
+        let checked = cfg.active.as_deref() == Some(profile.id.as_str());
+        let item = CheckMenuItemBuilder::new(&profile.label)
+            .id(format!("profile:{}", profile.id))
+            .checked(checked)
+            .build(app)?;
+        server = server.item(&item);
+    }
+    let server = server
+        .separator()
+        .text("add", "Add server…")
+        .text("switch", "Switch server…")
+        .separator()
+        .quit()
+        .build()?;
+
+    let launch = CheckMenuItemBuilder::new("Launch at login")
+        .id("toggle:launch_on_login")
+        .checked(cfg.launch_on_login)
+        .build(app)?;
+    let minimized = CheckMenuItemBuilder::new("Start minimized")
+        .id("toggle:start_minimized")
+        .checked(cfg.start_minimized)
+        .build(app)?;
+    let prefs = SubmenuBuilder::new(app, "Preferences")
+        .item(&launch)
+        .item(&minimized)
+        .build()?;
+
+    let resolver = MenuItemBuilder::new("Resolver settings…")
+        .id("resolver_settings")
+        .build(app)?;
+
+    MenuBuilder::new(app)
+        .item(&server)
+        .item(&prefs)
+        .item(&resolver)
+        .build()
+}
+
+/// Rebuild and reinstall the app menu + tray menu after config changes so the
+/// profile list and toggle checkmarks stay in sync.
+fn refresh_menu(app: &tauri::AppHandle) {
+    if let Ok(menu) = build_menu(app) {
+        let _ = app.set_menu(menu);
+    }
+}
+
+/// Navigate the app window to a path on the current server (e.g. the resolver
+/// admin page). Runs the navigation from *inside* the page via `eval` with a
+/// **relative** path, so it always resolves against the origin the webview is
+/// already showing — no dependence on the stored `active` URL matching. Only the
+/// window(s) actually loaded on an http(s) origin are touched (never the bundled
+/// connect screen, whose document is a local `tauri://` page).
+fn navigate_active_window(app: &tauri::AppHandle, path: &str) {
+    // JSON-encode the path so it's a safe, correctly-quoted JS string literal.
+    let literal = serde_json::to_string(path).unwrap_or_else(|_| "\"/\"".to_string());
+    let js = format!("window.location.assign({literal});");
+    for (_, window) in app.webview_windows() {
+        let on_server = window
+            .url()
+            .map(|u| matches!(u.scheme(), "http" | "https"))
+            .unwrap_or(false);
+        if on_server {
+            let _ = window.eval(&js);
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+/// Reconcile the OS autostart entry with the stored preference.
+fn apply_autostart(app: &tauri::AppHandle, enabled: bool) {
+    let manager = app.autolaunch();
+    let _ = if enabled { manager.enable() } else { manager.disable() };
+}
+
+fn handle_menu_event(app: &tauri::AppHandle, id: &str) {
+    match id {
+        "switch" => {
+            let mut cfg = read_config(app);
+            cfg.active = None; // keep profiles for prefill, drop auto-connect
+            let _ = write_config(app, &cfg);
+            let _ = open_connect_window(app);
+            refresh_menu(app);
+        }
+        "add" => {
+            let _ = open_connect_window(app);
+        }
+        "resolver_settings" => {
+            navigate_active_window(app, "/admin/resolver-settings");
+        }
+        "toggle:launch_on_login" => {
+            let mut cfg = read_config(app);
+            cfg.launch_on_login = !cfg.launch_on_login;
+            let enabled = cfg.launch_on_login;
+            let _ = write_config(app, &cfg);
+            apply_autostart(app, enabled);
+            refresh_menu(app);
+        }
+        "toggle:start_minimized" => {
+            let mut cfg = read_config(app);
+            cfg.start_minimized = !cfg.start_minimized;
+            let _ = write_config(app, &cfg);
+            refresh_menu(app);
+        }
+        "tray:open" => {
+            // Bring the app window to the front (or reconnect if none).
+            let cfg = read_config(app);
+            match cfg.active_url() {
+                Some(url) if app.webview_windows().len() > 0 => {
+                    for (_, w) in app.webview_windows() {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                    let _ = url; // window already on the right origin
+                }
+                Some(url) => {
+                    let _ = open_app_window(app, &url);
+                }
+                None => {
+                    let _ = open_connect_window(app);
+                }
+            }
+        }
+        other => {
+            if let Some(url) = other.strip_prefix("profile:") {
+                // Switch to the chosen saved server.
+                let mut cfg = read_config(app);
+                cfg.active = Some(url.to_string());
+                let _ = write_config(app, &cfg);
+                let _ = open_app_window(app, url);
+                refresh_menu(app);
+            }
+        }
+    }
+}
+
 #[tauri::command]
 fn last_server_url(app: tauri::AppHandle) -> Option<String> {
-    read_config(&app).url
+    let cfg = read_config(&app);
+    // Prefer the active server, else the most recently used profile.
+    cfg.active.clone().or_else(|| cfg.servers.first().map(|p| p.url.clone()))
 }
 
 #[tauri::command]
 async fn connect_to_server(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let normalized = normalize_url(&url)?;
     check_reachable(&normalized).await?;
-    write_config(
-        &app,
-        &ServerConfig {
-            url: Some(normalized.clone()),
-            connected: true,
-        },
-    )?;
-    open_app_window(&app, &normalized)
+    let mut cfg = read_config(&app);
+    cfg.upsert_active(&normalized);
+    write_config(&app, &cfg)?;
+    open_app_window(&app, &normalized)?;
+    refresh_menu(&app);
+    Ok(())
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .invoke_handler(tauri::generate_handler![connect_to_server, last_server_url])
-        .menu(|handle| {
-            let server = SubmenuBuilder::new(handle, "Server")
-                .text("switch", "Switch server…")
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().0.as_str()))
+        .setup(|app| {
+            let handle = app.handle();
+
+            // Install the config-driven menu.
+            let menu = build_menu(handle)?;
+            app.set_menu(menu)?;
+
+            // System tray: quick access to the dashboard and the resolver page.
+            let tray_menu = MenuBuilder::new(handle)
+                .text("tray:open", "Open Stingray Tickets")
+                .item(
+                    &MenuItemBuilder::new("Resolver settings…")
+                        .id("resolver_settings")
+                        .build(handle)?,
+                )
                 .separator()
                 .quit()
                 .build()?;
-            MenuBuilder::new(handle).item(&server).build()
-        })
-        .on_menu_event(|app, event| {
-            if event.id().0.as_str() == "switch" {
-                let mut cfg = read_config(app);
-                cfg.connected = false; // keep the URL for prefill, drop auto-connect
-                let _ = write_config(app, &cfg);
-                let _ = open_connect_window(app);
-            }
-        })
-        .setup(|app| {
-            let handle = app.handle();
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("Stingray Tickets")
+                .menu(&tray_menu)
+                .on_menu_event(|app, event| handle_menu_event(app, event.id().0.as_str()))
+                .build(handle)?;
+
+            // Reconcile autostart with the saved preference on every launch.
             let cfg = read_config(handle);
-            match (cfg.connected, cfg.url) {
-                (true, Some(url)) => open_app_window(handle, &url),
-                _ => open_connect_window(handle),
+            apply_autostart(handle, cfg.launch_on_login);
+
+            // Boot into the active server, else the connect screen.
+            match cfg.active_url() {
+                Some(url) => open_app_window(handle, &url),
+                None => open_connect_window(handle),
             }
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Stingray Tickets");
+        .build(tauri::generate_context!())
+        .expect("error while running Stingray Tickets")
+        .run(|_app, event| {
+            // Keep the process alive when the last window closes only if a tray
+            // exists — otherwise exit as before. Default behavior is fine here.
+            if let RunEvent::ExitRequested { .. } = event {
+                // no-op: allow normal exit
+            }
+        });
 }
