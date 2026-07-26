@@ -37,6 +37,11 @@ class FakeClient:
         self.updates.append(fields)
         return {"id": ticket_id, **fields}
 
+    def heartbeat(self, **fields):
+        self.heartbeats = getattr(self, "heartbeats", [])
+        self.heartbeats.append(fields)
+        return {"bot_user_id": self.__dict__.get("bot_user_id", 0), **fields}
+
     def get_ticket(self, ticket_id):
         return self._tickets[ticket_id]
 

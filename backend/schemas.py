@@ -1,7 +1,7 @@
 """Pydantic request/response schemas."""
 import re
 from datetime import datetime, timezone
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer, field_validator
 
@@ -375,3 +375,130 @@ class ApiKeyCreate(BaseModel):
 class ApiKeyCreated(ApiKeyMeta):
     """Returned exactly once on creation — includes the plaintext key."""
     api_key: str
+
+
+# --- Resolver settings -------------------------------------------------------
+# Server-managed, NON-SECRET tunables for the resolver daemon (see the
+# ResolverSettings model). Secrets (STINGRAY_API_KEY, REVIEW_API_KEY,
+# CRITIQUE_API_KEY, provider keys) are deliberately absent: they stay in the
+# resolver's .env and are only described (never valued) via SecretField below.
+
+
+class ResolverWorker(BaseModel):
+    """One entry in the delegation roster (mirrors config._parse_workers)."""
+    id: int
+    name: str
+    desc: str = ""
+
+
+class ResolverSettingsValues(BaseModel):
+    """The full non-secret tunable surface, with defaults matching config.py.
+
+    GET returns a complete view (defaults <- global row <- bot row), so the UI
+    always renders every field even when nothing is stored yet.
+    """
+    agent_model: str = ""
+    agent_plan_model: str = ""
+    agent_implement_model: str = ""
+    agent_review_model: str = ""
+    agent_implement_model_easy: str = ""
+    agent_implement_model_hard: str = ""
+    agent_fallback_models: List[str] = Field(default_factory=list)
+    escalate_to_user_id: int = 0
+    escalate_priorities: List[str] = Field(default_factory=lambda: ["high", "critical"])
+    max_attempts: int = 3
+    max_tickets_per_sweep: int = 0
+    verify_command: str = ""
+    verify_timeout: int = 900
+    verify_max_retries: int = 1
+    critique_max_revisions: int = 1
+    quota_backoff_minutes: int = 60
+    allow_delegation: bool = False
+    max_delegations: int = 10
+    default_repo: str = ""
+    repo_map: Dict[str, str] = Field(default_factory=dict)
+    workers: List[ResolverWorker] = Field(default_factory=list)
+    audit_output_tail_bytes: int = 4096
+
+
+class ResolverSettingsUpdate(BaseModel):
+    """Admin write payload. ``extra="forbid"`` rejects unknown or secret keys
+    (e.g. ``stingray_api_key``) with 422 — secrets can never be written here.
+    Every field is optional; only the ones sent are stored/overridden."""
+    model_config = ConfigDict(extra="forbid")
+
+    agent_model: Optional[str] = None
+    agent_plan_model: Optional[str] = None
+    agent_implement_model: Optional[str] = None
+    agent_review_model: Optional[str] = None
+    agent_implement_model_easy: Optional[str] = None
+    agent_implement_model_hard: Optional[str] = None
+    agent_fallback_models: Optional[List[str]] = None
+    escalate_to_user_id: Optional[int] = Field(default=None, ge=0)
+    escalate_priorities: Optional[List[str]] = None
+    max_attempts: Optional[int] = Field(default=None, ge=1)
+    max_tickets_per_sweep: Optional[int] = Field(default=None, ge=0)
+    verify_command: Optional[str] = None
+    verify_timeout: Optional[int] = Field(default=None, ge=1)
+    verify_max_retries: Optional[int] = Field(default=None, ge=0)
+    critique_max_revisions: Optional[int] = Field(default=None, ge=0)
+    quota_backoff_minutes: Optional[int] = Field(default=None, ge=0)
+    allow_delegation: Optional[bool] = None
+    max_delegations: Optional[int] = Field(default=None, ge=0)
+    default_repo: Optional[str] = None
+    repo_map: Optional[Dict[str, str]] = None
+    workers: Optional[List[ResolverWorker]] = None
+    audit_output_tail_bytes: Optional[int] = Field(default=None, ge=0)
+
+
+class SecretField(BaseModel):
+    """A read-only descriptor for a resolver secret. Carries NO value — the
+    backend never holds the resolver's .env, so there is nothing to leak. The
+    UI renders these as disabled '•••• managed in .env' rows."""
+    name: str
+    label: str
+    managed_in: str = ".env"
+
+
+class ResolverSettingsOut(BaseModel):
+    bot_user_id: Optional[int] = None
+    settings: ResolverSettingsValues
+    secrets: List[SecretField]
+    updated_at: Optional[UTCDateTime] = None
+    updated_by: Optional[int] = None
+
+
+# --- Resolver registry (the live manager) ------------------------------------
+# A running resolver reports its identity + observed state each sweep. Distinct
+# from ResolverSettings (admin overrides); this is what the resolver says about
+# itself. Non-secret only, same guarantees as above.
+
+
+class ResolverHeartbeat(BaseModel):
+    """A resolver's per-sweep self-report. ``extra="forbid"`` rejects any secret
+    or unknown key; ``effective_config`` reuses the non-secret tunable set so a
+    snapshot can never carry a secret."""
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = ""       # RESOLVER_ENV_FILE, e.g. ".env.gemini"
+    name: str = ""        # clean identity name, e.g. "gemini"
+    agent: str = ""       # claude | opencode | ...
+    model: str = ""
+    effective_config: ResolverSettingsValues = Field(default_factory=ResolverSettingsValues)
+
+
+class ResolverRosterEntry(BaseModel):
+    """One row in the resolver-manager roster: the bot's identity plus its live
+    self-reported state (null until it first sweeps)."""
+    bot_user_id: int
+    username: str
+    display_name: str
+    is_bot: bool = True
+    has_settings: bool = False
+    # Live fields — null when the resolver has never sent a heartbeat.
+    name: Optional[str] = None
+    label: Optional[str] = None
+    agent: Optional[str] = None
+    model: Optional[str] = None
+    last_seen_at: Optional[UTCDateTime] = None
+    effective_config: Optional[ResolverSettingsValues] = None

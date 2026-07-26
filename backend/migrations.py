@@ -80,6 +80,26 @@ def _migrate_agent_runs(engine: Engine) -> None:
     AgentRun.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_resolver_settings(engine: Engine) -> None:
+    """resolver_settings table — added with UI-managed resolver config.
+
+    A brand-new table, so `create_all` builds it on a fresh DB; this backfills
+    it on databases that predate the model. `checkfirst=True` no-ops when the
+    table already exists (idempotent)."""
+    from models import ResolverSettings
+    ResolverSettings.__table__.create(bind=engine, checkfirst=True)
+
+
+def _migrate_resolver_instances(engine: Engine) -> None:
+    """resolver_instances table — added with the resolver-manager registry.
+
+    A brand-new table, so `create_all` builds it on a fresh DB; this backfills
+    it on databases that predate the model. `checkfirst=True` no-ops when the
+    table already exists (idempotent)."""
+    from models import ResolverInstance
+    ResolverInstance.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
@@ -87,6 +107,8 @@ MIGRATIONS = [
     _migrate_notification_preferences,
     _migrate_is_resolver_bot,
     _migrate_agent_runs,
+    _migrate_resolver_settings,
+    _migrate_resolver_instances,
 ]
 
 

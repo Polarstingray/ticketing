@@ -29,6 +29,29 @@ backend or frontend changes** required to use it.
 Point the app at the **same address you use in the browser** (the web
 frontend, which proxies `/api` to the backend) — not the backend port directly.
 
+### Native preferences
+
+The shell keeps its own preferences in `server.json` (in the app config dir),
+separate from the server-side resolver settings:
+
+- **Multiple server profiles** — every server you connect to is saved. The
+  **Server** menu lists them with a checkmark on the active one; pick one to
+  switch, or **Add server…** for a new one. (Old single-URL configs migrate
+  automatically.)
+- **Window state** — the app reopens at the size and position you left it.
+- **Preferences ▸ Launch at login / Start minimized** — native toggles backed by
+  the OS autostart entry.
+- **System tray** — quick access to the app and the resolver page.
+- **Resolver settings…** — deep-links the webview to the server's
+  `/admin/resolver-settings` admin page (admin-only, enforced server-side). This
+  is the *server's* resolver config, shown in the shell for free — see the main
+  app's resolver settings, not a native panel.
+
+> OS notifications on resolver activity: the tray + notification plugin are
+> wired, but firing notifications from the remote SPA requires per-server
+> `remote` capability grants (the SPA is loaded from your server's origin, not
+> bundled). That bridge is a planned follow-up.
+
 ## Develop
 
 Prerequisites:
@@ -89,5 +112,5 @@ npm run tauri icon src-tauri/icons/app-icon.png
 
 ## Not yet included (planned)
 
-Configurable AI-resolver settings, native OS notifications, a system tray,
-auto-update, and macOS code signing.
+Live OS notifications on resolver activity (needs per-server remote capability
+grants), auto-update, and macOS code signing.

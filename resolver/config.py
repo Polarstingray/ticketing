@@ -71,6 +71,13 @@ def _cron_log_path() -> "Path | None":
     return p if p.is_absolute() else HERE / p
 
 
+def _identity_name(env_file: str) -> str:
+    """`.env` -> 'default'; `.env.gemini` -> 'gemini'. Mirrors cli._identity_name
+    so the manager roster and the CLI agree on a resolver's short name."""
+    base = Path(env_file).name
+    return "default" if base == ".env" else base[len(".env."):] if base.startswith(".env.") else base
+
+
 def _split_models(*raws: str) -> list[str]:
     """Flatten one or more comma-separated model lists into an ordered, de-duped
     list, dropping blanks. Order is preserved (first occurrence wins) so the
@@ -128,6 +135,12 @@ class Config:
     stingray_url: str
     api_key: str
     bot_user_id: int
+    # This instance's identity, for the resolver-manager registry heartbeat.
+    # env_file is the RESOLVER_ENV_FILE it was launched with (".env", ".env.gemini");
+    # name is a clean label (".env"->"default", ".env.gemini"->"gemini"), overridable
+    # with RESOLVER_NAME. Neither affects behavior — they're for the manager UI.
+    env_file: str
+    name: str
     agent: str
     projects_root: Path
     repo_map: dict[str, str]
@@ -249,6 +262,8 @@ class Config:
             stingray_url=_require("STINGRAY_URL").rstrip("/"),
             api_key=_require("STINGRAY_API_KEY"),
             bot_user_id=_bot_user_id(),
+            env_file=env_file,
+            name=os.environ.get("RESOLVER_NAME", "").strip() or _identity_name(env_file),
             # Which agent runner drives plan/implement. "claude" today; a resolver
             # on another identity can set RESOLVER_AGENT to a registered runner.
             agent=os.environ.get("RESOLVER_AGENT", "claude").strip() or "claude",

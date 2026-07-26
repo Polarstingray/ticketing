@@ -34,6 +34,11 @@ export default function Layout() {
               Users
             </NavLink>
           )}
+          {user?.role === "admin" && (
+            <NavLink to="/admin/resolver-settings" className={linkClass}>
+              Resolvers
+            </NavLink>
+          )}
           <NavLink to="/notifications" className={linkClass}>
             <span className={styles.bell}>🔔</span>
             Notifications

@@ -2161,7 +2161,7 @@ class RunRecordingClient:
 
 def _tracking_cfg():
     from types import SimpleNamespace
-    return SimpleNamespace(agent="claude", claude_model="claude-opus-4-8")
+    return SimpleNamespace(agent="claude", agent_model="claude-opus-4-8")
 
 
 def test_run_agent_tracked_posts_captured_usage(monkeypatch):
