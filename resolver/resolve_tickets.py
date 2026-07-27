@@ -51,6 +51,7 @@ TAG_AWAIT_PLAN = "resolver:awaiting-plan-approval"
 TAG_IMPLEMENTING = "resolver:implementing"    # implement run in flight
 TAG_REVIEWING = "resolver:reviewing"          # code-review run in flight
 TAG_AWAIT_PR = "resolver:awaiting-pr-review"
+TAG_AWAIT_FIX = "resolver:awaiting-fix"       # reviewed; findings on file, `/fix` to apply
 TAG_QUOTA_BACKOFF = "resolver:quota-backoff"   # ticket is waiting for API quota to reset
 TAG_IMPL_READY = "resolver:impl-ready"         # escalated with approved plan; skip to implement
 TAG_DANGEROUS = "dangerous"
@@ -74,6 +75,21 @@ DELEGATE_MARKER = "🧭 **Delegated**"
 DELEGATE_OFF_MARKER = "ℹ️ Delegation not enabled"
 UNKNOWN_CMD_MARKER = "ℹ️ Unknown command"
 WORK_DIR = Path(__file__).resolve().parent / "work"
+
+# Footer on a findings-only review: how to turn the findings into a PR without
+# filing a second ticket. Also the split point when those findings are replayed as
+# a plan (find_review_findings), so keep it a single literal.
+FIX_HINT = ("---\nReassign this ticket to me with a `/fix` comment (or `/fix <notes>` "
+            "to steer it) and I'll apply these fixes as a PR. `/review` asks for "
+            "another read-only pass.")
+
+# Applying fixes needs a checkout to edit; a review can run off code_blocks alone.
+# Shared by the pre-review `fix`-tag guard and the post-review `/fix` guard so the
+# two can't drift.
+NO_REPO_FOR_FIX = ("I can't apply fixes without a target repo — this ticket has no "
+                   "`repo:<name>` tag (and no default repo is configured). Add a "
+                   "`repo:<name>` tag and ask again for the fixes; the findings above "
+                   "stand on their own either way.")
 
 # Per-event audit truncation, set from config at sweep start (see main()).
 AUDIT_TAIL_BYTES = 4096
@@ -256,12 +272,44 @@ def render_code_blocks(ticket: dict) -> str:
     return "\n".join(parts)
 
 
-def find_approved_plan(comments: list[dict], bot_id: int) -> str | None:
-    """The most recent comment carrying the plan marker, from any resolver bot."""
+def _latest_marked(comments: list[dict], marker: str,
+                   author: int | None = None) -> str | None:
+    """Body of the most recent comment carrying `marker` (optionally restricted to
+    one author). Comments are oldest-first, so scan in reverse."""
     for c in reversed(comments):
-        if PLAN_MARKER in (c.get("body") or ""):
+        if author is not None and c.get("author") != author:
+            continue
+        if marker in (c.get("body") or ""):
             return c["body"]
     return None
+
+
+def find_approved_plan(comments: list[dict], bot_id: int) -> str | None:
+    """The most recent comment carrying the plan marker, from any resolver bot."""
+    return _latest_marked(comments, PLAN_MARKER)
+
+
+def find_review_findings(comments: list[dict], bot_id: int) -> str | None:
+    """The most recent code review this bot posted — the findings a `/fix` applies.
+
+    The trailing hint footer is addressed to the human, not to the implement agent,
+    so strip it before the findings become a plan."""
+    body = _latest_marked(comments, REVIEW_MARKER, author=bot_id)
+    if body is None:
+        return None
+    for hint in (FIX_HINT, NO_REPO_FOR_FIX):
+        body = body.split(hint)[0]
+    return body.rstrip().rstrip("-").rstrip() or None
+
+
+def findings_as_plan(findings: str, notes: str = "") -> str:
+    """Wrap review findings as an implement plan. Used by both routes into the fix
+    gate (the `fix` tag before the review, and a `/fix` comment after it) so they
+    hand do_implement identical input."""
+    p = [f"{PLAN_MARKER} (code review + fix)", "", findings]
+    if notes.strip():
+        p += ["", "Additional instructions from the reporter:", notes.strip()]
+    return "\n".join(p)
 
 
 def latest_human(comments: list[dict], bot_id: int) -> dict | None:
@@ -384,15 +432,20 @@ def already_handled_keys(comments: list[dict], bot_id: int) -> set[str]:
     return keys
 
 
-def directive_payload(directive: dict, repo: Path) -> dict:
+def directive_payload(directive: dict, repo: Path | None) -> dict:
     """Parse one directive into a create_ticket payload, reusing file_ticket's
-    validation + on-disk code-block reading. Raises _DirectiveError on bad input."""
+    validation + on-disk code-block reading. Raises _DirectiveError on bad input.
+
+    `repo` is None for a ticket that named no target repo; the directive then runs
+    from the resolver's own directory, which is NOT the follow-up's subject — so
+    suppress file_ticket's repo auto-tagging rather than tag the resolver's repo."""
     try:
         tokens = shlex.split(directive["args"])
     except ValueError as exc:
         raise _DirectiveError(f"could not parse arguments: {exc}")
     args = _directive_parser().parse_args(tokens)
-    args.root = str(repo)
+    args.root = str(repo or HERE)
+    args.no_repo = repo is None
     try:
         payload = file_ticket.build_payload(args)
     except ValueError as exc:
@@ -405,7 +458,7 @@ def directive_payload(directive: dict, repo: Path) -> dict:
 
 
 def handle_ticket_directives(cfg: Config, client: StingrayClient, ticket: dict,
-                             comments: list[dict], repo: Path, dry_run: bool) -> None:
+                             comments: list[dict], repo: Path | None, dry_run: bool) -> None:
     """File any new `/ticket` directives on this ticket (once each), then record
     what happened in a single marker comment so the next sweep skips them."""
     directives = collect_directives(ticket, comments, cfg.bot_user_id)
@@ -2135,9 +2188,8 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
     if repo is None and want_fix:
         # Findings we can produce from the code blocks alone; applying them needs a
         # checkout to edit. Without a repo there's nowhere to land the fix.
-        fail(client, ticket, "This review is tagged `fix`, but the ticket has no "
-             "`repo:` tag — I can't apply fixes without a target repo. Add a "
-             "`repo:<name>` tag, or drop the `fix` tag for a findings-only review.")
+        fail(client, ticket, f"This review is tagged `fix`, but {NO_REPO_FOR_FIX} "
+             "Or drop the `fix` tag for a findings-only review.")
         return
     set_state(client, ticket, [TAG_REVIEWING])
     single_shot = _single_shot_enabled(cfg)
@@ -2202,16 +2254,22 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
 
     if not want_fix:
         # Findings-only: post the review and hand the ticket back to the reporter.
-        client.add_comment(ticket["id"], f"{REVIEW_MARKER} (Stingray resolver)\n\n{result}")
+        # The ticket stays actionable — `resolver:awaiting-fix` marks "reviewed, findings
+        # on file", and a `/fix` comment (plus a re-assign) replays them as a plan
+        # instead of making the reporter file a fresh ticket.
+        footer = FIX_HINT if repo is not None else f"---\n{NO_REPO_FOR_FIX}"
+        client.add_comment(ticket["id"],
+                           f"{REVIEW_MARKER} (Stingray resolver)\n\n{result}\n\n{footer}")
         handback = handback_user(client, ticket)
-        set_state(client, ticket, [], status="in_review", assigned_to=handback)
+        set_state(client, ticket, [TAG_AWAIT_FIX], status="in_review",
+                  assigned_to=handback)
         phase("reviewed", ticket, f"#{ticket['id']}: posted review, handed back to "
               f"user {handback}")
         return
 
     # `fix` requested: the findings are the plan. Tagged `dangerous` skips the gate
     # and applies them straight away; otherwise hand back for an explicit /approve.
-    body = (f"{PLAN_MARKER} (code review + fix)\n\n{result}\n\n---\n"
+    body = (f"{findings_as_plan(result)}\n\n---\n"
             "Reply with `/approve` (and re-assign this ticket to me) to apply these "
             "fixes as a PR, or `/revise <notes>` to adjust.")
     client.add_comment(ticket["id"], body)
@@ -2446,8 +2504,8 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     # plan/implement dispatch — filing a follow-up ticket is independent of this
     # ticket's own workflow state.
     # `repo` is only a cwd for file_ticket.py here; a repo-less review still files
-    # follow-ups fine from the resolver dir.
-    handle_ticket_directives(cfg, client, ticket, comments, repo or HERE, dry_run)
+    # follow-ups fine from the resolver dir (directive_payload handles repo=None).
+    handle_ticket_directives(cfg, client, ticket, comments, repo, dry_run)
 
     # A ticket whose body is *only* a `/ticket` directive is a pure filing
     # request — there's nothing to plan or implement. File it (above), then hand
@@ -2501,6 +2559,27 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
                                     "reviewer_notes": last["body"] if last else None}
         else:
             action, kw = "skip", {}
+    elif TAG_AWAIT_FIX in tags:
+        # Reviewed already: the findings are on file. `/fix` (or adding the `fix` tag
+        # and re-assigning) replays them as the implement plan, so acting on a review
+        # never requires filing a second ticket. Anything else is quiet — this ticket
+        # lives in the reporter's queue now, not ours.
+        if cmd.startswith("/fix") or want_fix:
+            findings = find_review_findings(comments, cfg.bot_user_id)
+            notes = (last["body"].split(None, 1)[1]
+                     if cmd.startswith("/fix") and last and len(last["body"].split(None, 1)) > 1
+                     else "")
+            if findings:
+                action, kw = "implement", {"plan": findings_as_plan(findings, notes),
+                                           "reviewer_notes": notes or None}
+            else:
+                # Marker comment gone (edited/deleted): re-review rather than
+                # implement a plan we don't have.
+                action, kw = "review", {"want_fix": True}
+        elif cmd.startswith("/review"):
+            action, kw = "review", {"want_fix": want_fix}
+        else:
+            action, kw = "skip", {}
     elif TAG_PLANNING in tags:
         action, kw = "replan", {"revise_notes": None}   # retry after a crashed plan run
     elif TAG_REVIEWING in tags:
@@ -2528,6 +2607,17 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     log(f"#{tid}: action={action} repo={repo.name if repo else '—'} "
         f"dangerous={dangerous} status={status}")
     if dry_run:
+        return
+
+    # Applying changes needs a checkout. A repo-less code_review ticket got this far
+    # on its embedded code_blocks alone, so refuse the write phase with an actionable
+    # message and leave it fixable once a `repo:` tag is added — rather than handing
+    # do_implement a None repo.
+    if action in ("implement", "rework") and repo is None:
+        client.add_comment(tid, NO_REPO_FOR_FIX)
+        set_state(client, ticket, [TAG_AWAIT_FIX], status="in_review",
+                  assigned_to=handback_user(client, ticket))
+        log(f"#{tid}: {action} requested but no repo — handed back")
         return
 
     # Attempt cap (B3): a ticket that keeps failing the same phase shouldn't be
@@ -2623,11 +2713,17 @@ _OVERLAY_STR_FIELDS = frozenset({
     "agent_implement_model_hard", "verify_command", "default_repo",
 })
 # Lists/dicts/bools returned already-typed by the settings API (a serialized
-# ResolverSettingsValues), so they pass through as-is.
-_OVERLAY_PASSTHROUGH_FIELDS = frozenset({
-    "agent_fallback_models", "escalate_priorities", "repo_map", "workers",
-    "allow_delegation",
-})
+# ResolverSettingsValues). The expected type is recorded so a server that ever
+# sends the wrong shape (a string where a list belongs) is ignored rather than
+# silently breaking config the rest of the sweep reads.
+_OVERLAY_PASSTHROUGH_TYPES = {
+    "agent_fallback_models": list,
+    "escalate_priorities": list,
+    "repo_map": dict,
+    "workers": list,
+    "allow_delegation": bool,
+}
+_OVERLAY_PASSTHROUGH_FIELDS = frozenset(_OVERLAY_PASSTHROUGH_TYPES)
 
 
 def _effective_snapshot(cfg: Config) -> dict:
@@ -2657,9 +2753,15 @@ def _overlay_settings(cfg: Config, remote: dict) -> None:
     for field in _OVERLAY_STR_FIELDS:
         if remote.get(field) is not None:
             setattr(cfg, field, str(remote[field]))
-    for field in _OVERLAY_PASSTHROUGH_FIELDS:
-        if remote.get(field) is not None:
-            setattr(cfg, field, remote[field])
+    for field, expected in _OVERLAY_PASSTHROUGH_TYPES.items():
+        value = remote.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, expected):
+            log(f"resolver-settings: ignoring {field} — expected {expected.__name__}, "
+                f"got {type(value).__name__}")
+            continue
+        setattr(cfg, field, value)
 
 
 def main() -> None:

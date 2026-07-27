@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TicketDetail from "./TicketDetail";
@@ -20,6 +20,7 @@ vi.mock("../api", () => ({
     listAgentRuns: vi.fn(),
     costRollup: vi.fn(),
     updateTicket: vi.fn(),
+    addComment: vi.fn(),
   },
 }));
 
@@ -153,5 +154,64 @@ describe("TicketDetail agent runs", () => {
     await waitFor(() =>
       expect(screen.getByText(/🤖 \$0\.0500/)).toBeInTheDocument()
     );
+  });
+});
+
+describe("TicketDetail resolver fix loop", () => {
+  const REVIEW = {
+    id: 1,
+    author: 2, // the resolver bot that posted the findings
+    body: "🔎 **Code review** (Stingray resolver)\n\nblocker: unchecked exit code",
+    created_at: "2026-01-01T00:00:00Z",
+  };
+  const reviewed = (tags = ["repo:ticketing", "resolver:awaiting-fix"]) =>
+    makeTicket({ type: "code_review", tags, status: "in_review" });
+
+  it("offers Apply fixes on a reviewed ticket and hands it back to the bot", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.getTicket.mockResolvedValue(reviewed());
+    api.listComments.mockResolvedValue([REVIEW]);
+    api.addComment.mockResolvedValue({ id: 2, author: CREATOR.id, body: "/fix" });
+    api.updateTicket.mockResolvedValue(reviewed());
+    renderDetail();
+    await waitForLoaded();
+
+    const button = await screen.findByRole("button", { name: /Apply fixes/i });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    await waitFor(() => expect(api.addComment).toHaveBeenCalledWith("42", "/fix"));
+    // Re-assigned to whoever authored the review, so it re-enters that bot's queue.
+    expect(api.updateTicket).toHaveBeenCalledWith("42", { assigned_to: REVIEW.author });
+  });
+
+  it("disables Apply fixes when the ticket names no repo", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.getTicket.mockResolvedValue(reviewed(["resolver:awaiting-fix"]));
+    api.listComments.mockResolvedValue([REVIEW]);
+    renderDetail();
+    await waitForLoaded();
+
+    expect(await screen.findByRole("button", { name: /Apply fixes/i })).toBeDisabled();
+  });
+
+  it("hides Apply fixes when the ticket is not awaiting a fix", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.getTicket.mockResolvedValue(reviewed(["repo:ticketing"]));
+    api.listComments.mockResolvedValue([REVIEW]);
+    renderDetail();
+    await waitForLoaded();
+
+    expect(screen.queryByRole("button", { name: /Apply fixes/i })).not.toBeInTheDocument();
+  });
+
+  it("hides Apply fixes from a member who cannot modify the ticket", async () => {
+    authState.user = { id: 777, role: "member" };
+    api.getTicket.mockResolvedValue(reviewed());
+    api.listComments.mockResolvedValue([REVIEW]);
+    renderDetail();
+    await waitForLoaded();
+
+    expect(screen.queryByRole("button", { name: /Apply fixes/i })).not.toBeInTheDocument();
   });
 });
