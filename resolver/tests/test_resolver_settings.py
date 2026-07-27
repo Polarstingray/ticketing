@@ -52,6 +52,22 @@ def test_malformed_int_is_skipped(fake_cfg):
     assert fake_cfg.max_attempts == 3  # left at the .env value rather than crashing
 
 
+def test_passthrough_wrong_type_is_skipped(fake_cfg):
+    # The API returns already-typed values; a wrong shape (string where a list
+    # belongs) must be ignored rather than poison the config for the sweep.
+    fake_cfg.agent_fallback_models = ["keep"]
+    fake_cfg.repo_map = {"acme": "/srv/acme"}
+    fake_cfg.allow_delegation = False
+    rt._overlay_settings(fake_cfg, {
+        "agent_fallback_models": "a,b",
+        "repo_map": ["not", "a", "map"],
+        "allow_delegation": "yes",
+    })
+    assert fake_cfg.agent_fallback_models == ["keep"]
+    assert fake_cfg.repo_map == {"acme": "/srv/acme"}
+    assert fake_cfg.allow_delegation is False
+
+
 def test_secrets_are_never_applied(fake_cfg):
     # Secret field names are not in the overlay whitelist, so even if a server
     # response somehow carried them they must not overwrite the .env values.

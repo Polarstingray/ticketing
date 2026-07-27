@@ -68,7 +68,15 @@ impl DesktopConfig {
     /// Fold a pre-profiles `{url, connected}` file into the profile list so an
     /// upgrading user keeps their server and auto-connect state.
     fn migrate_legacy(&mut self) {
-        if let Some(url) = self.url.take() {
+        if let Some(raw) = self.url.take() {
+            // Normalize first: every other profile id is a normalized URL, and the
+            // id doubles as the identity. A legacy file holding "http://box:3000/"
+            // (or a scheme-less "box:3000") would otherwise migrate to an id that
+            // never matches the normalized form the connect flow produces — the
+            // next connect would add a *second* profile for the same server and
+            // the menu checkmark would stop tracking `active`. Fall back to the
+            // raw string if it can't be parsed, so a broken value still migrates.
+            let url = normalize_url(&raw).unwrap_or(raw);
             if !self.servers.iter().any(|p| p.id == url) {
                 self.servers.push(ServerProfile {
                     label: host_label(&url),
@@ -330,8 +338,9 @@ fn refresh_menu(app: &tauri::AppHandle) {
 
 /// Navigate the app window to a path on the current server (e.g. the resolver
 /// admin page). Runs the navigation from *inside* the page via `eval` with a
-/// **relative** path, so it always resolves against the origin the webview is
-/// already showing — no dependence on the stored `active` URL matching. Only the
+/// **root-relative** path (`/admin/...`), so it always resolves against the origin
+/// the webview is already showing — no dependence on the stored `active` URL
+/// matching, and no absolute URL to get out of sync. Only the
 /// window(s) actually loaded on an http(s) origin are touched (never the bundled
 /// connect screen, whose document is a local `tauri://` page).
 fn navigate_active_window(app: &tauri::AppHandle, path: &str) {
@@ -455,6 +464,8 @@ fn main() {
             app.set_menu(menu)?;
 
             // System tray: quick access to the dashboard and the resolver page.
+            // `?` here is deliberate — a tray we can't build is a broken install,
+            // so fail startup loudly rather than launch a half-wired app.
             let tray_menu = MenuBuilder::new(handle)
                 .text("tray:open", "Open Stingray Tickets")
                 .item(
@@ -487,10 +498,55 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while running Stingray Tickets")
         .run(|_app, event| {
-            // Keep the process alive when the last window closes only if a tray
-            // exists — otherwise exit as before. Default behavior is fine here.
+            // Tauri's default exit behavior is what we want: closing the last
+            // window quits, and the tray does not hold the process open. Matched
+            // explicitly so the intent is visible if that ever needs to change.
             if let RunEvent::ExitRequested { .. } = event {
                 // no-op: allow normal exit
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy(url: &str) -> DesktopConfig {
+        DesktopConfig { url: Some(url.into()), connected: true, ..Default::default() }
+    }
+
+    #[test]
+    fn migrate_legacy_normalizes_the_url_it_adopts() {
+        // A trailing slash (or a missing scheme) in the old single-URL file must not
+        // survive into the profile id — ids are normalized URLs everywhere else.
+        let mut cfg = legacy("http://box:3000/");
+        cfg.migrate_legacy();
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].id, "http://box:3000");
+        assert_eq!(cfg.active.as_deref(), Some("http://box:3000"));
+        assert!(cfg.url.is_none() && !cfg.connected);
+
+        let mut cfg = legacy("box:3000");
+        cfg.migrate_legacy();
+        assert_eq!(cfg.servers[0].id, "https://box:3000");
+    }
+
+    #[test]
+    fn migrated_profile_is_reused_not_duplicated_on_reconnect() {
+        // The regression this guards: connecting again to the same server (which
+        // goes through normalize_url) used to append a second profile and orphan
+        // the menu checkmark, because the migrated id kept its trailing slash.
+        let mut cfg = legacy("http://box:3000/");
+        cfg.migrate_legacy();
+        cfg.upsert_active(&normalize_url("http://box:3000/").unwrap());
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.active.as_deref(), Some(cfg.servers[0].id.as_str()));
+    }
+
+    #[test]
+    fn migrate_legacy_keeps_an_unparseable_url() {
+        let mut cfg = legacy("   ");
+        cfg.migrate_legacy();
+        assert_eq!(cfg.servers[0].id, "   ");   // still migrated, just not normalized
+    }
 }
