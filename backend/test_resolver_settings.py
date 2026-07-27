@@ -133,6 +133,35 @@ def test_heartbeat_updates_in_place(client, admin_key):
     assert len(mine) == 1 and mine[0]["model"] == "m2"  # upsert, not append
 
 
+def test_concurrent_first_heartbeat_retries_as_update(client, admin_key, monkeypatch):
+    """Two overlapping sweeps of the same bot can both see "no row" and both
+    insert; the unique constraint rejects the loser. That must resolve into an
+    update, not a 500. Simulated by making the endpoint's lookup miss once, so
+    it inserts on top of a row that already exists."""
+    from routers import resolver_settings as rs
+
+    uid, key = _make_bot(client, admin_key, f"race-bot-{__import__('uuid').uuid4().hex[:6]}")
+    client.post("/resolvers/heartbeat", json={"name": "race", "model": "m1"}, headers=H(key))
+
+    real_instance = rs._instance
+    calls = {"n": 0}
+
+    def blind_first(db, bot_user_id):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real_instance(db, bot_user_id)
+
+    monkeypatch.setattr(rs, "_instance", blind_first)
+    r = client.post("/resolvers/heartbeat", json={"name": "race", "model": "m2"},
+                    headers=H(key))
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 2                      # missed, then re-read after rollback
+    assert r.json()["model"] == "m2"
+
+    roster = client.get("/resolvers", headers=H(admin_key)).json()
+    mine = [e for e in roster if e["bot_user_id"] == uid]
+    assert len(mine) == 1 and mine[0]["model"] == "m2"   # still one row
+
+
 def test_non_bot_cannot_heartbeat(client, make_user):
     member = make_user()  # a normal member, not a resolver bot
     r = client.post("/resolvers/heartbeat", json={"name": "sneaky"}, headers=H(member.key))

@@ -13,6 +13,7 @@ in ``.env`` and are surfaced as read-only descriptors (``SecretField``) so the
 UI can show their presence without ever holding a value.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from auth import get_current_user, require_admin
@@ -116,6 +117,15 @@ def update_resolver_settings(
 
 # --- Live registry (resolver manager) ----------------------------------------
 
+def _instance(db: Session, bot_user_id: int) -> ResolverInstance | None:
+    """The live-registry row for one bot, if it has ever sent a heartbeat."""
+    return (
+        db.query(ResolverInstance)
+        .filter(ResolverInstance.bot_user_id == bot_user_id)
+        .one_or_none()
+    )
+
+
 def _roster_entry(user: User, inst: ResolverInstance | None, has_settings: bool) -> ResolverRosterEntry:
     effective = (
         ResolverSettingsValues(**inst.effective_config)
@@ -152,21 +162,31 @@ def resolver_heartbeat(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only resolver bots may send a heartbeat",
         )
-    inst = (
-        db.query(ResolverInstance)
-        .filter(ResolverInstance.bot_user_id == user.id)
-        .one_or_none()
-    )
+    def apply(inst: ResolverInstance) -> None:
+        inst.label = payload.label
+        inst.name = payload.name
+        inst.agent = payload.agent
+        inst.model = payload.model
+        inst.effective_config = payload.effective_config.model_dump(mode="json")
+        inst.last_seen_at = utcnow()
+
+    inst = _instance(db, user.id)
     if inst is None:
         inst = ResolverInstance(bot_user_id=user.id)
         db.add(inst)
-    inst.label = payload.label
-    inst.name = payload.name
-    inst.agent = payload.agent
-    inst.model = payload.model
-    inst.effective_config = payload.effective_config.model_dump(mode="json")
-    inst.last_seen_at = utcnow()
-    db.commit()
+    apply(inst)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two overlapping sweeps of the same bot both saw "no row" and both
+        # inserted; the unique constraint on bot_user_id rejects the loser. A
+        # heartbeat is a plain upsert, so retry as an update instead of 500-ing.
+        db.rollback()
+        inst = _instance(db, user.id)
+        if inst is None:
+            raise
+        apply(inst)
+        db.commit()
     has_settings = _row(db, user.id) is not None
     return _roster_entry(user, inst, has_settings)
 

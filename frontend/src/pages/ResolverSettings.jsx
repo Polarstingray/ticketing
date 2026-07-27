@@ -136,6 +136,9 @@ function relTime(ms) {
 function freshness(lastSeen) {
   if (!lastSeen) return { cls: "never", label: "never seen" };
   const age = Date.now() - new Date(lastSeen).getTime();
+  // An unparseable timestamp yields NaN, which relTime would render as "NaN d
+  // ago" — treat it as no heartbeat at all.
+  if (Number.isNaN(age)) return { cls: "never", label: "never seen" };
   return { cls: age < 25 * 60 * 1000 ? "live" : "stale", label: relTime(age) };
 }
 
@@ -254,7 +257,9 @@ export default function ResolverSettings() {
             <div className={styles.roster}>
               <button
                 type="button"
-                className={`${styles.rosterRow} ${selected == null ? styles.rosterActive : ""}`}
+                className={`${styles.rosterRow} ${styles.rosterGlobal} ${
+                  selected == null ? styles.rosterActive : ""
+                }`}
                 onClick={() => select(null)}
               >
                 <span className={styles.rosterName}>Global default</span>

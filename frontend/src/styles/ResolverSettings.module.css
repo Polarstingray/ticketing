@@ -107,8 +107,9 @@
   font-size: 13px;
   color: var(--text);
 }
-/* The "Global default" row has no dot column. */
-.rosterRow:first-child {
+/* The "Global default" row has no dot column. Keyed on an explicit class, not
+   :first-child, so adding a header or reordering rows can't break the layout. */
+.rosterGlobal {
   grid-template-columns: minmax(160px, 1.2fr) 1fr;
 }
 .rosterRow:hover {
