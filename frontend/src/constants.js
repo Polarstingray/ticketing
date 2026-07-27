@@ -51,10 +51,17 @@ export function formatUsd(n) {
 }
 
 // Reserved/control tags drive the resolver bot's automation (mirrors
-// backend/control_tags.py). Regular users can see but not edit these; the
+// backend/control_tags.py — keep the two lists in sync, or the UI offers edits
+// the backend rejects with a 422). Regular users can see but not edit these; the
 // backend is the real trust boundary and rejects attempts to set them.
-const RESERVED_TAG_PREFIXES = ["claude:", "repo:"];
-const RESERVED_TAG_EXACT = new Set(["dangerous", "fix"]);
+const RESERVED_TAG_PREFIXES = [
+  "claude:",
+  "resolver:",
+  "repo:",
+  "parent:",
+  "review-by:",
+];
+const RESERVED_TAG_EXACT = new Set(["dangerous", "fix", "delegate"]);
 
 export function isReservedTag(tag) {
   return (
@@ -62,6 +69,16 @@ export function isReservedTag(tag) {
     RESERVED_TAG_PREFIXES.some((p) => tag.startsWith(p))
   );
 }
+
+// Set by the resolver when it has posted a code review and handed the ticket
+// back: the findings are on file and a `/fix` replays them as an implement plan
+// (resolve_tickets.TAG_AWAIT_FIX).
+export const TAG_AWAITING_FIX = "resolver:awaiting-fix";
+export const REPO_TAG_PREFIX = "repo:";
+
+// Prefix the resolver stamps on the comment carrying its findings
+// (resolve_tickets.REVIEW_MARKER) — identifies which bot to hand the ticket back to.
+export const REVIEW_MARKER = "🔎 **Code review**";
 
 // Human-readable predicate for an activity entry (the actor name is prepended by
 // the caller). `detail` shape depends on the action — see backend activity.py.

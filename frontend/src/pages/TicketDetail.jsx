@@ -8,8 +8,11 @@ import {
   AGENT_PHASE_LABELS,
   PRIORITIES,
   PRIORITY_LABELS,
+  REPO_TAG_PREFIX,
+  REVIEW_MARKER,
   STATUSES,
   STATUS_LABELS,
+  TAG_AWAITING_FIX,
   describeActivity,
   formatDate,
   formatTokens,
@@ -36,6 +39,7 @@ export default function TicketDetail() {
   const [editingCommentId, setEditingCommentId] = useState(null);
   const [editingBody, setEditingBody] = useState("");
   const [tagInput, setTagInput] = useState("");
+  const [requestingFix, setRequestingFix] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -107,7 +111,7 @@ export default function TicketDetail() {
   }
 
   // Only free (non-reserved) tags are user-editable. Reserved control tags
-  // (claude:*, repo:*, dangerous, fix) are shown read-only; the backend
+  // (claude:*/resolver:*, repo:*, parent:*, dangerous, fix, …) are read-only; the backend
   // preserves them and rejects any attempt to set them, so we patch with the
   // free tags only.
   const freeTags = (ticket?.tags ?? []).filter((t) => !isReservedTag(t));
@@ -127,7 +131,9 @@ export default function TicketDetail() {
     setTagInput("");
     if (parts.length === 0) return;
     if (parts.some(isReservedTag)) {
-      setError("Reserved tags (claude:*, repo:*, dangerous, fix) can't be set here.");
+      setError(
+        "Reserved tags (resolver:*, repo:*, parent:*, dangerous, fix, delegate) can't be set here."
+      );
       return;
     }
     saveFreeTags([...freeTags, ...parts]);
@@ -135,6 +141,33 @@ export default function TicketDetail() {
 
   function removeTag(tag) {
     saveFreeTags(freeTags.filter((t) => t !== tag));
+  }
+
+  // --- resolver fix loop --------------------------------------------------
+  // After the resolver posts a review it tags the ticket resolver:awaiting-fix and
+  // hands it back. Commenting `/fix` and re-assigning it to the bot makes it apply
+  // its own findings as a PR — this button is that pair of steps in one click. The
+  // bot to hand it back to is whoever authored the review comment, so no extra
+  // endpoint (or hardcoded bot id) is needed.
+  const reviewComment = [...comments]
+    .reverse()
+    .find((c) => (c.body || "").includes(REVIEW_MARKER));
+  const awaitingFix = (ticket?.tags ?? []).includes(TAG_AWAITING_FIX);
+  const hasRepoTag = (ticket?.tags ?? []).some((t) => t.startsWith(REPO_TAG_PREFIX));
+  const showFixButton = Boolean(canModify && awaitingFix && reviewComment);
+
+  async function requestFix() {
+    setError("");
+    setRequestingFix(true);
+    try {
+      const c = await api.addComment(id, "/fix");
+      setComments((prev) => [...prev, c]);
+      await patch({ assigned_to: reviewComment.author });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setRequestingFix(false);
+    }
   }
 
   async function submitComment(e) {
@@ -461,6 +494,31 @@ export default function TicketDetail() {
       </div>
 
       <aside className={styles.sidebar}>
+        {showFixButton && (
+          <div className="card">
+            <div className="field">
+              <label>Resolver review</label>
+              <button
+                type="button"
+                className="primary"
+                disabled={requestingFix || !hasRepoTag}
+                title={
+                  hasRepoTag
+                    ? "Comment /fix and assign this back to the resolver so it applies its findings"
+                    : "The resolver needs a repo:<name> tag to apply fixes"
+                }
+                onClick={requestFix}
+              >
+                {requestingFix ? "Requesting…" : "Apply fixes"}
+              </button>
+              <div className="muted">
+                {hasRepoTag
+                  ? "Hands this back to the resolver with /fix — it turns the review findings into a PR."
+                  : "Add a repo:<name> tag before the resolver can apply these findings."}
+              </div>
+            </div>
+          </div>
+        )}
         <div className="card">
           <div className="field">
             <label>Status</label>

@@ -1214,6 +1214,111 @@ def test_do_review_no_repo_with_fix_fails(fake_cfg, monkeypatch):
     assert any(rt.FAIL_MARKER in b and "can't apply fixes" in b for _, b in client.comments_added)
 
 
+# --- post-review fix loop (`/fix`) ---------------------------------------
+def test_do_review_leaves_ticket_awaiting_fix(fake_cfg, monkeypatch):
+    # A findings-only review must leave the ticket actionable: the awaiting-fix tag
+    # plus a footer telling the reporter how to ask for the fixes.
+    monkeypatch.setattr(rt, "run_agent", lambda *a, **k: (True, "FINDINGS"))
+    client = FakeClient()
+    rt.do_review(fake_cfg, client, _review_ticket(), fake_cfg.resolve_repo("x"), want_fix=False)
+    assert rt.TAG_AWAIT_FIX in client.updates[-1]["tags"]
+    assert any("/fix" in b for _, b in client.comments_added)
+
+
+def test_do_review_no_repo_footer_explains_missing_repo(fake_cfg, monkeypatch):
+    # Repo-less review: don't promise a fix we can't apply.
+    monkeypatch.setattr(rt, "run_agent", lambda *a, **k: (True, "FINDINGS"))
+    client = FakeClient()
+    ticket = _review_ticket(tags=[], code_blocks=[
+        {"filename": "a.py", "language": "python", "line_start": 1, "line_end": 2, "content": "x"}])
+    rt.do_review(fake_cfg, client, ticket, None, want_fix=False)
+    review = [b for _, b in client.comments_added if rt.REVIEW_MARKER in b][0]
+    assert rt.NO_REPO_FOR_FIX in review and rt.FIX_HINT not in review
+
+
+def test_find_review_findings_strips_the_hint_footer():
+    comments = [
+        {"author": 9, "body": "please look"},
+        {"author": BOT, "body": f"{rt.REVIEW_MARKER} (Stingray resolver)\n\nblocker: bug\n\n{rt.FIX_HINT}"},
+    ]
+    found = rt.find_review_findings(comments, BOT)
+    assert "blocker: bug" in found and "/fix" not in found
+    # Another author's lookalike comment is not our findings.
+    assert rt.find_review_findings([{"author": 9, "body": rt.REVIEW_MARKER}], BOT) is None
+
+
+def test_process_fix_comment_implements_review_findings(fake_cfg, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(rt, "do_implement",
+                        lambda c, cl, t, r, plan=None, reviewer_notes=None, cmd=None:
+                        seen.update(plan=plan, notes=reviewer_notes))
+    monkeypatch.setattr(rt, "do_review", lambda *a, **k: pytest.fail("should not re-review"))
+    comments = [
+        {"author": BOT, "body": f"{rt.REVIEW_MARKER}\n\nblocker: unchecked exit code\n\n{rt.FIX_HINT}"},
+        {"author": 9, "body": "/fix only the blocker please"},
+    ]
+    ticket = _review_ticket(tags=["repo:x", rt.TAG_AWAIT_FIX], status="in_review")
+    rt.process(fake_cfg, FakeClient(comments), ticket, dry_run=False)
+    assert rt.PLAN_MARKER in seen["plan"] and "unchecked exit code" in seen["plan"]
+    assert seen["notes"] == "only the blocker please"
+    assert "only the blocker please" in seen["plan"]
+
+
+def test_process_fix_tag_after_review_also_implements(fake_cfg, monkeypatch):
+    # Adding the `fix` tag in the UI and re-assigning is the no-comment equivalent.
+    seen = {}
+    monkeypatch.setattr(rt, "do_implement",
+                        lambda c, cl, t, r, plan=None, reviewer_notes=None, cmd=None:
+                        seen.update(plan=plan))
+    comments = [{"author": BOT, "body": f"{rt.REVIEW_MARKER}\n\nmajor: races\n\n{rt.FIX_HINT}"}]
+    ticket = _review_ticket(tags=["repo:x", "fix", rt.TAG_AWAIT_FIX], status="in_review")
+    rt.process(fake_cfg, FakeClient(comments), ticket, dry_run=False)
+    assert "races" in seen["plan"]
+
+
+def test_process_awaiting_fix_is_quiet_without_a_command(fake_cfg, monkeypatch):
+    monkeypatch.setattr(rt, "do_implement", lambda *a, **k: pytest.fail("should not implement"))
+    monkeypatch.setattr(rt, "do_review", lambda *a, **k: pytest.fail("should not review"))
+    client = FakeClient([{"author": BOT, "body": f"{rt.REVIEW_MARKER}\n\nfindings"}])
+    rt.process(fake_cfg, client, _review_ticket(tags=["repo:x", rt.TAG_AWAIT_FIX]), dry_run=False)
+    assert client.comments_added == [] and client.updates == []
+
+
+def test_process_awaiting_fix_review_command_re_reviews(fake_cfg, monkeypatch):
+    called = {}
+    monkeypatch.setattr(rt, "do_review", lambda *a, **k: called.update(review=True))
+    comments = [{"author": BOT, "body": f"{rt.REVIEW_MARKER}\n\nfindings"},
+                {"author": 9, "body": "/review"}]
+    rt.process(fake_cfg, FakeClient(comments),
+               _review_ticket(tags=["repo:x", rt.TAG_AWAIT_FIX]), dry_run=False)
+    assert called.get("review")
+
+
+def test_process_fix_without_findings_re_reviews(fake_cfg, monkeypatch):
+    # Findings comment edited away: re-review rather than implement an empty plan.
+    called = {}
+    monkeypatch.setattr(rt, "do_review",
+                        lambda c, cl, t, r, want_fix, cmd=None: called.update(want_fix=want_fix))
+    monkeypatch.setattr(rt, "do_implement", lambda *a, **k: pytest.fail("no plan to implement"))
+    rt.process(fake_cfg, FakeClient([{"author": 9, "body": "/fix"}]),
+               _review_ticket(tags=["repo:x", rt.TAG_AWAIT_FIX]), dry_run=False)
+    assert called.get("want_fix") is True
+
+
+def test_process_fix_without_repo_hands_back(fake_cfg, monkeypatch):
+    # Applying needs a checkout; say so instead of calling do_implement with repo=None.
+    monkeypatch.setattr(rt, "do_implement", lambda *a, **k: pytest.fail("no repo to fix in"))
+    comments = [{"author": BOT, "body": f"{rt.REVIEW_MARKER}\n\nfindings"},
+                {"author": 9, "body": "/fix"}]
+    client = FakeClient(comments)
+    ticket = _review_ticket(tags=[rt.TAG_AWAIT_FIX], code_blocks=[
+        {"filename": "a.py", "language": "python", "line_start": 1, "line_end": 2, "content": "x"}])
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+    assert any(rt.NO_REPO_FOR_FIX in b for _, b in client.comments_added)
+    assert client.updates[-1]["assigned_to"] == 9
+    assert rt.TAG_AWAIT_FIX in client.updates[-1]["tags"]
+
+
 def test_do_review_failure_is_reported(fake_cfg, monkeypatch):
     monkeypatch.setattr(rt, "run_agent", lambda *a, **k: (False, "boom"))
     client = FakeClient()
@@ -1875,7 +1980,8 @@ def test_create_ticket_posts_to_tickets_endpoint():
 
 def _args(**over):
     base = dict(type="code_review", title="t", description="", priority="medium",
-               tag=None, assign=None, code_block=None, root=".", parent=None)
+               tag=None, assign=None, code_block=None, root=".", parent=None,
+               repo=None, no_repo=False)
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -1964,11 +2070,55 @@ def test_build_payload_parent_rejects_delegate_tag():
         ft.build_payload(args)
 
 
-def test_build_payload_no_parent_leaves_tags_untouched():
-    args = _args(type="task", tag=["backend"])
+def test_build_payload_no_parent_keeps_tags_and_adds_repo(tmp_path):
+    # No delegation tags; the only addition is the auto-derived repo: tag (below).
+    args = _args(type="task", tag=["backend"], root=str(tmp_path), no_repo=True)
     payload = ft.build_payload(args)
     assert payload["tags"] == ["backend"]
     assert "dangerous" not in payload["tags"]
+
+
+# --- repo: tag defaulting -------------------------------------------------
+def _git_repo(tmp_path):
+    repo = tmp_path / "myproj"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    return repo
+
+
+def test_build_payload_auto_tags_repo_from_checkout(tmp_path):
+    repo = _git_repo(tmp_path)
+    payload = ft.build_payload(_args(type="task", root=str(repo)))
+    assert payload["tags"] == ["repo:myproj"]
+
+
+def test_build_payload_explicit_repo_wins_and_conflicts_error(tmp_path):
+    repo = _git_repo(tmp_path)
+    payload = ft.build_payload(_args(type="task", root=str(repo), repo="cantina"))
+    assert payload["tags"] == ["repo:cantina"]
+    # A repo: tag passed through --tag is honored, not doubled.
+    payload = ft.build_payload(_args(type="task", root=str(repo), tag=["repo:cantina"]))
+    assert payload["tags"] == ["repo:cantina"]
+    with pytest.raises(ValueError):
+        ft.build_payload(_args(type="task", root=str(repo), repo="a", tag=["repo:b"]))
+
+
+def test_build_payload_no_repo_opts_out(tmp_path):
+    repo = _git_repo(tmp_path)
+    payload = ft.build_payload(_args(type="task", root=str(repo), no_repo=True))
+    assert payload["tags"] == []
+
+
+def test_build_payload_outside_a_git_checkout_adds_nothing(tmp_path):
+    payload = ft.build_payload(_args(type="task", root=str(tmp_path)))
+    assert payload["tags"] == []
+
+
+def test_build_payload_child_leaves_repo_to_parent_inheritance(tmp_path):
+    # A sub-task inherits its parent's repo in main(); guessing here could contradict it.
+    repo = _git_repo(tmp_path)
+    payload = ft.build_payload(_args(type="task", root=str(repo), parent=85))
+    assert payload["tags"] == ["parent:85"]
 
 
 def test_inherited_parent_tags_names_owner_and_repo():

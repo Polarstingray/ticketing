@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,6 +67,28 @@ def inherited_parent_tags(client, parent_id: int) -> list[str]:
         tags.append(f"{REVIEW_BY_PREFIX}{owner}")
     tags += [t for t in (parent.get("tags") or []) if t.startswith(REPO_PREFIX)]
     return tags
+
+
+def derive_repo_tag(root: Path) -> str | None:
+    """`repo:<name>` for the git checkout containing `root`, or None if it isn't one.
+
+    The resolver can't check anything out without this tag (see resolve_tickets
+    .repo_name_of), and agents filing tickets routinely forget it — so we default it
+    from the working tree the ticket is being filed from, the same way a delegated
+    sub-task inherits its parent's repo tag."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = out.stdout.strip()
+    if out.returncode != 0 or not top:
+        return None
+    return f"{REPO_PREFIX}{Path(top).name}"
+
+
+def has_repo_tag(tags: list[str]) -> bool:
+    return any(t.startswith(REPO_PREFIX) for t in tags)
 
 
 def user_id(value: str) -> int:
@@ -152,6 +175,22 @@ def build_payload(args: argparse.Namespace) -> dict:
             )
         tags.append(f"{PARENT_PREFIX}{parent}")
 
+    # Target repo. Explicit --repo wins; otherwise default it from the git checkout
+    # we're filing from, so the tag stops going missing. --no-repo opts out (e.g. a
+    # review of pasted code blocks with no checkout to point at). A sub-task inherits
+    # its parent's repo in main(), so don't guess one here.
+    repo = (getattr(args, "repo", None) or "").strip()
+    if repo and has_repo_tag(tags):
+        raise ValueError("--repo conflicts with a repo: tag passed via --tag; use one")
+    if repo:
+        tags.append(f"{REPO_PREFIX}{repo}")
+    elif not getattr(args, "no_repo", False) and not has_repo_tag(tags) and parent is None:
+        derived = derive_repo_tag(root)
+        if derived:
+            tags.append(derived)
+            print(f"auto-tagged {derived} (from the git checkout at {root}; "
+                  f"pass --repo NAME or --no-repo to override)", file=sys.stderr)
+
     payload: dict = {
         "type": args.type,
         "title": title,
@@ -175,6 +214,15 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--priority", default="medium", choices=PRIORITIES, help="default: medium")
     p.add_argument("--tag", action="append", metavar="TAG", help="repeatable")
     p.add_argument("--assign", type=user_id, metavar="USER_ID", help="assign to this user id")
+    p.add_argument(
+        "--repo", metavar="NAME",
+        help="target repo (stored as repo:<NAME>); the resolver needs it to check out "
+             "code. Defaults to the git checkout at --root",
+    )
+    p.add_argument(
+        "--no-repo", action="store_true",
+        help="don't tag a repo (a review of pasted code with no checkout)",
+    )
     p.add_argument(
         "--parent", type=int, metavar="TICKET_ID",
         help="file as a delegated sub-task of this ticket: links it (parent:<id>) so "
@@ -226,8 +274,18 @@ def main(argv: list[str] | None = None) -> int:
         # Inherit review owner + the target repo from the parent while we can still
         # read it — the worker that finishes the child cannot.
         for t in inherited_parent_tags(client, args.parent):
+            if t.startswith(REPO_PREFIX) and has_repo_tag(payload["tags"]):
+                continue  # an explicit --repo on the child wins over the parent's
             if t not in payload["tags"]:
                 payload["tags"].append(t)
+        # Parent unreadable or itself untagged: fall back to the checkout we're in,
+        # so a sub-task never lands without a repo to check out.
+        if not args.no_repo and not has_repo_tag(payload["tags"]):
+            derived = derive_repo_tag(Path(args.root).resolve())
+            if derived:
+                payload["tags"].append(derived)
+                print(f"auto-tagged {derived} (parent #{args.parent} named no repo)",
+                      file=sys.stderr)
 
     try:
         ticket = client.create_ticket(**payload)

@@ -123,7 +123,10 @@ curl -s -X POST "$STINGRAY_URL/api/tickets" -H "X-API-Key: $YOUR_KEY" \
 
 - **`tags: ["repo:<name>"]`** selects the target repo — resolves to
   `PROJECTS_ROOT/<name>` (or a `REPO_MAP` override). Required unless `DEFAULT_REPO`
-  is set. Anything outside `PROJECTS_ROOT` is rejected.
+  is set. Anything outside `PROJECTS_ROOT` is rejected. Easy to forget when filing by
+  hand, and without it the resolver can only review embedded code blocks (never fix
+  them) — `file_ticket.py` fills it in from the checkout you run it in, so prefer that
+  over `curl`.
 - **`type: code_review`** keeps your `code_blocks` (they're dropped for `task`).
 - Add **`"dangerous"`** to `tags` to skip the plan gate.
 
@@ -153,6 +156,19 @@ resolves a review request another bot (or you) filed.
   the resolver treats its findings as a plan and routes into the normal `/approve` →
   implement → PR gate (or applies them straight away if the ticket is also `dangerous`).
   Without `fix`, review mode is strictly findings-only.
+- **Fix it afterwards (`/fix`):** a findings-only review leaves the ticket tagged
+  `resolver:awaiting-fix`, which keeps it *actionable* — no follow-up ticket needed.
+  Re-assign it to the bot with a **`/fix`** comment (or `/fix <notes>` to steer which
+  findings to apply, or just add the `fix` tag and re-assign) and the resolver replays
+  the findings it posted as the implement plan and opens a PR. The **Apply fixes**
+  button on the ticket page does both steps in one click. Applying needs a checkout:
+  a review with no `repo:<name>` tag says so instead of implementing.
+
+  ```
+  file ticket ──▶ review ──▶ 🔎 findings + resolver:awaiting-fix ──▶ /fix ──▶ PR
+                                        ▲                              │
+                                        └────── /review (re-review) ───┘
+  ```
 
 View a review transcript with `./logs.py <id> --review`.
 
@@ -170,6 +186,8 @@ JSON-escaped. The implement-phase prompt points the agent at it automatically.
   --type code_review --title "Review: auth refactor" \
   --priority high --tag backend \
   --code-block backend/auth.py:python:60-66      # PATH:LANGUAGE:START-END, read off disk
+  # repo:<name> is added automatically from the git checkout at --root;
+  # override with --repo NAME, or suppress it with --no-repo
 
 .venv/bin/python file_ticket.py \
   --type task --title "Flaky retry test" --description "Failed twice this week"
@@ -631,7 +649,8 @@ Auto-merge is never done — Claude only opens the PR; you approve and merge.
   tools in `CLAUDE_IMPLEMENT_TOOLS`.
 - **Least-privilege bot:** a `member` user that can only act on its own tickets.
 - **Reserved control tags:** the bot drives its workflow through control tags
-  (`claude:*`, `repo:*`, `dangerous`, `fix`). The **backend** restricts setting
+  (`claude:*`/`resolver:*`, `repo:*`, `parent:*`, `review-by:*`, `dangerous`, `fix`,
+  `delegate`). The **backend** restricts setting
   these to admins and the resolver bot, so an ordinary user can't hijack the
   automation (re-point a repo, force an "implement & open PR" phase, or strip
   the `dangerous` gate) via the UI or their own API key. For this to recognize
