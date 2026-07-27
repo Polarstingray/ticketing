@@ -237,9 +237,9 @@ def update_ticket(
             setattr(ticket, field, value)
 
     if "code_blocks" in data and data["code_blocks"] is not None:
-        ticket.code_blocks = [
-            cb if isinstance(cb, dict) else cb.model_dump() for cb in data["code_blocks"]
-        ]
+        if ticket.type != TicketType.code_review.value:
+            raise HTTPException(status_code=400, detail="code_blocks only allowed on code_review tickets")
+        ticket.code_blocks = [cb.model_dump() for cb in data["code_blocks"]]
 
     # Record activity for the audited fields that actually changed.
     if "status" in data and ticket.status != old_status:
