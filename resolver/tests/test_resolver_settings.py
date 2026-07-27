@@ -1,7 +1,6 @@
 """Resolver-side settings overlay: server-managed tunables layer onto the
 .env-derived config, secrets are never touched, and absent/unreachable settings
 fall back to the .env values."""
-from types import SimpleNamespace
 
 import resolve_tickets as rt
 import stingray
