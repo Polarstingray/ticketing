@@ -3,5 +3,12 @@
   "identifier": "default",
   "description": "Baseline permissions for all app windows.",
   "windows": ["*"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "notification:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
+  ]
 }

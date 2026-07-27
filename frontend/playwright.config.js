@@ -10,6 +10,10 @@ const E2E_DB = path.join(__dirname, "e2e", ".data", "e2e.db");
 // Backend env: dev-mode secrets + the seeded admin the happy-path logs in as.
 const backendEnv = {
   DATABASE_PATH: E2E_DB,
+  // Every test signs in, and the whole suite runs inside one minute from a single
+  // IP — the production 5/minute login budget would 429 the later specs and leave
+  // them stranded on /login. Widen it for the throwaway E2E server only.
+  LOGIN_RATE_LIMIT: "1000/minute",
   SESSION_SECRET: "e2e-only-secret",
   ADMIN_USERNAME: "admin",
   ADMIN_PASSWORD: "adminpass123",

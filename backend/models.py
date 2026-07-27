@@ -242,6 +242,62 @@ class NotificationPreference(Base):
     enabled = Column(Boolean, nullable=False, default=True)
 
 
+class ResolverSettings(Base):
+    """Server-managed, non-secret tunables for the resolver daemon.
+
+    The resolver is normally configured from a ``.env`` file parsed once at
+    process start. This table lets an admin override the *non-secret* tunables
+    (model routing, attempt limits, verify gate, escalation, delegation) from the
+    UI; the resolver fetches them at sweep start and overlays them on top of its
+    ``.env`` defaults, so changes take effect on the next sweep.
+
+    Keyed by ``bot_user_id`` to support multiple resolver identities (each with
+    its own ``RESOLVER_ENV_FILE``); a ``NULL`` row is the global default used
+    when a resolver has no row of its own. The whole tunable set is stored as a
+    single JSON blob (mirroring ``Ticket.code_blocks``) so the resolver's config
+    dataclass stays the schema of record. **Secrets never land here** — provider
+    keys remain in ``.env`` and are surfaced read-only in the UI.
+    """
+    __tablename__ = "resolver_settings"
+    __table_args__ = (
+        UniqueConstraint("bot_user_id", name="uq_resolver_settings_bot"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_user_id = Column(Integer, nullable=True)  # NULL = global default row
+    settings = Column(JSON, nullable=False, default=dict)  # non-secret tunables only
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    updated_by = Column(Integer, nullable=True)
+
+
+class ResolverInstance(Base):
+    """A running resolver's self-reported identity + observed state.
+
+    Distinct from :class:`ResolverSettings` on purpose: settings are the
+    *admin-authored overrides*, whereas this is what a resolver *reports about
+    itself* at the start of each sweep (which ``.env`` file it runs, its agent
+    and model, and a snapshot of the non-secret config it's actually using).
+    Written by the resolver bot itself (``POST /resolvers/heartbeat``), read by
+    the admin resolver-manager UI. ``last_seen_at`` is bumped each heartbeat, so
+    a stopped resolver simply goes stale. **No secrets** — ``effective_config``
+    carries only the same non-secret tunable set as ResolverSettings.
+    """
+    __tablename__ = "resolver_instances"
+    __table_args__ = (
+        UniqueConstraint("bot_user_id", name="uq_resolver_instance_bot"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_user_id = Column(Integer, nullable=False, index=True)  # the resolver's own user id
+    label = Column(String, nullable=False, default="")   # RESOLVER_ENV_FILE, e.g. ".env.gemini"
+    name = Column(String, nullable=False, default="")     # clean name, e.g. "gemini"
+    agent = Column(String, nullable=False, default="")    # claude | opencode | ...
+    model = Column(String, nullable=False, default="")
+    effective_config = Column(JSON, nullable=False, default=dict)  # non-secret snapshot
+    last_seen_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class Activity(Base):
     """An immutable audit entry describing something that happened to a ticket.
 

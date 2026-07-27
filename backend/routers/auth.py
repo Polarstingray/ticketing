@@ -13,7 +13,7 @@ from auth import (
 from database import get_db
 from login_throttle import account_lockout
 from models import User
-from ratelimit import limiter
+from ratelimit import LOGIN_RATE_LIMIT, limiter
 from schemas import LoginRequest, UserSelf
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -21,9 +21,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/login", response_model=UserSelf)
 # Per-IP limit (slowapi). Stops offline-speed network brute force from a single
-# source while leaving headroom for fat-fingered passwords. slowapi requires the
-# endpoint to have a parameter named exactly ``request``.
-@limiter.limit("5/minute;30/hour")
+# source while leaving headroom for fat-fingered passwords; override with
+# LOGIN_RATE_LIMIT where one IP fronts many users. slowapi requires the endpoint
+# to have a parameter named exactly ``request``.
+@limiter.limit(LOGIN_RATE_LIMIT)
 def login(request: Request, payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
     # Per-account lockout (covers distributed / credential-stuffing attacks that
     # spread across IPs and so slip past the per-IP limit above).

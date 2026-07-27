@@ -24,3 +24,10 @@ limiter = Limiter(
     default_limits=[],
     storage_uri=_storage_uri,
 )
+
+# Per-IP budget for ``POST /auth/login``. The default blunts network brute force
+# while leaving room for fat-fingered passwords. It is configurable because a
+# single IP can legitimately carry many logins — everyone behind one office NAT,
+# or an end-to-end suite that signs in as several users inside a minute (the
+# Playwright run sets a wider budget in playwright.config.js).
+LOGIN_RATE_LIMIT = os.environ.get("LOGIN_RATE_LIMIT", "").strip() or "5/minute;30/hour"

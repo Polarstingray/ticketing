@@ -148,6 +148,23 @@ class StingrayClient:
         """A ticket's own agent-run cost plus that of its delegated children."""
         return self._request("GET", f"/tickets/{ticket_id}/cost-rollup").json()
 
+    # --- resolver registry ----------------------------------------------
+    def heartbeat(self, **fields: Any) -> dict:
+        """Self-report this resolver's identity + observed state for the manager
+        registry (label, name, agent, model, effective_config). Authenticates as
+        the bot's own user; the server keys the row by that user id. Reuses the
+        retry/backoff/audit wrapper."""
+        return self._request("POST", "/resolvers/heartbeat", json=fields).json()
+
+    # --- resolver settings ----------------------------------------------
+    def get_resolver_settings(self, bot_user_id: int | None = None) -> dict:
+        """Server-managed, non-secret resolver tunables for this identity.
+        Returns the {bot_user_id, settings, secrets, ...} envelope; the caller
+        overlays ``settings`` onto its .env-derived config. Reuses the
+        retry/backoff/audit wrapper."""
+        params = {"bot_user_id": bot_user_id} if bot_user_id is not None else None
+        return self._request("GET", "/resolver-settings", params=params).json()
+
     # --- comments --------------------------------------------------------
     def list_comments(self, ticket_id: int) -> list[dict]:
         return self._request("GET", f"/tickets/{ticket_id}/comments").json()
