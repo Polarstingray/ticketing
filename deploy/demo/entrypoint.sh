@@ -54,6 +54,10 @@ fi
 
 # --proxy-headers so the backend trusts the X-Forwarded-* set by the nginx in
 # this container (real client IP for rate limiting, scheme for Secure cookies).
+# Trusting "*" is only safe because uvicorn binds loopback here and that nginx
+# OVERWRITES X-Forwarded-For with the address it resolved itself (see
+# deploy/demo/nginx.conf) instead of appending the caller's value. No --workers:
+# login_throttle.py / slowapi counters are per-process.
 uvicorn main:app \
   --host 127.0.0.1 --port 8000 \
   --proxy-headers --forwarded-allow-ips '*' &
