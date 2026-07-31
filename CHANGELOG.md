@@ -21,7 +21,23 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 - Project governance docs: `LICENSE` (MIT), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, this
   changelog, and GitHub issue/PR templates.
 
+### Fixed
+- **Spoofable client IP** (security): nginx forwarded `X-Forwarded-For` by *appending* to the
+  caller's own value, and uvicorn (`--forwarded-allow-ips "*"`) trusts the leftmost entry, so
+  any client could choose its `request.client.host` — dodging the per-IP login limit and the
+  API-key throttle, and planting an unbounded number of throttle entries. Both nginx configs
+  now overwrite the header with the address nginx resolved itself.
+- **Unbounded auth-throttle memory**: the in-memory account-lockout and per-IP failure maps
+  (`backend/login_throttle.py`) never evicted anything. They now sweep aged-out entries and
+  enforce a hard cap, shedding harmless entries before live lockouts. Login credentials are
+  also length-bounded so a single request can't plant a megabyte-sized key.
+- **Permanent account lockout by a third party**: the failure counter now decays after a quiet
+  window, so an attacker who knows a username can no longer ratchet that account to the 1-hour
+  lockout cap and hold it there. Arming a lockout is logged.
+
 ### Changed
+- A successful API-key request now credits back one failed attempt for that IP instead of
+  clearing the whole per-IP counter.
 - The resolver bot is now recognized for control-tag permissions by a DB flag
   (`User.is_resolver_bot`) instead of a `RESOLVER_BOT_USER_ID` env id that had to be kept in
   sync between the backend and resolver. The legacy env id is still honored.
