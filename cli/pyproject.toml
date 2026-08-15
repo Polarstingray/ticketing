@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stingray-cli"
+version = "0.1.0"
+description = "File Stingray Tickets code reviews from git, and scaffold projects with a ready-made backlog."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["requests>=2.31"]
+
+[project.scripts]
+stingray = "stingray_cli.main:main"
+
+[tool.setuptools]
+packages = ["stingray_client", "stingray_cli"]
+
+[tool.setuptools.package-data]
+stingray_cli = ["templates/**/*"]

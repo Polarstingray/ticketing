@@ -1,0 +1,47 @@
+"""The actual work {{project_name}} does."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class Result:
+    """What one run produced."""
+    source: str
+    items: list
+    errors: list
+
+
+def process(source: str, config) -> Result:
+    """Run the pipeline over `source` and return a Result."""
+    # STINGRAY-STUB: read the source, run it through parse/transform, and collect
+    # both the items and any recoverable errors into a Result.
+    # ACCEPTANCE: a source with some bad records still returns a Result whose
+    # `items` holds the good ones and whose `errors` describes the rest.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def parse(raw: str) -> list:
+    """Turn raw input text into structured records."""
+    # STINGRAY-STUB: parse the input format into a list of records.
+    # ACCEPTANCE: returns [] for empty input; raises ValueError on unparseable input.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def transform(records: list, config) -> list:
+    """Apply the configured transformations to `records`."""
+    # STINGRAY-STUB: apply the config's options to each record, in order.
+    # ACCEPTANCE: pure — does not mutate `records`; an empty option set is identity.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def read_source(source: str) -> str:
+    """Read `source` from disk, or from stdin when it is '-'."""
+    # STINGRAY-STUB: support both a file path and '-' for stdin.
+    # ACCEPTANCE: raises FileNotFoundError with the path named when it is missing.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def _resolve(source: str) -> Path:
+    return Path(source).expanduser()

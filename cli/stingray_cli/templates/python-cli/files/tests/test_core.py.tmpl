@@ -1,0 +1,26 @@
+"""Tests for {{package}}.core.
+
+Each test below pairs with a STINGRAY-STUB ticket. They are expected to fail
+until that stub is implemented — that is the point.
+"""
+import pytest
+
+from {{package}}.config import Config
+from {{package}}.core import parse, process, transform
+
+
+def test_parse_empty_input():
+    assert parse("") == []
+
+
+def test_transform_is_identity_without_options():
+    records = [{"a": 1}]
+    assert transform(records, Config()) == records
+
+
+@pytest.mark.parametrize("source", ["-"])
+def test_process_returns_result(source, tmp_path):
+    target = tmp_path / "in.txt"
+    target.write_text("")
+    result = process(str(target), Config())
+    assert result.items == []

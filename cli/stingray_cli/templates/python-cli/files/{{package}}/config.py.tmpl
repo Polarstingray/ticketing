@@ -1,0 +1,34 @@
+"""Configuration loading for {{project_name}}."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass
+class Config:
+    """Runtime settings, merged from defaults, a file, and the environment."""
+    verbose: bool = False
+    options: dict = field(default_factory=dict)
+
+
+DEFAULT_PATHS = (
+    Path("./{{project_name}}.toml"),
+    Path.home() / ".config" / "{{project_name}}" / "config.toml",
+)
+
+
+def load_config(path: str | None = None) -> Config:
+    """Build a Config from `path`, or the first of DEFAULT_PATHS that exists."""
+    # STINGRAY-STUB: read the TOML file, merge it over the defaults, and let
+    # environment variables win over both.
+    # ACCEPTANCE: returns default Config when no file exists; never raises on a
+    # missing file, but does raise on malformed TOML.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def validate(config: Config) -> None:
+    """Raise ValueError if `config` is internally inconsistent."""
+    # STINGRAY-STUB: check the settings that must hold together before a run.
+    # ACCEPTANCE: raises ValueError naming the offending key; returns None if valid.
+    raise NotImplementedError("STINGRAY-STUB")

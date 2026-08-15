@@ -5,6 +5,7 @@ from typing import Annotated, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer, field_validator
 
+from control_tags import ALL_SCOPES
 from models import (
     NotificationChannel,
     NotificationType,
@@ -365,11 +366,31 @@ class ApiKeyMeta(BaseModel):
     last_used_at: Optional[UTCDateTime] = None
     expires_at: Optional[UTCDateTime] = None
     revoked: bool
+    scopes: list[str] = []
+
+    @field_validator("scopes", mode="before")
+    @classmethod
+    def _split_scopes(cls, v):
+        """The column is comma-separated; expose it as a list."""
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v or []
 
 
 class ApiKeyCreate(BaseModel):
     name: str = Field(min_length=1)
     expires_in_days: Optional[int] = Field(default=None, ge=1)
+    # Capability grants for this key (currently only "cli", which permits repo:
+    # tags). Admin-only — enforced in routers/users.create_api_key.
+    scopes: list[str] = Field(default_factory=list)
+
+    @field_validator("scopes")
+    @classmethod
+    def _known_scopes(cls, v):
+        unknown = set(v) - ALL_SCOPES
+        if unknown:
+            raise ValueError(f"unknown scopes: {sorted(unknown)}")
+        return sorted(set(v))
 
 
 class ApiKeyCreated(ApiKeyMeta):
