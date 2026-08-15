@@ -24,6 +24,15 @@ MAX_DIFF_CHARS = 40_000
 # bloat the prompt as much as the diff itself.
 MAX_STAT_CHARS = 4_000
 
+# Generous on purpose. An agent CLI's *startup* can dominate its API time — on a
+# cold `claude` invocation here, a trivial prompt took 59s wall for 3s of API —
+# and a real diff prompt measured 350s end to end. A too-tight default doesn't
+# fail loudly, it just silently falls back to the commit-derived text, which
+# looks like "--describe did nothing". Override per profile:
+#     [profile.<name>.describe]
+#     timeout = 900
+DEFAULT_TIMEOUT = 900
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
@@ -152,7 +161,7 @@ def describe_change(change: gitctx.ChangeSet, *, agent: str | None = None,
     settings = dict(getattr(profile, "describe", None) or {})
     agent = agent or settings.get("agent") or None
     model = settings.get("model") or None
-    timeout = int(settings.get("timeout", 180))
+    timeout = int(settings.get("timeout", DEFAULT_TIMEOUT))
 
     try:
         output = run_agent(build_prompt(change), change.root,
