@@ -76,5 +76,5 @@ def post_ticket(client: StingrayClient, profile: Profile, payload: dict) -> int:
         return 1
 
     print(f"created ticket #{ticket['id']}: {ticket['title']}")
-    print(f"{profile.url}/tickets/{ticket['id']}")
+    print(f"{profile.web_url}/tickets/{ticket['id']}")
     return 0

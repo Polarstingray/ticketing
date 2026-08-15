@@ -278,5 +278,5 @@ def _file_tickets(args, dest: Path, name: str, template: sc.Template,
     except requests.HTTPError as exc:
         print(f"warning: could not link the children onto the epic: {exc}", file=sys.stderr)
 
-    print(f"\n{profile.url}/tickets/{epic_id}")
+    print(f"\n{profile.web_url}/tickets/{epic_id}")
     return 0

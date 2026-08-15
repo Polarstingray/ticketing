@@ -57,6 +57,17 @@ class Profile:
         """The non-secret prefix, matching what the server stores for display."""
         return f"{self.api_key[:11]}…" if self.api_key else "(none)"
 
+    @property
+    def web_url(self) -> str:
+        """The base URL a human should open in a browser.
+
+        ``url`` may point at the API directly, which for the default deployment
+        means the frontend's ``/api`` proxy prefix. That prefix belongs to the
+        REST base, not to a page address, so printing a ticket link built from
+        it gives a 404.
+        """
+        return self.url[:-4] if self.url.endswith("/api") else self.url
+
 
 def _read_raw() -> dict:
     path = config_path()
