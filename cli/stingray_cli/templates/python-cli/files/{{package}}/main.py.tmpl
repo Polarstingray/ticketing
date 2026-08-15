@@ -1,0 +1,43 @@
+"""Command-line entry point for {{project_name}}."""
+from __future__ import annotations
+
+import argparse
+import sys
+
+from {{package}}.config import load_config
+from {{package}}.core import process
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="{{project_name}}",
+        description="{{description}}",
+    )
+    parser.add_argument("input", help="path to the input to process")
+    parser.add_argument("-o", "--output", help="where to write the result (default: stdout)")
+    parser.add_argument("-c", "--config", help="path to a config file")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    config = load_config(args.config)
+    try:
+        result = process(args.input, config)
+    except Exception as exc:  # noqa: BLE001 - surface anything to the user cleanly
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    render_result(result, args.output)
+    return 0
+
+
+def render_result(result, output: str | None) -> None:
+    """Write `result` to `output`, or to stdout when it is None."""
+    # STINGRAY-STUB: format the result and write it to the output destination.
+    # ACCEPTANCE: writes to stdout when output is None; creates parent dirs otherwise.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

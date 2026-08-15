@@ -153,3 +153,58 @@ def test_member_cannot_create_resolver_bot(client, make_user):
         json={"username": "botX"},
     )
     assert r.status_code == 403
+
+
+# --- API key scopes ----------------------------------------------------------
+# Scopes are admin-granted capabilities carried by a key (see control_tags
+# .SCOPE_TAG_PREFIXES). The `cli` scope is what lets the stingray CLI set repo:
+# tags without its owner being an admin.
+
+def test_admin_can_grant_cli_scope(client, admin_key, make_user):
+    member = make_user()
+    created = client.post(
+        f"/users/{member.id}/api-keys",
+        headers={"X-API-Key": admin_key},
+        json={"name": "laptop-cli", "scopes": ["cli"]},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["scopes"] == ["cli"]
+
+    listed = client.get(f"/users/{member.id}/api-keys", headers={"X-API-Key": admin_key})
+    entry = next(k for k in listed.json() if k["id"] == created.json()["id"])
+    assert entry["scopes"] == ["cli"]
+
+
+def test_member_cannot_self_grant_scope(client, make_user):
+    """The escalation this gate exists to stop: a member may mint their own keys,
+    so self-granting `cli` would let them aim the resolver at any repo under
+    PROJECTS_ROOT and read its source back in a ticket they own."""
+    member = make_user()
+    r = client.post(
+        f"/users/{member.id}/api-keys",
+        headers={"X-API-Key": member.key},
+        json={"name": "sneaky", "scopes": ["cli"]},
+    )
+    assert r.status_code == 403, r.text
+
+
+def test_unknown_scope_rejected(client, admin_key, make_user):
+    member = make_user()
+    r = client.post(
+        f"/users/{member.id}/api-keys",
+        headers={"X-API-Key": admin_key},
+        json={"name": "bad", "scopes": ["root"]},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_key_without_scopes_defaults_empty(client, make_user):
+    """Regression: existing callers pass no `scopes` and must be unaffected."""
+    member = make_user()
+    created = client.post(
+        f"/users/{member.id}/api-keys",
+        headers={"X-API-Key": member.key},
+        json={"name": "plain"},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["scopes"] == []

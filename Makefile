@@ -3,7 +3,7 @@ DC ?= docker compose
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install up down logs restart test lint backend-test resolver-test frontend-test desktop-dev desktop-build
+.PHONY: help install up down logs restart test lint backend-test resolver-test cli-test frontend-test desktop-dev desktop-build
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -24,7 +24,7 @@ restart: ## Restart all services
 logs: ## Tail backend logs
 	$(DC) logs -f backend
 
-test: backend-test resolver-test frontend-test ## Run all test suites
+test: backend-test resolver-test cli-test frontend-test ## Run all test suites
 
 backend-test: ## Run backend pytest suite
 	cd backend && python -m pytest -q
@@ -32,11 +32,14 @@ backend-test: ## Run backend pytest suite
 resolver-test: ## Run resolver pytest suite
 	cd resolver && python -m pytest -q
 
+cli-test: ## Run stingray CLI pytest suite
+	cd cli && python -m pytest -q
+
 frontend-test: ## Run frontend tests
 	cd frontend && npm test --silent
 
 lint: ## Ruff-lint the Python code
-	ruff check backend resolver
+	ruff check backend resolver cli
 
 desktop-dev: ## Run the desktop app in dev mode (needs Rust + Node)
 	cd desktop && npm install && npm run tauri:dev

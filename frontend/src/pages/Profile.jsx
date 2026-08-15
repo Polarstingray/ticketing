@@ -9,6 +9,7 @@ export default function Profile() {
   const [keys, setKeys] = useState([]);
   const [name, setName] = useState("");
   const [expiresInDays, setExpiresInDays] = useState("");
+  const [cliScope, setCliScope] = useState(false);
   const [created, setCreated] = useState(null); // the one-time plaintext key
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -41,10 +42,12 @@ export default function Profile() {
       const body = { name: name.trim() };
       const days = parseInt(expiresInDays, 10);
       if (!Number.isNaN(days) && days > 0) body.expires_in_days = days;
+      if (cliScope) body.scopes = ["cli"];
       const key = await api.createApiKey(user.id, body);
       setCreated(key);
       setName("");
       setExpiresInDays("");
+      setCliScope(false);
       loadKeys();
     } catch (e) {
       setError(e.message);
@@ -135,6 +138,7 @@ export default function Profile() {
                 <th>Created</th>
                 <th>Last used</th>
                 <th>Expires</th>
+                <th>Scopes</th>
                 <th>Status</th>
                 <th />
               </tr>
@@ -151,6 +155,15 @@ export default function Profile() {
                     <td>{formatDate(k.created_at)}</td>
                     <td>{k.last_used_at ? formatDate(k.last_used_at) : "never"}</td>
                     <td>{k.expires_at ? formatDate(k.expires_at) : "—"}</td>
+                    <td>
+                      {k.scopes?.length
+                        ? k.scopes.map((s) => (
+                            <span key={s} className={styles.scope}>
+                              {s}
+                            </span>
+                          ))
+                        : "—"}
+                    </td>
                     <td>
                       <span className={`${styles.status} ${st.cls}`}>{st.label}</span>
                     </td>
@@ -186,6 +199,24 @@ export default function Profile() {
             {busy ? "Creating…" : "Create key"}
           </button>
         </form>
+
+        {/* Scopes are admin-only server-side (a member can mint their own keys,
+            so self-service scoping would be no boundary at all). Hide the control
+            for everyone else rather than showing a button that always 403s. */}
+        {user.role === "admin" && (
+          <label className={styles.scopeOpt}>
+            <input
+              type="checkbox"
+              checked={cliScope}
+              onChange={(e) => setCliScope(e.target.checked)}
+            />
+            <span>
+              <code>cli</code> scope — let this key set <code>repo:</code> tags, for the{" "}
+              <code>stingray</code> CLI. This lets the key point the resolver at any repo
+              under its <code>PROJECTS_ROOT</code>; it grants no other control tag.
+            </span>
+          </label>
+        )}
       </div>
     </div>
   );

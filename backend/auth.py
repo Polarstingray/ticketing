@@ -116,6 +116,10 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     The API key is checked first so programmatic clients (Claude Code) work even
     if a stale browser cookie is also present.
     """
+    # Always define it, including on the cookie and 401 paths, so get_api_key
+    # never sees a missing attribute.
+    request.state.api_key = None
+
     raw_key = request.headers.get("X-API-Key")
     if raw_key:
         # Defense-in-depth against key guessing: cap bad-key attempts per IP.
@@ -142,6 +146,9 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
             if last is None or (now - last) > API_KEY_TOUCH_INTERVAL:
                 key.last_used_at = now
                 db.commit()
+            # Stash the key itself so scope-aware checks can reach it; the return
+            # type stays `User` because ~7 routers depend on this. See get_api_key.
+            request.state.api_key = key
             return key.user
         api_key_throttle.register_failure(client_ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
@@ -160,6 +167,19 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Not authenticated",
     )
+
+
+def get_api_key(
+    request: Request, _user: User = Depends(get_current_user)
+) -> ApiKey | None:
+    """The ApiKey that authenticated this request, or None for a cookie session.
+
+    The ``get_current_user`` dependency is load-bearing for *ordering*, not for its
+    value: it is what sets ``request.state.api_key``, and FastAPI caches it per
+    request so depending on it here costs nothing. Without it, resolution order is
+    undefined and the attribute may not be set yet. Do not "clean it up".
+    """
+    return getattr(request.state, "api_key", None)
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:

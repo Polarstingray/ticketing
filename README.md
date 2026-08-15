@@ -282,6 +282,8 @@ The CI matrix runs on every push (see [`.github/workflows/ci.yml`](./.github/wor
   comments, notifications, migrations, and backups.
 - **Resolver** — `pytest` (`resolver/`), 200+ tests of the agent loop with the CLI
   and API mocked (lifecycle, tag gating, path-allowlist, delegation, backoff).
+- **CLI** — `pytest` (`cli/`), covering the credential store, git range resolution,
+  diff→code-block mapping, the `--describe` fallback ladder, and scaffolding.
 - **Frontend unit/component** — Vitest + Testing Library (`frontend/src`), covering
   permission gating, list filtering/debounce, and pure helpers.
 - **Frontend E2E** — Playwright (`frontend/e2e`) drives a real browser through the
@@ -292,10 +294,40 @@ The CI matrix runs on every push (see [`.github/workflows/ci.yml`](./.github/wor
 ```bash
 cd backend   && python -m pytest -q
 cd resolver  && python -m pytest -q
+cd cli       && python -m pytest -q
 cd frontend  && npm test                       # unit/component
 cd frontend  && npm run test:e2e:install        # one-time: fetch the browser
 cd frontend  && npm run test:e2e                # end-to-end (boots backend + Vite itself)
 ```
+
+## The `stingray` CLI
+
+An installable command-line client lives in [`cli/`](./cli). It closes the loop
+between writing code and getting it reviewed: it files tickets **from git**, so the
+changed hunks become the ticket's code blocks automatically and you never paste code
+by hand.
+
+```bash
+pipx install ./cli
+stingray auth login --url http://localhost:3000 --bot-user-id 2
+
+stingray review                     # last commit + working tree
+stingray review HEAD~3..HEAD        # an explicit range
+stingray review --describe          # a local agent writes the title/description
+stingray review --assign-bot -y     # file it straight at the resolver
+
+stingray scaffold python-cli ./newproj --describe "a log parser"
+```
+
+`scaffold` renders a project template, optionally adapts it to your description with
+a local agent, deliberately leaves the interesting functions stubbed, commits it, and
+files one ticket per stub plus an epic that tracks them.
+
+Every ticket it files carries a `repo:<name>` tag — that's what lets you assign it to
+a resolver bot and press **Apply fixes**. Setting that tag needs an API key with the
+**`cli` scope**, which an admin mints from Profile → API keys.
+
+See [`cli/README.md`](./cli/README.md).
 
 ## API
 
@@ -331,6 +363,7 @@ ticketing/
   backend/      FastAPI app, models, auth, routers, migrations, backup
   frontend/     React/Vite SPA
   desktop/      Tauri desktop client (Ubuntu + macOS) for a self-hosted server
+  cli/          `stingray` CLI + the shared API client the resolver also uses
   resolver/     optional headless agent that resolves bot-assigned tickets
   install.sh    guided one-command setup
   Makefile      common tasks (make help)

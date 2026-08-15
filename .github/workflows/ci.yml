@@ -38,6 +38,25 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
 
+  cli-tests:
+    name: CLI tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # The suite drives real temp git repos, so git needs an identity.
+      - run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+      - run: pip install -e . pytest
+      - run: python -m pytest -q
+
   lint:
     name: Ruff lint
     runs-on: ubuntu-latest
@@ -47,7 +66,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff==0.15.16
-      - run: ruff check backend resolver
+      - run: ruff check backend resolver cli
 
   frontend:
     name: Frontend lint, test & build

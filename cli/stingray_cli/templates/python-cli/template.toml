@@ -1,0 +1,8 @@
+description = "A Python CLI: argparse entry point, config loading, and a core module."
+notes = """
+A small Python CLI laid out the way this project's own tooling is: an argparse
+front door, a separate config layer, and a core module holding the real work.
+
+The interesting functions are left as STINGRAY-STUB markers — each one has its
+own ticket. Implement one, then run `stingray review` to get it reviewed.
+"""

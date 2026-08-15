@@ -181,6 +181,14 @@ of hand-writing `curl`. The URL, API key and bot identity come from the resolver
 `--code-block` reads the exact lines off disk so multi-line code never has to be
 JSON-escaped. The implement-phase prompt points the agent at it automatically.
 
+> **Where the code lives now.** The payload/code-block/repo-tag helpers and the REST
+> client moved to `cli/stingray_client/`, shared with the `stingray` CLI. `file_ticket.py`
+> keeps its full argparse surface (including `--parent` delegation and the
+> `RESOLVER_MAX_DELEGATIONS` cap, which are resolver policy) and adapts to the library;
+> `stingray.py` subclasses the shared client to add this project's audit logging. The
+> resolver installs the library via `-e ../cli` in `requirements.txt`. Nothing about the
+> commands below changed.
+
 ```bash
 .venv/bin/python file_ticket.py \
   --type code_review --title "Review: auth refactor" \

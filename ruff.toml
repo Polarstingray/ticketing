@@ -1,10 +1,10 @@
-# Ruff config for the Python code (backend + resolver). The frontend is JS.
+# Ruff config for the Python code (backend + resolver + cli). The frontend is JS.
 target-version = "py312"
 line-length = 100
 
 # Import roots, so first-party modules (e.g. `from database import ...`) are
 # grouped separately from third-party packages by the import sorter.
-src = ["backend", "resolver"]
+src = ["backend", "resolver", "cli"]
 
 # Don't consult .gitignore when walking the tree. In some dev sandboxes /home is
 # an autofs mount and ruff's gitignore walk stalls statting ancestor dirs; the
@@ -18,6 +18,9 @@ extend-exclude = [
     "resolver/work",   # per-ticket git worktrees the resolver checks out
     "resolver/logs",
     "frontend",
+    # Scaffold templates: deliberately-unfinished code with {{placeholders}} that
+    # is rendered, not imported. Linting it would flag the stubs it exists to ship.
+    "cli/stingray_cli/templates",
 ]
 
 [lint]

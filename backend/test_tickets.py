@@ -313,3 +313,86 @@ def test_non_member_cannot_edit_tags(client, admin_key, make_user):
     r = client.patch(f"/tickets/{t['id']}", json={"tags": ["x"]},
                      headers={"X-API-Key": member.key})
     assert r.status_code == 403
+
+
+# --- Tags: `cli`-scoped API keys ---------------------------------------------
+# A scope is carried by the *key*, not the user, and unlocks exactly one reserved
+# prefix (`repo:`). These tests pin that boundary: the scope must not leak to any
+# other control tag, and must not leak to the same user's cookie session.
+
+def test_cli_scoped_key_can_set_repo_tag(client, make_user, scoped_key):
+    member = make_user()
+    key = scoped_key(member.id)
+    t = _create(client, key, tags=["repo:app", "backend"])
+    assert _tags(t) == {"repo:app", "backend"}
+
+
+def test_cli_scoped_key_cannot_set_other_reserved_tags(client, make_user, scoped_key):
+    """The whole point of scoping: `repo:` only, never a workflow or safety tag."""
+    member = make_user()
+    key = scoped_key(member.id)
+    for bad in ("claude:planning", "dangerous", "fix", "delegate", "parent:7", "review-by:7"):
+        r = client.post(
+            "/tickets", json={"type": "task", "title": "x", "tags": [bad]},
+            headers={"X-API-Key": key},
+        )
+        assert r.status_code == 422, f"{bad}: {r.text}"
+
+
+def test_unscoped_key_still_cannot_set_repo_tag(client, make_user):
+    """Regression: granting the scope to *some* keys must not relax the default."""
+    member = make_user()
+    r = client.post(
+        "/tickets", json={"type": "task", "title": "x", "tags": ["repo:app"]},
+        headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 422
+
+
+def test_cli_scope_does_not_leak_to_cookie_session(client, make_user, scoped_key):
+    """The scope rides the key. Logging in as the same user must not inherit it —
+    if it did, `request.state.api_key` would be leaking across requests."""
+    member = make_user()
+    scoped_key(member.id)  # same user owns a cli key...
+    login = client.post("/auth/login",
+                        json={"username": member.username, "password": member.password})
+    assert login.status_code == 200, login.text
+    r = client.post("/tickets", json={"type": "task", "title": "x", "tags": ["repo:app"]})
+    assert r.status_code == 422, r.text
+    client.cookies.clear()
+
+
+def test_cli_scoped_key_can_correct_its_own_repo_tag(client, make_user, scoped_key):
+    """A caller allowed to SET a reserved tag must also be able to change it —
+    the old blanket "preserve all reserved tags" rule made repo: write-once."""
+    member = make_user()
+    key = scoped_key(member.id)
+    t = _create(client, key, tags=["repo:app"])
+    r = client.patch(f"/tickets/{t['id']}", json={"tags": ["repo:other"]},
+                     headers={"X-API-Key": key})
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"repo:other"}
+
+
+def test_cli_scope_does_not_unpin_other_reserved_tags(client, admin_key, make_user, scoped_key):
+    """A scoped key edits its own repo: tag but must not strip a control tag."""
+    member = make_user()
+    key = scoped_key(member.id)
+    t = _create(client, key, tags=["repo:app"])
+    r = client.patch(f"/tickets/{t['id']}", json={"tags": ["repo:app", "claude:planning"]},
+                     headers={"X-API-Key": admin_key})
+    assert r.status_code == 200, r.text
+
+    # The member's scoped key changes repo: and drops the free tags; claude:* stays.
+    r = client.patch(f"/tickets/{t['id']}", json={"tags": ["repo:new"]},
+                     headers={"X-API-Key": key})
+    assert r.status_code == 200, r.text
+    assert _tags(r.json()) == {"repo:new", "claude:planning"}
+
+
+def test_free_epic_tag_needs_no_scope(client, make_user):
+    """Scaffold grouping uses a free `epic:` tag precisely so it needs no scope
+    (and so it never triggers the resolver's self-driving `parent:` behavior)."""
+    member = make_user()
+    t = _create(client, member.key, tags=["epic:7", "scaffold"])
+    assert _tags(t) == {"epic:7", "scaffold"}
