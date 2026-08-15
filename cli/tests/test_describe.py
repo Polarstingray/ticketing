@@ -1,6 +1,9 @@
 """The --describe pass: output parsing, tag safety, and the fallback ladder."""
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from stingray_cli import describe, gitctx
@@ -140,3 +143,40 @@ def test_prompt_bounds_a_huge_diff_and_diffstat(git_repo, commit, monkeypatch):
     prompt = describe.build_prompt(change)
     assert "(TRUNCATED)" in prompt
     assert len(prompt) < describe.MAX_DIFF_CHARS + describe.MAX_STAT_CHARS + 2_000
+
+
+def test_default_timeout_has_headroom_for_agent_startup():
+    """An agent CLI's startup can dominate its API time (measured: 59s wall for
+    3s of API on a cold `claude`, and 350s for a real diff prompt). Too tight a
+    default doesn't fail loudly — it silently falls back, which reads as
+    "--describe did nothing"."""
+    assert describe.DEFAULT_TIMEOUT >= 600
+
+
+def test_profile_timeout_overrides_the_default(git_repo, commit, monkeypatch):
+    seen = {}
+
+    def spy(prompt, cwd, **kw):
+        seen.update(kw)
+        return '{"title": "T", "description": "D"}'
+    monkeypatch.setattr(describe, "run_agent", spy)
+
+    profile = SimpleNamespace(describe={"timeout": 42, "agent": "opencode"})
+    describe.describe_change(_change(git_repo, commit), profile=profile)
+    assert seen["timeout"] == 42
+    assert seen["agent"] == "opencode"
+
+
+def test_timeout_error_names_the_knob(monkeypatch):
+    """A timeout must tell you how to fix it, not just that it happened."""
+    import subprocess
+
+    from stingray_cli import agent as agent_mod
+
+    def boom(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=180)
+    monkeypatch.setattr(agent_mod.shutil, "which", lambda n: f"/usr/bin/{n}")
+    monkeypatch.setattr(agent_mod.subprocess, "run", boom)
+
+    with pytest.raises(agent_mod.AgentError, match="timeout = "):
+        agent_mod.run("p", Path("."), agent="claude", timeout=180)

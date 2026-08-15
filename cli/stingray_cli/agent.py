@@ -62,7 +62,10 @@ def run(prompt: str, cwd: Path, *, agent: str | None = None,
         proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True,
                               text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise AgentError(f"{name} timed out after {timeout}s") from exc
+        raise AgentError(
+            f"{name} timed out after {timeout}s — raise it with "
+            f"`timeout = <seconds>` under [profile.<name>.describe] in your config"
+        ) from exc
     except OSError as exc:
         raise AgentError(f"could not run {name}: {exc}") from exc
 

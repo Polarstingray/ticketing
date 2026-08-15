@@ -128,3 +128,13 @@ def test_web_url_strips_the_api_proxy_prefix(isolated_config):
 def test_web_url_left_alone_without_the_prefix(isolated_config):
     save_profile("p", {"url": "http://localhost:8000", "api_key": "sk_a"})
     assert load_profile("p").web_url == "http://localhost:8000"
+
+
+def test_web_url_handles_a_trailing_slash(isolated_config):
+    """`endswith("/api")` alone would miss `.../api/`; load_profile rstrips the
+    URL first, so both forms normalize. Flagged by a review of the web_url diff,
+    which couldn't see the rstrip."""
+    save_profile("p", {"url": "http://localhost:3000/api/", "api_key": "sk_a"})
+    profile = load_profile("p")
+    assert profile.url == "http://localhost:3000/api"
+    assert profile.web_url == "http://localhost:3000"
