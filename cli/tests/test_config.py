@@ -116,3 +116,15 @@ def test_key_display_never_shows_the_whole_key(isolated_config):
     display = load_profile().key_display
     assert "secretsecret" not in display
     assert display.startswith("sk_")
+
+
+def test_web_url_strips_the_api_proxy_prefix(isolated_config):
+    """The REST base often ends in /api (the frontend's proxy). A browser link
+    built from that 404s, so the printed ticket URL must drop it."""
+    save_profile("p", {"url": "http://localhost:3000/api", "api_key": "sk_a"})
+    assert load_profile("p").web_url == "http://localhost:3000"
+
+
+def test_web_url_left_alone_without_the_prefix(isolated_config):
+    save_profile("p", {"url": "http://localhost:8000", "api_key": "sk_a"})
+    assert load_profile("p").web_url == "http://localhost:8000"
