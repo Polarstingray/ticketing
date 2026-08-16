@@ -122,3 +122,28 @@
 .createForm button {
   width: auto;
 }
+
+/* A capability granted to an API key (currently only `cli`). */
+.scope {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-family: var(--mono, monospace);
+  margin-right: 4px;
+}
+
+.scopeOpt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.scopeOpt input {
+  width: auto;
+  margin-top: 3px;
+  flex: none;
+}

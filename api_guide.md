@@ -326,7 +326,7 @@ Mint a new key. The plaintext `api_key` is returned **once** in this response an
 
 Request:
 ```json
-{ "name": "claude-code-laptop", "expires_in_days": 90 }
+{ "name": "claude-code-laptop", "expires_in_days": 90, "scopes": ["cli"] }
 ```
 `name` is required; `expires_in_days` is optional (omit for a non-expiring key).
 ```bash
@@ -336,6 +336,23 @@ curl -s -X POST "$BASE/users/2/api-keys" -H "X-API-Key: $KEY" \
 ```
 Response `201`: an [API-key object](#api-key-object) **plus** an `api_key` field with the
 plaintext key.
+
+##### Scopes
+
+`scopes` is optional and **admin-only** — a non-admin passing it gets `403`, even for
+their own key. That restriction is the point: any member may mint their own keys, so a
+self-granted scope would be no boundary at all.
+
+| scope | grants |
+|---|---|
+| `cli` | may set `repo:<name>` tags — and no other reserved tag |
+
+A scope is carried by the **key**, not the user, so revoking the key revokes the
+capability, and the same user's browser session does not inherit it. It exists so the
+`stingray` CLI can tag the repo a review belongs to (which is what lets a resolver bot
+check the code out) without its owner being an admin.
+
+Unknown scope names are rejected with `422`.
 
 #### `POST /users/{user_id}/api-keys/{key_id}/revoke`
 Permanently revoke a key. Anything using it immediately gets `401`.
@@ -439,9 +456,10 @@ Metadata only. `POST /users/{id}/api-keys` additionally returns a one-time `api_
   "id": 5, "name": "claude-code-laptop", "key_prefix": "sk_URA6YaKc",
   "created_at": "2026-06-04T19:10:38.015980",
   "last_used_at": "2026-06-04T19:10:38.296683",
-  "expires_at": null, "revoked": false
+  "expires_at": null, "revoked": false, "scopes": ["cli"]
 }
 ```
+`scopes` is `[]` for an ordinary key. See [Scopes](#scopes) for what they grant.
 
 ### User object
 The **self** shape (returned from `/auth/me`, `/auth/login`, user create/update). The

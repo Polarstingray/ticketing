@@ -6,8 +6,20 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from activity import record_activity
-from auth import can_modify_ticket, can_view_ticket, get_current_user, is_admin
-from control_tags import can_manage_reserved_tags, is_reserved_tag, reserved_subset
+from auth import (
+    can_modify_ticket,
+    can_view_ticket,
+    get_api_key,
+    get_current_user,
+    is_admin,
+)
+from control_tags import (
+    RESERVED_EXACT,
+    RESERVED_PREFIXES,
+    can_set_tag,
+    is_reserved_tag,
+    unauthorized_tags,
+)
 from database import get_db
 from inbox import create_notification
 from models import (
@@ -44,27 +56,47 @@ def _get_ticket_or_404(ticket_id: int, db: Session) -> Ticket:
     return ticket
 
 
-_RESERVED_TAG_ERROR = (
-    "Reserved tags (claude:*, repo:*, dangerous, fix) cannot be set; "
-    "they are managed by the automation."
-)
+def _reserved_tag_error(rejected: set[str]) -> str:
+    """Explain which tags were refused and what would be needed to set them.
 
-
-def _resolve_tags(submitted: list[str], existing: list[str] | None) -> list[str]:
-    """Compute the tag set to store for a non-trusted caller's request.
-
-    Trusted callers (admin / resolver bot) bypass this and get a full replace.
-    For everyone else the ``tags`` field controls only *free* (non-reserved)
-    tags: submitting any reserved tag is rejected, and the ticket's existing
-    reserved tags are preserved so a free-tag edit can never add, remove, or
-    alter a control tag.
+    Built from the control_tags constants rather than hardcoded, so it can't go
+    stale the way the old fixed string did (it still named only four of the seven
+    reserved forms long after `parent:`, `review-by:` and `delegate` were added).
     """
-    if reserved_subset(submitted):
+    reserved = ", ".join(sorted(f"{p}*" for p in RESERVED_PREFIXES) + sorted(RESERVED_EXACT))
+    msg = (
+        f"Reserved tags ({reserved}) cannot be set; they are managed by the "
+        f"automation. Refused: {', '.join(sorted(rejected))}."
+    )
+    if any(t.startswith("repo:") for t in rejected):
+        msg += " An API key with the 'cli' scope may set repo: tags."
+    return msg
+
+
+def _authorize_tags(
+    submitted: list[str], existing: list[str] | None, user: User, api_key
+) -> list[str]:
+    """Compute the tag set to store, enforcing per-tag authority.
+
+    Submitting a tag this caller may not set is rejected outright. Reserved tags
+    already on the ticket that the caller may *not* set are preserved, so a
+    free-tag edit can never strip a control tag.
+
+    Note what is deliberately *not* preserved: reserved tags the caller IS allowed
+    to set are fully caller-controlled, so a `cli`-scoped key can change its own
+    ticket's `repo:a` to `repo:b`. The old code preserved every reserved tag
+    unconditionally, which would have made a scoped key able to add a repo tag but
+    never correct one.
+    """
+    bad = unauthorized_tags(user, api_key, submitted)
+    if bad:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail=_RESERVED_TAG_ERROR)
-    existing_reserved = [t for t in (existing or []) if is_reserved_tag(t)]
-    # submitted contains only free tags here (reserved rejected above).
-    return existing_reserved + [t for t in submitted if t not in existing_reserved]
+                            detail=_reserved_tag_error(bad))
+    pinned = [
+        t for t in (existing or [])
+        if is_reserved_tag(t) and not can_set_tag(user, api_key, t)
+    ]
+    return pinned + [t for t in submitted if t not in pinned]
 
 
 @router.get("", response_model=PaginatedTickets)
@@ -128,6 +160,7 @@ def create_ticket(
     background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    api_key=Depends(get_api_key),
 ):
     assignee = None
     if payload.assigned_to is not None:
@@ -142,11 +175,12 @@ def create_ticket(
         else []
     )
 
-    # Only trusted automation (admin / resolver bot) may set reserved control
-    # tags; everyone else may set free tags only. (No existing tags on create.)
+    # Reserved control tags need a trusted identity (admin / resolver bot) or a
+    # key scoped for that tag; everyone else may set free tags only. (No existing
+    # tags on create.)
     tags = payload.tags
-    if tags and not can_manage_reserved_tags(user):
-        tags = _resolve_tags(tags, existing=None)
+    if tags:
+        tags = _authorize_tags(tags, None, user, api_key)
 
     ticket = Ticket(
         type=payload.type.value,
@@ -202,6 +236,7 @@ def update_ticket(
     background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    api_key=Depends(get_api_key),
 ):
     ticket = _get_ticket_or_404(ticket_id, db)
     if not can_modify_ticket(user, ticket):
@@ -215,12 +250,12 @@ def update_ticket(
         if not new_assignee:
             raise HTTPException(status_code=400, detail="assigned_to user does not exist")
 
-    # Reserved control tags drive the resolver's automation, so only trusted
-    # identities (admin / resolver bot) may set them. For everyone else, a tags
-    # edit controls free tags only and the ticket's existing reserved tags are
-    # preserved — see _resolve_tags.
-    if "tags" in data and data["tags"] is not None and not can_manage_reserved_tags(user):
-        data["tags"] = _resolve_tags(data["tags"], existing=ticket.tags)
+    # Reserved control tags drive the resolver's automation, so setting one needs
+    # a trusted identity or a key scoped for it. For everyone else a tags edit
+    # controls free tags only, and the ticket's existing control tags are
+    # preserved — see _authorize_tags.
+    if "tags" in data and data["tags"] is not None:
+        data["tags"] = _authorize_tags(data["tags"], ticket.tags, user, api_key)
 
     # Snapshot the fields we audit, before mutating.
     old_status = ticket.status

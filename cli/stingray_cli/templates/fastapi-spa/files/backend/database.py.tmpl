@@ -1,0 +1,26 @@
+"""Database engine and session wiring for {{project_name}}."""
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "./{{project_name}}.db")
+DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
+
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def get_db():
+    """FastAPI dependency yielding a session that always gets closed."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

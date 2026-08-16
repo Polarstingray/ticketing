@@ -1,0 +1,96 @@
+"""Item routes: list/filter, create, retrieve, update, delete."""
+from __future__ import annotations
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.orm import Session
+
+from auth import require_active
+from database import get_db
+from models import Item, User
+from schemas import ItemCreate, ItemOut, ItemUpdate, PaginatedItems
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+
+def _get_or_404(item_id: int, db: Session) -> Item:
+    item = db.query(Item).filter(Item.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+    return item
+
+
+def _owned_or_404(item: Item, user: User) -> Item:
+    """Hide other people's rows rather than 403ing them.
+
+    A 403 confirms the id exists, which leaks the very thing access control is
+    meant to hide. Answer 404 for both "missing" and "not yours".
+    """
+    if item.owner_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+    return item
+
+
+@router.get("", response_model=PaginatedItems)
+def list_items(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_active),
+    q: Optional[str] = Query(default=None),
+    done: Optional[bool] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Return the caller's items, filtered and paginated."""
+    # STINGRAY-STUB: scope the query to this user, apply the q/done filters, and
+    # return the {items,total,limit,offset} envelope.
+    # ACCEPTANCE: never returns another user's rows; `total` is the count BEFORE
+    # limit/offset, so the frontend can page correctly.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(
+    payload: ItemCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_active),
+):
+    """Create an item owned by the caller."""
+    # STINGRAY-STUB: build the row with owner_id from `user` — never from the
+    # request body, or anyone can create rows owned by someone else.
+    # ACCEPTANCE: the returned item's owner_id is the caller's id.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+@router.get("/{item_id}", response_model=ItemOut)
+def get_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_active),
+):
+    return _owned_or_404(_get_or_404(item_id, db), user)
+
+
+@router.patch("/{item_id}", response_model=ItemOut)
+def update_item(
+    item_id: int,
+    payload: ItemUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_active),
+):
+    """Apply a partial update to one of the caller's items."""
+    # STINGRAY-STUB: apply only the fields actually sent (exclude_unset), so an
+    # omitted field is left alone rather than nulled.
+    # ACCEPTANCE: PATCHing {"done": true} leaves title and body untouched.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_active),
+):
+    item = _owned_or_404(_get_or_404(item_id, db), user)
+    db.delete(item)
+    db.commit()

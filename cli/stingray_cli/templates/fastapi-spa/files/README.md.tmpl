@@ -1,0 +1,39 @@
+# {{project_name}}
+
+{{description}}
+
+FastAPI backend + React (Vite) SPA.
+
+## Status
+
+Scaffolded. The interesting functions are stubs marked `STINGRAY-STUB:` on both
+sides of the wire — each has a ticket. See `CLAUDE.md` for the convention.
+
+## Run it
+
+```bash
+# backend (http://127.0.0.1:8000)
+cd backend
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn main:app --reload
+
+# frontend (http://localhost:5173, proxies /api to the backend)
+cd frontend
+npm install
+npm run dev
+```
+
+## Layout
+
+```
+backend/
+  main.py        app + CORS + router registration
+  database.py    engine, session, get_db dependency
+  models.py      SQLAlchemy models
+  schemas.py     Pydantic request/response shapes
+  auth.py        session cookie + X-API-Key, checked key-first
+  routers/       one module per resource
+frontend/
+  src/api.js     the ONLY place that talks to the backend
+  src/pages/     one component per screen
+```

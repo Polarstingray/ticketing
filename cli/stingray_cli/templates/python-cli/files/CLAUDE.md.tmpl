@@ -1,0 +1,32 @@
+# {{project_name}}
+
+{{description}}
+
+## Stub convention
+
+This project was scaffolded by `stingray scaffold`. Functions that still need to
+be written are marked like this:
+
+```python
+def read_source(source: str) -> str:
+    """Read `source` from disk, or from stdin when it is '-'."""
+    # STINGRAY-STUB: support both a file path and '-' for stdin.
+    # ACCEPTANCE: raises FileNotFoundError with the path named when it is missing.
+    raise NotImplementedError("STINGRAY-STUB")
+```
+
+- `STINGRAY-STUB:` says what to implement. **Each marker has its own ticket.**
+- `ACCEPTANCE:` says how to know it is done. Treat it as the test to write.
+- The `raise NotImplementedError` keeps a forgotten stub loud at runtime.
+
+When you implement one, delete both comment lines and the `raise`.
+
+## Filing a review
+
+```bash
+stingray review --assign-bot
+```
+
+That files a `code_review` ticket for your last commit plus any uncommitted work,
+with the changed hunks attached as code blocks. It carries a `repo:{{project_name}}`
+tag, which is what lets a resolver bot check the code out and apply fixes.

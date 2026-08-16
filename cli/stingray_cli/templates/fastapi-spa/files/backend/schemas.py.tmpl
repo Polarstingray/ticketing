@@ -1,0 +1,56 @@
+"""Pydantic request/response schemas for {{project_name}}."""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class UserPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    is_active: bool
+    created_at: datetime
+
+
+class LoginRequest(BaseModel):
+    # Bounded on purpose: unbounded credential fields are a cheap DoS, since a
+    # failed login still hashes whatever it is handed.
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class ItemCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    body: str = ""
+
+
+class ItemUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    body: Optional[str] = None
+    done: Optional[bool] = None
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    body: str
+    done: bool
+    owner_id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class PaginatedItems(BaseModel):
+    """The list envelope. Keep every list endpoint on this shape so the
+    frontend has one thing to parse."""
+
+    items: list[ItemOut]
+    total: int
+    limit: int
+    offset: int
