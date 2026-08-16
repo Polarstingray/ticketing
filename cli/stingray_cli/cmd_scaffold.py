@@ -1,6 +1,7 @@
 """``stingray scaffold`` — generate a project outline with a ready-made backlog."""
 from __future__ import annotations
 
+import argparse
 import shutil
 import sys
 import tempfile
@@ -9,13 +10,20 @@ from pathlib import Path
 import requests
 
 from stingray_cli import scaffold as sc
-from stingray_cli.common import client_from, confirm
+from stingray_cli.common import client_from, confirm, profile_from
 from stingray_cli.config import ConfigError
 from stingray_client.tickets import build_payload
 
 # Bound how many tickets one scaffold can file, so an enthusiastic AI pass can't
 # dump 200 tickets into the tracker.
 MAX_STUB_TICKETS = 30
+
+# The adaptation pass rewrites a whole tree, so it is a strictly bigger job than
+# describing a diff — give it more headroom than describe.DEFAULT_TIMEOUT. Agent
+# CLI startup alone measured ~60s here, and a small-diff description took 350s.
+# Timing out mid-adaptation isn't loud: it falls back to the plain template, so a
+# too-tight value looks like "the AI pass did nothing".
+DEFAULT_ADAPT_TIMEOUT = 1800
 
 
 def add_parser(sub, add_connection_flags) -> None:
@@ -31,11 +39,19 @@ def add_parser(sub, add_connection_flags) -> None:
     parser.add_argument("template", nargs="?", help="template name")
     parser.add_argument("dest", nargs="?", help="target directory")
     parser.add_argument("--name", help="project name (default: the directory name)")
-    parser.add_argument("--describe", metavar="TEXT",
+    parser.add_argument("--intent", metavar="TEXT",
                         help="what the project should do; drives the AI adaptation pass")
+    # Deprecated alias. `review --describe` is a boolean meaning "let an agent write
+    # the prose"; here the same word took a string and meant the opposite direction
+    # (text in, code out). Kept working so existing invocations don't break, but it
+    # warns and `--intent` is the documented spelling.
+    parser.add_argument("--describe", metavar="TEXT", dest="describe_alias",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--list-templates", action="store_true")
     parser.add_argument("--no-ai", action="store_true", help="template only, no agent pass")
     parser.add_argument("--agent", metavar="NAME", help="agent to adapt with (claude|opencode)")
+    parser.add_argument("--agent-timeout", type=int, metavar="SECONDS",
+                        help=f"seconds for the adaptation pass (default: {DEFAULT_ADAPT_TIMEOUT})")
     parser.add_argument("--no-git", action="store_true", help="don't init/commit")
     parser.add_argument("--no-tickets", action="store_true", help="don't file tickets")
     parser.add_argument("--assign", type=int, metavar="USER_ID")
@@ -50,6 +66,7 @@ def add_parser(sub, add_connection_flags) -> None:
 
 
 def cmd_scaffold(args) -> int:
+    intent = _resolve_intent(args)
     if args.list_templates:
         for template in sc.available_templates():
             print(f"{template.name:20} {template.description}")
@@ -68,7 +85,7 @@ def cmd_scaffold(args) -> int:
     variables = {
         "project_name": name,
         "package": name.replace("-", "_").replace(" ", "_").lower(),
-        "description": args.describe or f"The {name} project.",
+        "description": intent or f"The {name} project.",
     }
 
     # Render into a temp dir first: an agent pass that produces a broken tree
@@ -79,7 +96,7 @@ def cmd_scaffold(args) -> int:
         work.mkdir()
         sc.render(template, work, variables)
 
-        if not args.no_ai and args.describe:
+        if not args.no_ai and intent:
             _adapt(work, template, args, variables)
 
         problems = sc.validate_tree(work)
@@ -122,6 +139,35 @@ def cmd_scaffold(args) -> int:
     return _file_tickets(args, dest, name, template, stubs)
 
 
+def _resolve_intent(args) -> str | None:
+    """The adaptation intent, accepting the deprecated ``--describe`` spelling.
+
+    Normalizes onto ``args.intent`` so everything downstream reads one attribute.
+    """
+    alias = getattr(args, "describe_alias", None)
+    if alias and not args.intent:
+        print("warning: `scaffold --describe` is deprecated; use `--intent`. "
+              "(`--describe` means something different on `review`: there it is a "
+              "boolean asking an agent to write the ticket's prose.)", file=sys.stderr)
+        args.intent = alias
+    elif alias and args.intent:
+        raise ConfigError("--intent and --describe are the same option; pass only --intent")
+    return args.intent
+
+
+def _profile_or_none(args):
+    """The profile, if one resolves.
+
+    Rendering and adapting a scaffold are entirely local — only filing the
+    tickets needs credentials — so the agent settings must still be readable
+    when nobody has logged in yet.
+    """
+    try:
+        return profile_from(args)
+    except ConfigError:
+        return None
+
+
 def _adapt(work: Path, template: sc.Template, args, variables: dict) -> None:
     """Let a local agent adapt the rendered template to the user's intent."""
     from stingray_cli.agent import AgentError
@@ -134,7 +180,7 @@ def _adapt(work: Path, template: sc.Template, args, variables: dict) -> None:
         f"You are adapting a '{template.name}' project scaffold in this directory to "
         f"a specific intent. The project is called '{variables['project_name']}'.",
         "",
-        f"Intent: {args.describe}",
+        f"Intent: {args.intent}",
         f"Template: {template.description}",
         "",
         "Files:",
@@ -156,8 +202,15 @@ def _adapt(work: Path, template: sc.Template, args, variables: dict) -> None:
         print("skipping the AI adaptation pass", file=sys.stderr)
         return
 
+    # Flag > profile > default, the same precedence as everything else. Local-agent
+    # settings live in the profile's [describe] block and are shared by both passes.
+    settings = dict(getattr(_profile_or_none(args), "describe", None) or {})
+    agent = args.agent or settings.get("agent") or None
+    timeout = args.agent_timeout or int(settings.get("timeout", DEFAULT_ADAPT_TIMEOUT))
+
     try:
-        run_agent(prompt, work, agent=args.agent, timeout=600, edit=True)
+        run_agent(prompt, work, agent=agent, model=settings.get("model") or None,
+                  timeout=timeout, edit=True)
         print("agent adapted the scaffold")
     except AgentError as exc:
         print(f"warning: adaptation pass failed ({exc}); using the plain template",
