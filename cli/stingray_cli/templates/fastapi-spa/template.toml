@@ -1,0 +1,13 @@
+description = "FastAPI + React SPA: routers, models, auth, and a Vite frontend that calls them."
+notes = """
+A backend-API + SPA laid out the way this project itself is: a FastAPI app with
+routers/models/schemas and a session-or-key auth seam, plus a Vite React frontend
+whose api.js is the single place that talks to the backend.
+
+The interesting functions are left as STINGRAY-STUB markers on both sides of the
+wire — each one has its own ticket. Implement one, then run `stingray review` to
+get it reviewed.
+
+Run the backend with `uvicorn main:app --reload` from `backend/`, and the
+frontend with `npm run dev` from `frontend/` (it proxies /api to :8000).
+"""

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -250,3 +251,104 @@ def test_adapt_timeout_precedence_flag_over_profile(tmp_path, monkeypatch):
                                               agent="claude"), {"project_name": "p"})
     assert seen["timeout"] == 222
     assert seen["agent"] == "claude"
+
+
+# --- fastapi-spa template ----------------------------------------------------
+
+def test_fastapi_spa_is_available():
+    names = [t.name for t in sc.available_templates()]
+    assert "fastapi-spa" in names
+
+
+def test_fastapi_spa_renders_validates_and_stubs_both_sides(tmp_path):
+    """A shipped template must render cleanly, validate, and leave stubs on both
+    sides of the wire — a backend-only backlog would miss half the work."""
+    template = sc.load_template("fastapi-spa")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    sc.render(template, dest, {"project_name": "notekeeper", "package": "notekeeper",
+                               "description": "Keeps notes."})
+
+    assert sc.validate_tree(dest) == []
+    assert not list(dest.rglob("*.tmpl"))
+    # Check for leftover *placeholders* specifically, not any `{{`: JSX writes
+    # `style={{...}}` for an inline style object, and substitution must leave
+    # that alone (it matches on the full `{{name}}` token, not the braces).
+    leftover = [
+        p for p in dest.rglob("*") if p.is_file()
+        and any(tok in p.read_text(encoding="utf-8", errors="ignore")
+                for tok in ("{{project_name}}", "{{package}}", "{{description}}"))
+    ]
+    assert not leftover, f"unsubstituted placeholders in {leftover}"
+
+    stubs = sc.scan_stubs(dest)
+    suffixes = {Path(s.path).suffix for s in stubs}
+    assert ".py" in suffixes
+    assert suffixes & {".js", ".jsx"}, "the frontend must carry stubs too"
+    assert len(stubs) >= 6
+
+
+def test_fastapi_spa_python_parses(tmp_path):
+    import ast
+    template = sc.load_template("fastapi-spa")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    sc.render(template, dest, {"project_name": "np", "package": "np", "description": "d"})
+    for path in dest.rglob("*.py"):
+        ast.parse(path.read_text(encoding="utf-8"))
+
+
+# --- JS brace scanning -------------------------------------------------------
+# A false positive here is expensive: validate_tree failing discards the agent's
+# adaptation and silently falls back to the plain template. So the bias is
+# firmly toward returning 0 when anything is ambiguous.
+
+@pytest.mark.parametrize("source", [
+    "function f() { return 1; }",
+    'const s = "{{{"; function f() {}',
+    "const s = '}}}'; function f() {}",
+    "// } } }\nfunction f() {}",
+    "/* { { { */ function f() {}",
+    "const s = `a { b }`; function f() {}",
+    "const s = `a ${ {x:1}.x } b`; function f() {}",
+    "const s = `${ `${ 1 }` }`; function f() {}",       # nested template
+    "const s = `a${1}b{`; function f() {}",
+    "const r = /[{]/; function f() {}",                  # regex containing a brace
+    "const r = /a{2,3}/; function f() {}",               # regex quantifier
+    "const r = /[/{]/; function f() {}",                 # slash inside a class
+    "const x = a / b; function f() {}",                  # division, not regex
+    "const e = <div style={{color:'red'}}>hi</div>;",    # JSX double brace
+    'const s = "he said \\"{\\""; function f() {}',
+    "const s = `a \\` { `; function f() {}",
+    'const s = "abc\nfunction f() {',                    # unterminated string
+    "/* { { {",                                          # unterminated comment
+    "const s = `abc { ",                                 # unterminated template
+    "",
+])
+def test_balanced_or_ambiguous_reports_zero(source):
+    assert sc.brace_imbalance(source) == 0
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("function f() { if (x) {", 2),
+    ("function f() {", 1),
+    ("const o = { a: { b: 1 }", 1),
+])
+def test_truncation_is_detected(source, expected):
+    assert sc.brace_imbalance(source) == expected
+
+
+def test_validate_flags_a_truncated_js_file(tmp_path):
+    (tmp_path / "m.py").write_text(PY_WITH_STUBS, encoding="utf-8")
+    (tmp_path / "app.js").write_text("export function f() {\n  if (x) {\n",
+                                     encoding="utf-8")
+    problems = sc.validate_tree(tmp_path)
+    assert any("app.js" in p and "truncated" in p for p in problems)
+
+
+def test_validate_ignores_node_modules(tmp_path):
+    (tmp_path / "m.py").write_text(PY_WITH_STUBS, encoding="utf-8")
+    vendored = tmp_path / "node_modules" / "dep"
+    vendored.mkdir(parents=True)
+    (vendored / "broken.js").write_text("function f() {", encoding="utf-8")
+    assert sc.validate_tree(tmp_path) == []

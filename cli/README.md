@@ -116,12 +116,35 @@ Stub tickets are grouped by a free `epic:<id>` tag, **not** the reserved
 its plan and goes straight to implementing — which is wrong for a backlog you
 intend to write by hand.
 
+### Templates
+
+| name | shape |
+|---|---|
+| `python-cli` | argparse entry point, config loading, a core module |
+| `fastapi-spa` | FastAPI routers/models/auth + a Vite React frontend |
+
+`stingray scaffold --list-templates` prints them. The template is the *starting*
+shape, not the ceiling — `--intent` lets the agent rename files, change
+signatures and add modules, so `fastapi-spa` asked for a note app grew a
+`search.py` and split its router three ways.
+
+`fastapi-spa` renders ~11 stubs and typically adapts to ~30+, which brushes the
+`--max-tickets` default of 30 — raise it if you want a ticket for every stub.
+
 ### Adding a template
 
 Drop a directory into `stingray_cli/templates/<name>/` with a `template.toml`
 (description + notes) and a `files/` tree. `{{project_name}}`, `{{package}}` and
 `{{description}}` are substituted in both content and path segments; a `.tmpl`
-suffix is stripped after substitution.
+suffix is stripped after substitution. Note that substitution matches the whole
+`{{name}}` token, so JSX's `style={{...}}` passes through untouched.
+
+Rendered trees are validated before they land: Python must `ast.parse`, JSON must
+`json.loads`, and JS/JSX is checked for unclosed braces (a truncated agent edit).
+That brace check is deliberately biased toward reporting *nothing* when anything
+is ambiguous — strings, template literals, regexes and comments are all skipped —
+because a false positive silently discards the adaptation and falls back to the
+plain template.
 
 ## Layout
 
