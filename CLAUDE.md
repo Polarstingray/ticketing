@@ -7,11 +7,26 @@
 > `--parent <ticket_id>` when delegating a sub-task (it links the child and makes it
 > self-driving). See `resolver/README.md` → "Delegation / fan-out".
 
-> **Terminal sessions too:** if `resolver/file_ticket.py` is available (this repo, or
-> any checkout that has it) prefer it over `curl` — it fills in the `repo:<name>` tag
-> from the git checkout you run it in, which hand-written `curl` calls habitually omit.
-> Without that tag the resolver has no repo to check out, so it can review only the
-> embedded code blocks and cannot apply fixes at all.
+> **Terminal sessions: use the `stingray` CLI.** If it's installed (`pipx install
+> ./cli`), prefer it over `curl` for everything below — it fills in the `repo:<name>`
+> tag from the git checkout you run it in, which hand-written `curl` calls habitually
+> omit. Without that tag the resolver has no repo to check out, so it can review only
+> the embedded code blocks and cannot apply fixes at all.
+>
+> ```bash
+> stingray review                 # last commit + working tree, hunks attached
+> stingray review HEAD~3..HEAD    # an explicit range
+> stingray review --describe      # let a local agent write the title/description
+> stingray review --assign-bot    # file it straight at the resolver
+> stingray file --type task --title "..." --priority low
+> ```
+>
+> `stingray review` turns the diff into `code_blocks` for you, so you never paste code
+> by hand. Setting `repo:` needs an API key with the **`cli` scope** (admin-mints it
+> from Profile → API keys). See `cli/README.md`.
+>
+> Falling back: `resolver/file_ticket.py` is the same thing without the git plumbing,
+> and the `curl` below is the last resort.
 
 > **Recurring cross-project tasks** (e.g. a security audit you want on every project)
 > can be invoked with a **standard command** — put a `/security-audit` line in the

@@ -70,6 +70,13 @@ def _migrate_is_resolver_bot(engine: Engine) -> None:
     _add_column(engine, "users", "is_resolver_bot", "BOOLEAN NOT NULL DEFAULT 0")
 
 
+def _migrate_api_key_scopes(engine: Engine) -> None:
+    """api_keys.scopes — added with the stingray CLI's `cli` scope.
+
+    Existing keys default to '' (no scopes), so nothing gains authority on upgrade."""
+    _add_column(engine, "api_keys", "scopes", "VARCHAR NOT NULL DEFAULT ''")
+
+
 def _migrate_agent_runs(engine: Engine) -> None:
     """agent_runs table — added with resolver token-usage surfacing (#56).
 
@@ -106,6 +113,7 @@ MIGRATIONS = [
     _migrate_archived,
     _migrate_notification_preferences,
     _migrate_is_resolver_bot,
+    _migrate_api_key_scopes,
     _migrate_agent_runs,
     _migrate_resolver_settings,
     _migrate_resolver_instances,

@@ -1,0 +1,57 @@
+# {{project_name}}
+
+{{description}}
+
+FastAPI backend + React (Vite) SPA. The frontend calls `/api/*`, which Vite
+proxies to the backend in dev.
+
+## Stub convention
+
+This project was scaffolded by `stingray scaffold`. Functions that still need to
+be written are marked like this:
+
+```python
+def verify_password(password: str, hashed: str) -> bool:
+    """Check `password` against a stored hash."""
+    # STINGRAY-STUB: verify against the hasher chosen in hash_password.
+    # ACCEPTANCE: returns False (never raises) on a malformed or empty hash.
+    raise NotImplementedError("STINGRAY-STUB")
+```
+
+and in JS/JSX:
+
+```js
+async function request(method, path, body) {
+  // STINGRAY-STUB: issue the fetch with credentials included…
+  // ACCEPTANCE: a 204 resolves to null rather than throwing on an empty body.
+  throw new Error("STINGRAY-STUB");
+}
+```
+
+- `STINGRAY-STUB:` says what to implement. **Each marker has its own ticket.**
+- `ACCEPTANCE:` says how to know it is done. Treat it as the test to write.
+- The `raise`/`throw` keeps a forgotten stub loud at runtime.
+
+When you implement one, delete both comment lines and the `raise`/`throw`.
+
+## Conventions worth keeping
+
+- **`api.js` is the only place that calls `fetch`.** Components import `api`.
+- **List endpoints return `{items, total, limit, offset}`** so the frontend has
+  one envelope to parse.
+- **Ownership checks answer 404, not 403.** A 403 confirms the id exists, which
+  leaks what access control is meant to hide.
+- **`owner_id` comes from the authenticated user, never the request body.**
+- **The API key is checked before the session cookie**, so an explicit key wins
+  over a stale browser cookie.
+
+## Filing a review
+
+```bash
+stingray review --assign-bot
+```
+
+Files a `code_review` ticket for your last commit plus any uncommitted work,
+with the changed hunks attached as code blocks. It carries a
+`repo:{{project_name}}` tag, which is what lets a resolver bot check the code out
+and apply fixes.

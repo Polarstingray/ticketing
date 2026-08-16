@@ -44,6 +44,25 @@ RESOLVER_BOT_USER_IDS: frozenset[int] = frozenset(
 )
 
 
+# --- Scoped API keys ---------------------------------------------------------
+# A scope is a narrow, named capability carried by an *API key* rather than by its
+# owning user, so it can be granted to a laptop CLI without promoting the human to
+# admin. Only an admin may grant one (see routers/users.create_api_key): a member
+# can mint their own keys, so self-service scoping would make this boundary
+# decorative.
+SCOPE_CLI = "cli"
+
+# Which reserved tag prefixes each scope unlocks. `cli` gets `repo:` and nothing
+# else: it names the checkout to review, and the resolver's PROJECTS_ROOT allowlist
+# already bounds which checkouts exist. Deliberately excluded are the tags that
+# would let a caller hijack the automation rather than merely aim it: `claude:*`
+# (workflow phase), `dangerous`/`fix` (safety gates), `delegate` (autonomous
+# fan-out), and `parent:`/`review-by:` (PR handoff routing).
+SCOPE_TAG_PREFIXES: dict[str, tuple[str, ...]] = {SCOPE_CLI: ("repo:",)}
+
+ALL_SCOPES = frozenset(SCOPE_TAG_PREFIXES)
+
+
 def is_reserved_tag(tag: str) -> bool:
     """True if ``tag`` is a control tag that only trusted identities may set."""
     return tag in RESERVED_EXACT or tag.startswith(RESERVED_PREFIXES)
@@ -69,3 +88,28 @@ def can_manage_reserved_tags(user: User) -> bool:
     if getattr(user, "is_resolver_bot", False):
         return True
     return user.id in RESOLVER_BOT_USER_IDS
+
+
+def can_set_tag(user: User, api_key, tag: str) -> bool:
+    """Whether ``user``, authenticating with ``api_key``, may set ``tag``.
+
+    Free tags are always allowed. Reserved tags need either a trusted identity
+    (admin / resolver bot) or an API key whose scopes cover that tag's prefix.
+
+    ``api_key`` is None for cookie sessions — a browser session carries the user's
+    role, never a scope grant. That asymmetry is deliberate: the scope rides the
+    key, so revoking the key revokes the capability.
+    """
+    if not is_reserved_tag(tag):
+        return True
+    if can_manage_reserved_tags(user):
+        return True
+    for scope in getattr(api_key, "scope_set", frozenset()):
+        if tag.startswith(SCOPE_TAG_PREFIXES.get(scope, ())):
+            return True
+    return False
+
+
+def unauthorized_tags(user: User, api_key, tags) -> set[str]:
+    """The subset of ``tags`` this caller may not set (empty if all are allowed)."""
+    return {t for t in tags if not can_set_tag(user, api_key, t)}

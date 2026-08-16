@@ -29,11 +29,12 @@ from models import ApiKey, User, UserRole  # noqa: E402
 from ratelimit import limiter  # noqa: E402
 
 
-def _mint_key(user_id: int, name: str = "test") -> str:
+def _mint_key(user_id: int, name: str = "test", scopes: str = "") -> str:
     """Create an API key row for ``user_id`` and return its plaintext value.
 
     Only the hash is stored (there is no ``User.api_key`` column), so tests that
     authenticate via ``X-API-Key`` mint their own key against the ApiKey table.
+    ``scopes`` is the comma-separated column value, e.g. ``"cli"``.
     """
     db = SessionLocal()
     try:
@@ -43,6 +44,7 @@ def _mint_key(user_id: int, name: str = "test") -> str:
             name=name,
             key_prefix=raw[:11],
             key_hash=hash_api_key(raw),
+            scopes=scopes,
         ))
         db.commit()
         return raw
@@ -110,6 +112,18 @@ def _admin_id() -> int:
         return db.query(User).filter(User.username == "admin").first().id
     finally:
         db.close()
+
+
+@pytest.fixture
+def scoped_key():
+    """Mint an extra API key for an existing user, carrying ``scopes``.
+
+    Lets a test authenticate as the *same* user with and without a capability,
+    which is how the scope-rides-the-key boundary gets exercised.
+    """
+    def _make(user_id: int, scopes: str = "cli") -> str:
+        return _mint_key(user_id, name=f"scoped-{scopes or 'none'}", scopes=scopes)
+    return _make
 
 
 @pytest.fixture

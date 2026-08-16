@@ -182,6 +182,16 @@ def create_api_key(
     _require_self_or_admin(current, user_id)
     _get_user_or_404(user_id, db)
 
+    # Scopes are admin-only. A member may mint their own keys (above), so if they
+    # could also self-grant `cli` they would be granting themselves the ability to
+    # point the resolver at any repo under PROJECTS_ROOT and read its source back
+    # in a ticket they own — the resolver's allowlist is not per-user.
+    if payload.scopes and not is_admin(current):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin may grant API key scopes",
+        )
+
     raw = generate_api_key()
     expires_at = (
         utcnow() + timedelta(days=payload.expires_in_days)
@@ -194,6 +204,7 @@ def create_api_key(
         key_prefix=raw[:11],
         key_hash=hash_api_key(raw),
         expires_at=expires_at,
+        scopes=",".join(payload.scopes),
     )
     db.add(key)
     db.commit()
@@ -207,6 +218,7 @@ def create_api_key(
         last_used_at=key.last_used_at,
         expires_at=key.expires_at,
         revoked=key.revoked,
+        scopes=list(payload.scopes),
         api_key=raw,
     )
 

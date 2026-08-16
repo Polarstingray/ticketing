@@ -1,1 +1,4 @@
 requests>=2.31
+# The shared API client + ticket payload helpers, shared with the `stingray` CLI.
+# Editable so a checkout edit is picked up without a reinstall.
+-e ../cli

@@ -83,3 +83,28 @@ def test_skips_absent_tables():
         run_migrations(engine)  # should not raise
     finally:
         os.unlink(path)
+
+
+def test_adds_api_key_scopes():
+    """api_keys.scopes is backfilled on a legacy DB, defaulting to no scopes so
+    existing keys gain no authority on upgrade."""
+    engine, path = _legacy_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE api_keys (id INTEGER PRIMARY KEY, name TEXT)"
+            ))
+            conn.execute(text("INSERT INTO api_keys (id, name) VALUES (1, 'legacy')"))
+        assert "scopes" not in _columns(engine, "api_keys")
+
+        run_migrations(engine)
+        assert "scopes" in _columns(engine, "api_keys")
+
+        with engine.begin() as conn:
+            existing = conn.execute(text("SELECT scopes FROM api_keys WHERE id = 1")).scalar()
+        assert existing == ""
+
+        run_migrations(engine)  # idempotent
+        assert "scopes" in _columns(engine, "api_keys")
+    finally:
+        os.unlink(path)

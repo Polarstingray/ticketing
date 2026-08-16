@@ -117,8 +117,18 @@ class ApiKey(Base):
     last_used_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=True)
     revoked = Column(Boolean, nullable=False, default=False)
+    # Comma-separated capability grants, e.g. "cli". A key's authority is normally
+    # its owner's; a scope widens it in one narrow, named way (see control_tags
+    # .SCOPE_TAG_PREFIXES). Stored as a string rather than JSON so the migration is
+    # a plain ADD COLUMN with a scalar default. Only an admin may grant one.
+    scopes = Column(String, nullable=False, default="")
 
     user = relationship("User", back_populates="api_keys")
+
+    @property
+    def scope_set(self) -> frozenset[str]:
+        """This key's scopes as a set (the column is comma-separated)."""
+        return frozenset(s.strip() for s in (self.scopes or "").split(",") if s.strip())
 
 
 class Ticket(Base):
