@@ -24,6 +24,13 @@ from models import (
 
 MAX_TAGS = 30
 MAX_TAG_LENGTH = 50
+
+# --- Credential bounds -------------------------------------------------------
+# Applied to both account creation and login. Unbounded credential fields are a
+# cheap DoS: an unauthenticated login stores the submitted username as a key in
+# the in-memory lockout map, and bcrypt hashes whatever password it is handed.
+MAX_USERNAME_LENGTH = 64
+MAX_PASSWORD_LENGTH = 128
 # Letters, digits and a small set of punctuation used by real tags
 # (`claude:planning`, `repo:my-app`, `c++`, `area/backend`, etc.). Notably
 # excludes whitespace control chars like \n, \r, \t.
@@ -90,17 +97,17 @@ class UserSelf(UserPublic):
 
 
 class UserCreate(BaseModel):
-    username: str = Field(min_length=1)
+    username: str = Field(min_length=1, max_length=MAX_USERNAME_LENGTH)
     display_name: str = Field(min_length=1)
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=6, max_length=MAX_PASSWORD_LENGTH)
     role: UserRole = UserRole.member
 
 
 class UserUpdate(BaseModel):
     display_name: Optional[str] = None
     email: Optional[EmailStr] = None
-    password: Optional[str] = Field(default=None, min_length=6)
+    password: Optional[str] = Field(default=None, min_length=6, max_length=MAX_PASSWORD_LENGTH)
     role: Optional[UserRole] = None  # only honored for admin callers
 
 
@@ -108,7 +115,7 @@ class ResolverBotCreate(BaseModel):
     """Provision a resolver bot (a least-privilege member flagged
     ``is_resolver_bot``) plus its first API key in one admin call. Used by the
     ``resolver`` CLI so operators don't hand-create bots or sync ids."""
-    username: str = Field(min_length=1)
+    username: str = Field(min_length=1, max_length=MAX_USERNAME_LENGTH)
     display_name: Optional[str] = None
     email: Optional[EmailStr] = None
 
@@ -123,8 +130,13 @@ class ResolverBotCreated(BaseModel):
 # --- Auth --------------------------------------------------------------------
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    # Bounded on purpose: a failed login stores the submitted username as a key
+    # in the in-memory lockout map (login_throttle.py) even when no such user
+    # exists, so an unbounded field would let anyone plant megabyte-sized keys.
+    # Rejecting here also skips the bcrypt verify for junk input. The limits
+    # match UserCreate, so no account that can be created is locked out by them.
+    username: str = Field(min_length=1, max_length=MAX_USERNAME_LENGTH)
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
 
 
 # --- Code blocks -------------------------------------------------------------

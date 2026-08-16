@@ -27,6 +27,24 @@ def test_login_unknown_user_401(new_client):
     assert r.status_code == 401
 
 
+def test_login_oversized_username_rejected_before_any_state_is_kept(new_client):
+    """A failed login keys the in-memory lockout map on the submitted username,
+    so an unbounded field would let anyone plant huge keys in it."""
+    from login_throttle import account_lockout
+
+    c = new_client()
+    huge = "a" * 5000
+    r = c.post("/auth/login", json={"username": huge, "password": "whatever"})
+    assert r.status_code == 422
+    assert account_lockout._states == {}
+
+
+def test_login_oversized_password_rejected(new_client):
+    c = new_client()
+    r = c.post("/auth/login", json={"username": "admin", "password": "p" * 5000})
+    assert r.status_code == 422
+
+
 def test_me_requires_auth(new_client):
     c = new_client()
     assert c.get("/auth/me").status_code == 401
