@@ -23,7 +23,8 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   one-line intent with a local agent, leaves the interesting functions marked
   `STINGRAY-STUB:`, commits, then files one ticket per stub plus a tracking epic. Stub
   tickets are grouped by a free `epic:<id>` tag, never the reserved `parent:<id>` (which
-  would make each one self-driving).
+  would make each one self-driving). Two templates ship: `python-cli` and
+  `fastapi-spa` (FastAPI + React, stubbed on both sides of the wire).
 - **Scoped API keys**: `ApiKey.scopes`, with a `cli` scope that permits `repo:<name>`
   tags and no other reserved tag. Scopes are **admin-granted only** — any member can mint
   their own keys, so self-service scoping would be no boundary. Surfaced on Profile →

@@ -1,0 +1,71 @@
+import { useEffect, useState } from "react";
+import { api } from "../api";
+
+export default function ItemList() {
+  const [items, setItems] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [query, setQuery] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    // STINGRAY-STUB: fetch the list with the current query, then set items and
+    // total. Surface a failure into `error` rather than letting it reject.
+    // ACCEPTANCE: a backend error leaves the previous list visible and shows a
+    // message, instead of blanking the page.
+    throw new Error("STINGRAY-STUB");
+  }
+
+  useEffect(() => {
+    // A debounce belongs here: typing in the box should not fire a request per
+    // keystroke.
+    const timer = setTimeout(load, 250);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+
+  async function toggleDone(item) {
+    // STINGRAY-STUB: PATCH the item's `done` flag and reflect the result in
+    // state without refetching the whole list.
+    // ACCEPTANCE: a failed request leaves the checkbox in its original state.
+    throw new Error("STINGRAY-STUB");
+  }
+
+  return (
+    <div className="page">
+      <h1>Items</h1>
+
+      <input
+        type="search"
+        placeholder="Search…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+
+      {error && <div className="error">{error}</div>}
+
+      {items.length === 0 ? (
+        <p className="muted">{busy ? "Loading…" : "Nothing here yet."}</p>
+      ) : (
+        <ul>
+          {items.map((item) => (
+            <li key={item.id}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={item.done}
+                  onChange={() => toggleDone(item)}
+                />
+                <span style={{ textDecoration: item.done ? "line-through" : "none" }}>
+                  {item.title}
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <p className="muted">{total} item(s)</p>
+    </div>
+  );
+}

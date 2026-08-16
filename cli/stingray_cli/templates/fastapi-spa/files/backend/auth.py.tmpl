@@ -1,0 +1,77 @@
+"""Authentication for {{project_name}}.
+
+Two ways in, deliberately: a signed session cookie for the browser and an
+`X-API-Key` header for scripts. Keep the key path checked *first* so a stale
+browser cookie can't shadow an explicit key.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import secrets
+
+from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy.orm import Session
+
+from database import get_db
+from models import User
+
+SESSION_COOKIE = "{{project_name}}_session"
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "")
+
+
+def hash_password(password: str) -> str:
+    """Hash a password for storage."""
+    # STINGRAY-STUB: use a real password hasher (bcrypt/argon2 via passlib), not
+    # a bare digest — an unsalted fast hash is trivially reversed with a
+    # wordlist.
+    # ACCEPTANCE: two calls with the same password return different strings; the
+    # result verifies with verify_password.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Check `password` against a stored hash."""
+    # STINGRAY-STUB: verify against the hasher chosen in hash_password.
+    # ACCEPTANCE: returns False (never raises) on a malformed or empty hash.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def hash_api_key(raw: str) -> str:
+    """Fingerprint an API key for lookup. Only the hash is ever stored."""
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def generate_api_key() -> str:
+    return "sk_" + secrets.token_urlsafe(32)
+
+
+def make_session_token(user_id: int) -> str:
+    """Sign a session token carrying `user_id`."""
+    # STINGRAY-STUB: sign the payload with SESSION_SECRET (itsdangerous fits) so
+    # it cannot be forged, and include something you can bump to revoke.
+    # ACCEPTANCE: read_session_token round-trips it; a tampered token returns None.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def read_session_token(token: str) -> dict | None:
+    """Verify a session token and return its payload, or None."""
+    # STINGRAY-STUB: verify the signature and expiry; never trust the payload
+    # before the signature checks out.
+    # ACCEPTANCE: returns None for tampered, expired, or garbage input.
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    """Resolve the caller from an API key or session cookie."""
+    # STINGRAY-STUB: check the X-API-Key header FIRST (so an explicit key wins
+    # over a stale cookie), then the session cookie; raise 401 if neither works.
+    # ACCEPTANCE: a valid key authenticates even when a bad cookie is present;
+    # no credentials raises HTTPException(401).
+    raise NotImplementedError("STINGRAY-STUB")
+
+
+def require_active(user: User = Depends(get_current_user)) -> User:
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
+    return user

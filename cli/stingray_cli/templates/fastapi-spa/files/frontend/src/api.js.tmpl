@@ -1,0 +1,32 @@
+// The single place {{project_name}}'s UI talks to the backend.
+//
+// Keep every fetch behind `request()` so auth, error shape and JSON handling
+// live in one spot — components should never call fetch directly.
+
+const BASE = "/api";
+
+async function request(method, path, body) {
+  // STINGRAY-STUB: issue the fetch with credentials included, JSON headers when
+  // there is a body, and throw an Error carrying the server's `detail` on a
+  // non-2xx so callers get a usable message instead of "[object Object]".
+  // ACCEPTANCE: a 204 resolves to null rather than throwing on an empty body.
+  throw new Error("STINGRAY-STUB");
+}
+
+export const api = {
+  health: () => request("GET", "/health"),
+
+  listItems: (params = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined && v !== null)
+    ).toString();
+    return request("GET", query ? `/items?${query}` : "/items");
+  },
+
+  getItem: (id) => request("GET", `/items/${id}`),
+  createItem: (body) => request("POST", "/items", body),
+  updateItem: (id, body) => request("PATCH", `/items/${id}`, body),
+  deleteItem: (id) => request("DELETE", `/items/${id}`),
+};
+
+export { BASE, request };
