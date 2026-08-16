@@ -6,7 +6,7 @@ import sys
 import requests
 
 from stingray_cli.config import ConfigError, Profile, load_profile
-from stingray_client.api import StingrayClient
+from stingray_client.api import NotJsonError, StingrayClient
 from stingray_client.tickets import is_reserved_tag
 
 # Reserved tags a `cli`-scoped key is allowed to set (mirrors the server's
@@ -70,6 +70,9 @@ def post_ticket(client: StingrayClient, profile: Profile, payload: dict) -> int:
                 "An admin can mint one from Profile -> API keys.",
                 file=sys.stderr,
             )
+        return 1
+    except NotJsonError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     except requests.RequestException as exc:
         print(f"error: could not reach Stingray at {profile.url}: {exc}", file=sys.stderr)

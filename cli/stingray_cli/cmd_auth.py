@@ -14,7 +14,7 @@ from stingray_cli.config import (
     load_profile,
     save_profile,
 )
-from stingray_client.api import StingrayClient
+from stingray_client.api import NotJsonError, StingrayClient
 
 
 def add_parser(sub, add_connection_flags) -> None:
@@ -65,6 +65,9 @@ def cmd_login(args) -> int:
     client = StingrayClient(url, key)
     try:
         me = client.whoami()
+    except NotJsonError as exc:
+        # Reached a server, just not the API. Don't say "could not reach".
+        raise ConfigError(str(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "?"
         raise ConfigError(f"the API rejected that key ({status})") from exc

@@ -22,6 +22,17 @@ import requests
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
+class NotJsonError(Exception):
+    """The server answered, but not with JSON.
+
+    Almost always a base-URL mistake: the default deployment serves the SPA at
+    the root and proxies the API under ``/api``, so pointing at the root gets a
+    200 of ``index.html``. Decoding that raised "Expecting value: line 1
+    column 1", which reads like a parse bug rather than a wrong URL.
+    """
+
+
+
 class StingrayClient:
     def __init__(self, base_url: str, api_key: str, timeout: int = 30,
                  max_retries: int = 3, logger: logging.Logger | None = None,
@@ -63,6 +74,30 @@ class StingrayClient:
         no audit log, so nothing here should be required for correctness.
         """
 
+    def _check_json(self, resp: requests.Response) -> None:
+        """Fail loudly when a 2xx isn't JSON — every endpoint here returns JSON.
+
+        Catching it at the transport layer means the diagnosis names the actual
+        problem (wrong base URL) instead of surfacing a decode error from
+        whichever call site happened to run first.
+        """
+        content_type = resp.headers.get("Content-Type", "").lower()
+        # Only fire on an *affirmative* non-JSON type. A missing header proves
+        # nothing (204s and some proxies omit it) and json() will raise on its
+        # own if the body really is junk — refusing here would reject responses
+        # that are perfectly fine.
+        if not content_type or "json" in content_type:
+            return
+        hint = ""
+        if "html" in content_type:
+            hint = (
+                " That looks like a web page, not the API — check the base URL. "
+                "The default deployment serves the app at the root and the API "
+                "under /api, e.g. http://localhost:3000/api"
+            )
+        url = getattr(resp, "url", self.base_url)
+        raise NotJsonError(f"{url} returned {content_type}, expected JSON.{hint}")
+
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         """Issue a request with bounded retries on transient failures. A network
         wobble or 5xx mid-sweep is retried with backoff instead of throwing —
@@ -87,6 +122,7 @@ class StingrayClient:
                 self._backoff(attempt, resp)
                 continue
             resp.raise_for_status()
+            self._check_json(resp)
             return resp
         raise RuntimeError("unreachable: retry loop exited without returning")  # pragma: no cover
 
