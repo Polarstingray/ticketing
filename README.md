@@ -316,7 +316,7 @@ stingray review HEAD~3..HEAD        # an explicit range
 stingray review --describe          # a local agent writes the title/description
 stingray review --assign-bot -y     # file it straight at the resolver
 
-stingray scaffold python-cli ./newproj --describe "a log parser"
+stingray scaffold python-cli ./newproj --intent "a log parser"
 ```
 
 `scaffold` renders a project template, optionally adapts it to your description with

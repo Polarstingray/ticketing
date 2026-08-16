@@ -31,7 +31,7 @@ stingray review --describe           # let a local agent write the prose
 stingray review --assign-bot -y      # file it straight at the resolver
 
 stingray file --type task --title "Flaky retry test" --priority low
-stingray scaffold python-cli ./newproj --describe "a log parser"
+stingray scaffold python-cli ./newproj --intent "a log parser"
 stingray auth status
 ```
 
@@ -74,6 +74,13 @@ Pass `--require-describe` to make those hard failures instead.
 
 ## `scaffold` and the stub convention
 
+> **`--intent`, not `--describe`.** These are different options that briefly
+> shared a name. On `review`, `--describe` is a *boolean* asking an agent to
+> write the ticket's prose (code in, text out). On `scaffold`, `--intent TEXT`
+> is what you want built (text in, code out) — and unlike review's read-only
+> pass, it lets the agent **edit files**. `--describe` still works on `scaffold`
+> but warns.
+
 A stub is two comment lines plus a raise:
 
 ```python
@@ -91,6 +98,11 @@ criteria.
 Ordering is load-bearing: the scaffold is **committed before any ticket is
 filed**, because code blocks carry line numbers and an uncommitted tree that then
 changes makes every filed range wrong.
+
+The adaptation pass gets a generous timeout (30 min by default, `--agent-timeout`
+or `[profile.<name>.describe] timeout` to change it). It rewrites a whole tree, so
+it is a bigger job than describing a diff — and a timeout is quiet, falling back to
+the plain template, which reads as "the AI pass did nothing".
 
 Stub tickets are grouped by a free `epic:<id>` tag, **not** the reserved
 `parent:<id>`. `parent:` makes a ticket self-driving — the resolver auto-approves

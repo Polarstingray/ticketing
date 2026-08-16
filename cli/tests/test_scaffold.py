@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
+from stingray_cli import cmd_scaffold
 from stingray_cli import scaffold as sc
+from stingray_cli.config import ConfigError
 
 PY_WITH_STUBS = '''\
 """A module."""
@@ -164,3 +167,86 @@ def test_rendered_template_has_stubs_and_validates(tmp_path):
                                "description": "A widget."})
     assert sc.validate_tree(dest) == []
     assert len(sc.scan_stubs(dest)) >= 3
+
+
+# --- --intent / --describe naming -------------------------------------------
+
+def _args(**kw):
+    base = dict(intent=None, describe_alias=None, agent=None, agent_timeout=None,
+                profile=None, url=None, api_key=None, yes=True)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_intent_is_used_as_is():
+    assert cmd_scaffold._resolve_intent(_args(intent="a log parser")) == "a log parser"
+
+
+def test_describe_alias_still_works_but_warns(capsys):
+    """Existing invocations must not break on the rename."""
+    args = _args(describe_alias="a log parser")
+    assert cmd_scaffold._resolve_intent(args) == "a log parser"
+    assert args.intent == "a log parser", "must normalize onto args.intent"
+    err = capsys.readouterr().err
+    assert "deprecated" in err and "--intent" in err
+
+
+def test_passing_both_is_an_error():
+    with pytest.raises(ConfigError, match="only --intent"):
+        cmd_scaffold._resolve_intent(_args(intent="a", describe_alias="b"))
+
+
+def test_no_intent_is_none_and_silent(capsys):
+    assert cmd_scaffold._resolve_intent(_args()) is None
+    assert capsys.readouterr().err == ""
+
+
+# --- adaptation timeout ------------------------------------------------------
+
+def test_adapt_timeout_default_exceeds_describe_default():
+    """Adapting a tree is a strictly bigger job than describing a diff."""
+    from stingray_cli import describe
+    assert cmd_scaffold.DEFAULT_ADAPT_TIMEOUT > describe.DEFAULT_TIMEOUT
+    assert cmd_scaffold.DEFAULT_ADAPT_TIMEOUT >= 1200
+
+
+def test_adapt_uses_the_default_timeout(tmp_path, monkeypatch):
+    """Regression: this was hardcoded to 600s and ignored config entirely."""
+    seen = {}
+    monkeypatch.setattr(cmd_scaffold, "_profile_or_none", lambda a: None)
+    monkeypatch.setattr("stingray_cli.agent.run",
+                        lambda *a, **kw: seen.update(kw) or "")
+
+    template = sc.load_template("python-cli")
+    work = tmp_path / "w"
+    work.mkdir()
+    sc.render(template, work, {"project_name": "p", "package": "p", "description": "d"})
+    cmd_scaffold._adapt(work, template, _args(intent="x"), {"project_name": "p"})
+
+    assert seen["timeout"] == cmd_scaffold.DEFAULT_ADAPT_TIMEOUT
+    assert seen["edit"] is True, "the adaptation pass must be allowed to edit files"
+
+
+def test_adapt_timeout_precedence_flag_over_profile(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cmd_scaffold, "_profile_or_none",
+                        lambda a: SimpleNamespace(describe={"timeout": 111,
+                                                            "agent": "opencode"}))
+    monkeypatch.setattr("stingray_cli.agent.run",
+                        lambda *a, **kw: seen.update(kw) or "")
+
+    template = sc.load_template("python-cli")
+    work = tmp_path / "w"
+    work.mkdir()
+    sc.render(template, work, {"project_name": "p", "package": "p", "description": "d"})
+
+    # Profile alone.
+    cmd_scaffold._adapt(work, template, _args(intent="x"), {"project_name": "p"})
+    assert seen["timeout"] == 111
+    assert seen["agent"] == "opencode"
+
+    # Flag beats profile.
+    cmd_scaffold._adapt(work, template, _args(intent="x", agent_timeout=222,
+                                              agent="claude"), {"project_name": "p"})
+    assert seen["timeout"] == 222
+    assert seen["agent"] == "claude"
