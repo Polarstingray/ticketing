@@ -9,11 +9,18 @@ a resolver bot and press **Apply fixes**.
 
 ```bash
 pipx install ./cli          # from a checkout
-stingray auth login --url http://localhost:3000 --bot-user-id 2
+stingray auth login --url http://localhost:3000/api --bot-user-id 2
 ```
 
 `auth login` prompts for an API key (never echoed) and validates it before
 storing. Credentials live in `~/.config/stingray/config.toml` at mode 0600.
+
+> **The URL is the API base, so it usually ends in `/api`.** In the default
+> deployment nginx serves the SPA at the root and proxies `/api` to the backend,
+> so `http://localhost:3000` returns `index.html` — not the API. If you point at
+> the root you'll get *"returned text/html, expected JSON"*. A backend you reach
+> directly (e.g. `http://localhost:8000`) needs no suffix. Printed ticket links
+> drop the `/api` again, since that prefix isn't part of a page address.
 
 > **The key needs the `cli` scope.** `repo:` is a reserved control tag; only an
 > admin can mint a scoped key, from **Profile → API keys**. Without it the CLI

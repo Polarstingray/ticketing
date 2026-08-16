@@ -138,3 +138,75 @@ def test_web_url_handles_a_trailing_slash(isolated_config):
     profile = load_profile("p")
     assert profile.url == "http://localhost:3000/api"
     assert profile.web_url == "http://localhost:3000"
+
+
+# --- wrong base URL ----------------------------------------------------------
+
+def test_html_response_names_the_url_problem():
+    """Pointing at the SPA root instead of /api returned a 200 of index.html,
+    and decoding that raised "Expecting value: line 1 column 1" — which reads as
+    a parse bug rather than a wrong URL."""
+    import requests
+
+    from stingray_client.api import NotJsonError, StingrayClient
+
+    class FakeResp:
+        status_code = 200
+        url = "http://localhost:3000/auth/me"
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def raise_for_status(self):
+            pass
+
+    client = StingrayClient("http://localhost:3000", "sk_x")
+    client.session = type("S", (), {"request": lambda *a, **kw: FakeResp()})()
+
+    with pytest.raises(NotJsonError) as exc:
+        client.whoami()
+    message = str(exc.value)
+    assert "text/html" in message
+    assert "/api" in message, "must suggest the fix, not just report the symptom"
+    assert isinstance(exc.value, Exception) and not isinstance(
+        exc.value, requests.RequestException
+    ), "must not be swallowed by the 'could not reach' handler"
+
+
+def test_json_response_passes_through():
+    from stingray_client.api import StingrayClient
+
+    class FakeResp:
+        status_code = 200
+        url = "http://localhost:3000/api/auth/me"
+        headers = {"Content-Type": "application/json"}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"id": 1, "username": "admin"}
+
+    client = StingrayClient("http://localhost:3000/api", "sk_x")
+    client.session = type("S", (), {"request": lambda *a, **kw: FakeResp()})()
+    assert client.whoami()["username"] == "admin"
+
+
+def test_missing_content_type_is_allowed():
+    """Regression: the first cut of this check treated a *missing* Content-Type
+    as an error, which broke every response double that omits headers (and would
+    reject 204s and proxies that don't set it). Absence proves nothing."""
+    from stingray_client.api import StingrayClient
+
+    class FakeResp:
+        status_code = 200
+        url = "http://h/api/auth/me"
+        headers = {}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"id": 1, "username": "admin"}
+
+    client = StingrayClient("http://h/api", "sk_x")
+    client.session = type("S", (), {"request": lambda *a, **kw: FakeResp()})()
+    assert client.whoami()["username"] == "admin"

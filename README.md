@@ -309,7 +309,7 @@ by hand.
 
 ```bash
 pipx install ./cli
-stingray auth login --url http://localhost:3000 --bot-user-id 2
+stingray auth login --url http://localhost:3000/api --bot-user-id 2
 
 stingray review                     # last commit + working tree
 stingray review HEAD~3..HEAD        # an explicit range
