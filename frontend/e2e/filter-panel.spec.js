@@ -74,12 +74,14 @@ test("filter the dashboard by several tags, share the URL, and save the view", a
   await page.getByRole("button", { name: /Save current view/i }).click();
   await page.getByLabel(/Name for this view/i).fill(viewName);
   await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByRole("button", { name: viewName })).toBeVisible();
+  // exact: the delete button's aria-label is "Delete saved view <name>", which
+  // Playwright's substring name matching would also resolve to.
+  await expect(page.getByRole("button", { name: viewName, exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: /Clear all/i }).first().click();
   await expect(page.locator("a", { hasText: RUN })).toHaveCount(3);
 
-  await page.getByRole("button", { name: viewName }).click();
+  await page.getByRole("button", { name: viewName, exact: true }).click();
   await expect(page.locator("a", { hasText: RUN })).toHaveCount(1);
   await expect(page.getByText(both)).toBeVisible();
   await expect(page).toHaveURL(filteredUrl);
