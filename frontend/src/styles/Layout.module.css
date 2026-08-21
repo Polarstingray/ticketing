@@ -9,6 +9,7 @@
   align-items: center;
   gap: 24px;
   padding: 0 20px;
+  /* --topbar-h is this plus the 1px border below; keep them in step. */
   height: 56px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);

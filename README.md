@@ -40,9 +40,10 @@ delegated.
 
 ![Walkthrough: the backlog, a resolver-worked ticket's cost timeline, the delegation rollup, and a create → comment → resolve loop](docs/video/walkthrough.gif)
 
-Forty seconds, no narration: sign in → the backlog → a code-review ticket **the AI resolver
-worked**, showing what each phase cost → the **delegation rollup** totalling the spend of
-sub-tasks it fanned out → a human create → comment → resolve loop.
+No narration: sign in → the backlog → **filtering it down by tag** and re-sorting by
+priority → a code-review ticket **the AI resolver worked**, showing what each phase cost →
+the **delegation rollup** totalling the spend of sub-tasks it fanned out → a human
+create → comment → resolve loop.
 ([Higher-quality MP4](docs/video/walkthrough.mp4) · recorded from the real app by
 [`frontend/scripts/record-walkthrough.mjs`](./frontend/scripts/record-walkthrough.mjs).)
 
@@ -52,18 +53,27 @@ sub-tasks it fanned out → a human create → comment → resolve loop.
 |---|---|
 | [![Ticket list](docs/img/tickets.png)](docs/img/tickets.png) | [![Ticket detail](docs/img/ticket-detail.png)](docs/img/ticket-detail.png) |
 
-| Resolver cost timeline |
-|---|
-| [![Agent-run cost timeline](docs/img/resolver-cost.png)](docs/img/resolver-cost.png) |
+| Filtering by tag | Resolver cost timeline |
+|---|---|
+| [![Filter panel with two tags selected](docs/img/filtering.png)](docs/img/filtering.png) | [![Agent-run cost timeline](docs/img/resolver-cost.png)](docs/img/resolver-cost.png) |
 
-A filterable backlog with color-coded priority/status badges, tags and assignees;
-each ticket page carries highlighted code snapshots, threaded comments, an activity
+A filterable backlog with color-coded priority/status badges, tags and assignees.
+The filter rail narrows it by **any number of tags at once** (all-of by default, with
+an any-of toggle) alongside type, status, priority, assignee and free-text search —
+and the whole filter state lives in the URL, so a filtered view is bookmarkable and
+shareable, and **saved views** name the ones you keep coming back to. Tags that drive
+the resolver's automation (`repo:`, `claude:`, `delegate`) are grouped separately from
+the ones people file tickets under, so they don't drown out the latter.
+
+Each ticket page carries highlighted code snapshots, threaded comments, an activity
 trail, and — when the AI resolver has worked it — a per-phase, costed timeline of
 agent runs (plan → implement → review) with token usage and a rolled-up spend that
 follows the resolver's delegated sub-tasks.
 
-> Screenshots are generated from the real UI by the Playwright E2E test
-> (`docs/img/` — see [Testing](#testing)), not hand-drawn mockups.
+> Screenshots are captured from the real UI by
+> [`frontend/scripts/capture-screenshots.mjs`](./frontend/scripts/capture-screenshots.mjs),
+> not hand-drawn mockups. It drives the demo container so the shots show the curated
+> demo dataset rather than whatever a test run happened to leave behind.
 
 ## How it works
 
@@ -176,13 +186,20 @@ fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
 fly scale count 1
 ```
 
-The walkthrough at the top of this README is recorded from that same container, so it can
-be regenerated whenever the UI changes:
+The walkthrough and the screenshots at the top of this README both come from that same
+container, so they can be regenerated whenever the UI changes:
 
 ```bash
 docker run -d --name stingray-demo-rec -p 3200:3000 stingray-demo
-cd frontend && node scripts/record-walkthrough.mjs   # -> docs/video/walkthrough.webm
+
+cd frontend
+node scripts/capture-screenshots.mjs    # -> docs/img/*.png
+node scripts/record-walkthrough.mjs     # -> docs/video/walkthrough.webm (gitignored)
+scripts/encode-walkthrough.sh           # -> docs/video/walkthrough.{mp4,gif}
 ```
+
+The recording's wall-clock runtime *is* the video length — the pauses are what make it
+watchable — so expect it to take about as long as the clip.
 
 ### Scaling
 
@@ -326,11 +343,14 @@ The CI matrix runs on every push (see [`.github/workflows/ci.yml`](./.github/wor
 - **CLI** — `pytest` (`cli/`), covering the credential store, git range resolution,
   diff→code-block mapping, the `--describe` fallback ladder, and scaffolding.
 - **Frontend unit/component** — Vitest + Testing Library (`frontend/src`), covering
-  permission gating, list filtering/debounce, and pure helpers.
+  permission gating, the dashboard's URL-backed filter state, tag selection, and
+  pure helpers.
 - **Frontend E2E** — Playwright (`frontend/e2e`) drives a real browser through the
-  full stack (login → create → comment → resolve) and captures the README
-  screenshots as a byproduct. A second spec seeds a few agent runs through the API
-  and captures the resolver cost timeline.
+  full stack: login → create → comment → resolve, multi-tag filtering with a
+  shareable URL and saved views, and the resolver's costed agent-run timeline.
+  These specs no longer write `docs/img/` — the README assets are captured
+  separately (see [Public demo instance](#public-demo-instance)) so a test run
+  can't overwrite them with whatever data it happened to create.
 
 ```bash
 cd backend   && python -m pytest -q

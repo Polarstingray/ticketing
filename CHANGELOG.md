@@ -10,6 +10,14 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 ## [Unreleased]
 
 ### Added
+- **Demo assets regenerated for the new dashboard**, and captured from the *demo*
+  container rather than as a byproduct of the E2E run — the demo seed is curated
+  (a lived-in board, a realistic tag spread, a resolver-worked ticket), whereas the
+  E2E database holds whatever two or three tickets a test happened to create. New
+  `frontend/scripts/capture-screenshots.mjs` writes `docs/img/`, including a new
+  `filtering.png` showing multi-tag selection across both picker groups; the
+  walkthrough video gains a filtering beat; and `scripts/encode-walkthrough.sh`
+  documents the previously ad-hoc webm → mp4/gif encode.
 - **Local auto-deploy hooks**: `make hooks-install` arms `post-commit`/`post-merge`
   hooks that rebuild and restart the Docker stack whenever a commit lands on `main`
   touching `backend/`, `frontend/` or `docker-compose.yml` — gated on both test
@@ -96,6 +104,13 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   in a body stays escaped (no `rehype-raw`).
 
 ### Fixed
+- The dashboard's sticky filter rail used `top: 16px`, which is *behind* the sticky
+  topbar (56px) — so on a page tall enough to scroll, the panel slid under the nav
+  and its own header (the active-filter count and Clear all) was hidden. Both now
+  offset from a shared `--topbar-h` token. Caught while capturing screenshots.
+- Running the E2E suite overwrote the committed README screenshots, because two
+  specs wrote `docs/img/` as a side effect. Those writes are gone; the assets are
+  captured deliberately by their own script.
 - Editing `deploy/autodeploy.sh` while a deploy was in flight crashed the running
   deploy. Bash reads a script incrementally as it executes, so an edit shifts the
   byte offset under the running shell and it resumes mid-token — surfacing as a

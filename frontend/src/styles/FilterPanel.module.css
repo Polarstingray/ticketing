@@ -7,8 +7,11 @@
   padding: 14px;
   align-self: start;
   position: sticky;
-  top: 16px;
-  max-height: calc(100vh - 32px);
+  /* Clear the sticky topbar (56px + its 1px border, see Layout.module.css)
+     rather than the viewport, or the panel scrolls up underneath it and its
+     own header — the active-filter count and Clear all — is what gets hidden. */
+  top: calc(var(--topbar-h) + 16px);
+  max-height: calc(100vh - var(--topbar-h) - 32px);
   overflow-y: auto;
 }
 
