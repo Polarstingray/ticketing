@@ -1,20 +1,6 @@
 import { useMemo } from "react";
-import hljs from "highlight.js";
+import { highlight } from "../lib/highlight";
 import styles from "../styles/CodeBlockViewer.module.css";
-
-function highlight(content, language) {
-  try {
-    if (language && hljs.getLanguage(language)) {
-      return hljs.highlight(content, { language }).value;
-    }
-    return hljs.highlightAuto(content).value;
-  } catch {
-    // Fall back to escaped plain text.
-    const div = document.createElement("div");
-    div.textContent = content;
-    return div.innerHTML;
-  }
-}
 
 export default function CodeBlockViewer({ block }) {
   const { filename, line_start, line_end, content, language } = block;

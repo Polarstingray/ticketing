@@ -365,6 +365,95 @@ class PaginatedTickets(BaseModel):
     offset: int
 
 
+# --- Tag facets --------------------------------------------------------------
+
+class TagFacet(BaseModel):
+    """One tag and how many visible tickets carry it (drives the tag picker)."""
+    tag: str
+    count: int
+
+
+class TagFacets(BaseModel):
+    items: List[TagFacet]
+
+
+# --- Saved views -------------------------------------------------------------
+# A saved view is a named dashboard query string. `query` is opaque to the
+# backend (never parsed or executed), but it is still bounded and charset-checked:
+# it is echoed back into a client that pushes it into the URL, so unbounded or
+# control-character content would be both a storage and an injection concern.
+
+MAX_SAVED_VIEWS = 50
+MAX_VIEW_NAME_LENGTH = 60
+MAX_VIEW_QUERY_LENGTH = 1000
+
+# Printable ASCII only — the character set a URL query string is built from.
+_QUERY_CHARS = re.compile(r"^[\w:./+\-#%&=,\[\]~!$'()*; ]*$")
+
+
+def _clean_view_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise ValueError("name must not be empty")
+    if len(name) > MAX_VIEW_NAME_LENGTH:
+        raise ValueError(f"name too long (max {MAX_VIEW_NAME_LENGTH} chars)")
+    if any(ord(c) < 32 for c in name):
+        raise ValueError("name must not contain control characters")
+    return name
+
+
+def _clean_view_query(query: str) -> str:
+    # A leading "?" is what `location.search` hands you; accept and drop it so
+    # the stored form is always the bare query string.
+    query = query.strip().lstrip("?")
+    if len(query) > MAX_VIEW_QUERY_LENGTH:
+        raise ValueError(f"query too long (max {MAX_VIEW_QUERY_LENGTH} chars)")
+    if not _QUERY_CHARS.match(query):
+        raise ValueError("query contains invalid characters")
+    return query
+
+
+class SavedViewCreate(BaseModel):
+    name: str
+    query: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def _v_name(cls, v: str) -> str:
+        return _clean_view_name(v)
+
+    @field_validator("query")
+    @classmethod
+    def _v_query(cls, v: str) -> str:
+        return _clean_view_query(v)
+
+
+class SavedViewUpdate(BaseModel):
+    """Partial update: omit a field to leave it alone."""
+    name: Optional[str] = None
+    query: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _v_name(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _clean_view_name(v)
+
+    @field_validator("query")
+    @classmethod
+    def _v_query(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _clean_view_query(v)
+
+
+class SavedViewOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    query: str
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
+
+
 # --- API keys ----------------------------------------------------------------
 
 class ApiKeyMeta(BaseModel):

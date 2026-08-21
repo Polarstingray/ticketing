@@ -36,6 +36,29 @@ async function request(method, path, body) {
   return data;
 }
 
+/**
+ * Build a query string from a params object, dropping empty values.
+ *
+ * Array values are appended once per element rather than joined, which is what
+ * makes repeatable params work: { tag: ["a", "b"] } -> "?tag=a&tag=b", the shape
+ * the backend's List[str] filters expect.
+ */
+function qs(params) {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === "" || v === null || v === undefined) return;
+    if (Array.isArray(v)) {
+      v.forEach((item) => {
+        if (item !== "" && item !== null && item !== undefined) q.append(k, item);
+      });
+    } else {
+      q.append(k, v);
+    }
+  });
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
 export const api = {
   get: (path) => request("GET", path),
   post: (path, body) => request("POST", path, body),
@@ -48,14 +71,10 @@ export const api = {
   me: () => request("GET", "/auth/me"),
 
   // Returns a paginated envelope: { items, total, limit, offset }.
-  listTickets: (params = {}) => {
-    const q = new URLSearchParams();
-    Object.entries(params).forEach(([k, v]) => {
-      if (v !== "" && v !== null && v !== undefined) q.append(k, v);
-    });
-    const qs = q.toString();
-    return request("GET", "/tickets" + (qs ? `?${qs}` : ""));
-  },
+  listTickets: (params = {}) => request("GET", "/tickets" + qs(params)),
+  // Every tag on a ticket the caller can see, with usage counts:
+  // { items: [{ tag, count }] }. Feeds the filter panel's tag picker.
+  listTicketTags: (params = {}) => request("GET", "/tickets/tags" + qs(params)),
   getTicket: (id) => request("GET", `/tickets/${id}`),
   createTicket: (body) => request("POST", "/tickets", body),
   updateTicket: (id, body) => request("PATCH", `/tickets/${id}`, body),
@@ -67,6 +86,12 @@ export const api = {
   costRollup: (id) => request("GET", `/tickets/${id}/cost-rollup`),
   archiveTicket: (id) => request("POST", `/tickets/${id}/archive`),
   unarchiveTicket: (id) => request("POST", `/tickets/${id}/unarchive`),
+
+  // Saved dashboard views: a named filter query string, scoped to the caller.
+  listSavedViews: () => request("GET", "/saved-views"),
+  createSavedView: (body) => request("POST", "/saved-views", body),
+  updateSavedView: (id, body) => request("PATCH", `/saved-views/${id}`, body),
+  deleteSavedView: (id) => request("DELETE", `/saved-views/${id}`),
 
   listComments: (id) => request("GET", `/tickets/${id}/comments`),
   addComment: (id, body) => request("POST", `/tickets/${id}/comments`, { body }),

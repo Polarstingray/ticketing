@@ -23,6 +23,12 @@ frontend/playwright/.cache/
 # Env / secrets
 .env
 
+# Auto-deploy runtime state (see deploy/autodeploy.sh)
+deploy/.autodeploy.log
+deploy/.autodeploy.log.1
+deploy/.autodeploy.lock
+deploy/.autodeploy-disabled
+
 # OS
 .DS_Store
 

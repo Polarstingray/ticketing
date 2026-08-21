@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TicketList from "./TicketList";
 import { api } from "../api";
@@ -7,7 +7,11 @@ import { api } from "../api";
 vi.mock("../api", () => ({
   api: {
     listTickets: vi.fn(),
+    listTicketTags: vi.fn(),
     listUsers: vi.fn(),
+    listSavedViews: vi.fn(),
+    createSavedView: vi.fn(),
+    deleteSavedView: vi.fn(),
   },
 }));
 
@@ -27,10 +31,28 @@ function ticket(overrides = {}) {
   };
 }
 
-function renderList() {
+// Exposes the live URL so tests can assert that filter state round-trips
+// through the query string rather than living in component state.
+let currentLocation;
+function LocationProbe() {
+  currentLocation = useLocation();
+  return null;
+}
+
+function renderList(initialEntry = "/tickets") {
   return render(
-    <MemoryRouter>
-      <TicketList />
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <Routes>
+        <Route
+          path="/tickets"
+          element={
+            <>
+              <TicketList />
+              <LocationProbe />
+            </>
+          }
+        />
+      </Routes>
     </MemoryRouter>
   );
 }
@@ -40,9 +62,16 @@ function lastListArgs() {
   return api.listTickets.mock.calls.at(-1)[0];
 }
 
+function search() {
+  return new URLSearchParams(currentLocation.search);
+}
+
 beforeEach(() => {
   api.listUsers.mockResolvedValue([]);
   api.listTickets.mockResolvedValue({ items: [ticket()], total: 1 });
+  api.listTicketTags.mockResolvedValue({ items: [] });
+  api.listSavedViews.mockResolvedValue([]);
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -63,11 +92,17 @@ describe("TicketList", () => {
     expect(screen.getByText(/Create your first ticket/i)).toBeInTheDocument();
   });
 
+  it("shows the no-match empty state when a filter is active", async () => {
+    api.listTickets.mockResolvedValue({ items: [], total: 0 });
+    renderList("/tickets?status=resolved");
+    expect(await screen.findByText(/No tickets match these filters/i)).toBeInTheDocument();
+  });
+
   it("refetches with the selected status filter", async () => {
     renderList();
     await screen.findByText("First ticket");
 
-    fireEvent.change(screen.getByDisplayValue("All statuses"), { target: { value: "resolved" } });
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "resolved" } });
 
     await waitFor(() => expect(lastListArgs()).toMatchObject({ status: "resolved" }));
   });
@@ -77,9 +112,7 @@ describe("TicketList", () => {
     await screen.findByText("First ticket");
     const before = api.listTickets.mock.calls.length;
 
-    fireEvent.change(screen.getByPlaceholderText(/Search title or description/i), {
-      target: { value: "bug" },
-    });
+    fireEvent.change(screen.getByLabelText("Search"), { target: { value: "bug" } });
 
     // Debounced (~300ms): the refetch is deferred, then fires once with q.
     await waitFor(() => expect(lastListArgs()).toMatchObject({ q: "bug" }));
@@ -88,7 +121,10 @@ describe("TicketList", () => {
   });
 
   it("appends the next page on Load more", async () => {
-    api.listTickets.mockResolvedValueOnce({ items: [ticket({ id: 1, title: "First ticket" })], total: 2 });
+    api.listTickets.mockResolvedValueOnce({
+      items: [ticket({ id: 1, title: "First ticket" })],
+      total: 2,
+    });
     renderList();
     await screen.findByText("First ticket");
 
@@ -103,15 +139,218 @@ describe("TicketList", () => {
     expect(lastListArgs()).toMatchObject({ offset: 1 });
   });
 
-  it("clears all filters", async () => {
+  it("clears every filter but keeps the sort", async () => {
+    renderList("/tickets?status=resolved&tag=bug&sort=priority");
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getAllByRole("button", { name: /Clear all/i })[0]);
+
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ status: "", sort: "priority" }));
+    expect(search().getAll("tag")).toEqual([]);
+    expect(search().get("sort")).toBe("priority");
+  });
+});
+
+describe("TicketList URL state", () => {
+  it("reads filters, tags and sort out of the query string on first render", async () => {
+    renderList("/tickets?status=open&tag=bug&tag=ui&tag_match=any&sort=priority&order=asc");
+
+    await waitFor(() =>
+      expect(lastListArgs()).toMatchObject({
+        status: "open",
+        tag: ["bug", "ui"],
+        tag_match: "any",
+        sort: "priority",
+        order: "asc",
+      })
+    );
+  });
+
+  it("writes filter changes back into the URL", async () => {
     renderList();
     await screen.findByText("First ticket");
 
-    fireEvent.change(screen.getByDisplayValue("All statuses"), { target: { value: "resolved" } });
-    await waitFor(() => expect(lastListArgs()).toMatchObject({ status: "resolved" }));
+    fireEvent.change(screen.getByLabelText("Priority"), { target: { value: "high" } });
 
-    fireEvent.click(screen.getByRole("button", { name: /^Clear$/i }));
-    await waitFor(() => expect(lastListArgs()).toMatchObject({ status: "" }));
+    await waitFor(() => expect(search().get("priority")).toBe("high"));
+  });
+
+  it("keeps defaults out of the URL", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "open" } });
+    await waitFor(() => expect(search().get("status")).toBe("open"));
+
+    // Back to "All statuses" — the param goes away rather than becoming empty.
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "" } });
+    await waitFor(() => expect(search().has("status")).toBe(false));
+  });
+
+  it("ignores an unknown sort in the URL instead of passing it to the API", async () => {
+    renderList("/tickets?sort=bogus");
+    // The backend would 422 on this; fall back to the default.
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ sort: "created" }));
+  });
+
+  it("drops a blank tag param so it cannot filter everything out", async () => {
+    renderList("/tickets?tag=");
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ tag: [] }));
+  });
+});
+
+describe("TicketList tag filtering", () => {
+  beforeEach(() => {
+    api.listTicketTags.mockResolvedValue({
+      items: [
+        { tag: "bug", count: 4 },
+        { tag: "ui", count: 2 },
+        { tag: "repo:ticketing", count: 9 },
+      ],
+    });
+  });
+
+  it("lists free tags with their counts and hides workflow tags behind a group", async () => {
+    renderList();
+    expect(await screen.findByLabelText("bug")).toBeInTheDocument();
+    expect(screen.getByLabelText("ui")).toBeInTheDocument();
+
+    // Reserved tags are collapsed by default so they don't drown the free ones.
+    expect(screen.queryByLabelText("repo:ticketing")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Workflow tags/i }));
+    expect(screen.getByLabelText("repo:ticketing")).toBeInTheDocument();
+  });
+
+  it("sends selected tags as an array and defaults to matching all of them", async () => {
+    renderList();
+    fireEvent.click(await screen.findByLabelText("bug"));
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ tag: ["bug"] }));
+
+    fireEvent.click(screen.getByLabelText("ui"));
+    await waitFor(() =>
+      expect(lastListArgs()).toMatchObject({ tag: ["bug", "ui"], tag_match: "all" })
+    );
+  });
+
+  it("switches to matching any tag", async () => {
+    renderList("/tickets?tag=bug&tag=ui");
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: "Any" }));
+
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ tag_match: "any" }));
+  });
+
+  it("does not send tag_match with fewer than two tags selected", async () => {
+    renderList("/tickets?tag=bug&tag_match=any");
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ tag: ["bug"] }));
+    expect(lastListArgs().tag_match).toBeUndefined();
+  });
+
+  it("deselects a tag when its chip is dismissed", async () => {
+    renderList("/tickets?tag=bug&tag=ui");
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter bug" }));
+
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ tag: ["ui"] }));
+  });
+
+  it("refetches the tag facets when the archived scope changes", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByLabelText(/Show archived/i));
+
+    await waitFor(() =>
+      expect(api.listTicketTags).toHaveBeenLastCalledWith({ archived: "true" })
+    );
+  });
+});
+
+describe("TicketList sorting and density", () => {
+  it("puts the chosen sort and direction in the request", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "priority" } });
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ sort: "priority" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /switch to ascending/i }));
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ order: "asc" }));
+  });
+
+  it("remembers the density choice across mounts but keeps it out of the URL", async () => {
+    const { unmount } = renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: "Compact" }));
+    expect(screen.getByRole("button", { name: "Compact" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(currentLocation.search).toBe("");
+    unmount();
+
+    renderList();
+    await screen.findByText("First ticket");
+    expect(screen.getByRole("button", { name: "Compact" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+  });
+});
+
+describe("TicketList saved views", () => {
+  it("applies a saved view's query string to the URL", async () => {
+    api.listSavedViews.mockResolvedValue([
+      { id: 1, name: "My open bugs", query: "status=open&tag=bug" },
+    ]);
+    renderList();
+
+    fireEvent.click(await screen.findByRole("button", { name: "My open bugs" }));
+
+    await waitFor(() => expect(lastListArgs()).toMatchObject({ status: "open", tag: ["bug"] }));
+  });
+
+  it("saves the current query under a name", async () => {
+    api.createSavedView.mockResolvedValue({ id: 2, name: "Urgent", query: "priority=critical" });
+    renderList("/tickets?priority=critical");
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: /Save current view/i }));
+    fireEvent.change(screen.getByLabelText(/Name for this view/i), {
+      target: { value: "Urgent" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() =>
+      expect(api.createSavedView).toHaveBeenCalledWith({
+        name: "Urgent",
+        query: "priority=critical",
+      })
+    );
+    expect(await screen.findByRole("button", { name: "Urgent" })).toBeInTheDocument();
+  });
+
+  it("offers nothing to save when no filters are active", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+    expect(screen.queryByRole("button", { name: /Save current view/i })).not.toBeInTheDocument();
+  });
+
+  it("surfaces a duplicate-name conflict instead of silently failing", async () => {
+    api.createSavedView.mockRejectedValue(new Error("A saved view named 'Urgent' already exists"));
+    renderList("/tickets?priority=critical");
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: /Save current view/i }));
+    fireEvent.change(screen.getByLabelText(/Name for this view/i), {
+      target: { value: "Urgent" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    expect(await screen.findByText(/already exists/i)).toBeInTheDocument();
   });
 });
 

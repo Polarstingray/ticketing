@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Auto-deploy the local stack after a commit. Installed by deploy/install-hooks.sh.
+#
+# Detaches immediately: the deploy runs tests and a Docker build (minutes), and a
+# git hook that blocks on that would make every commit feel broken. setsid +
+# nohup so it also survives the terminal that ran `git commit` going away.
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+setsid nohup "$REPO_ROOT/deploy/autodeploy.sh" post-commit >/dev/null 2>&1 &
+exit 0

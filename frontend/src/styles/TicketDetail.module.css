@@ -26,14 +26,6 @@
   margin-bottom: 20px;
   align-items: center;
 }
-.tag {
-  font-size: 11px;
-  color: var(--text-dim);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 6px;
-}
 .costBadge {
   font-size: 11px;
   font-weight: 600;
@@ -45,48 +37,6 @@
   cursor: default;
 }
 
-/* System (reserved) tags: visible but read-only — managed by the resolver. */
-.systemTag {
-  font-size: 11px;
-  color: var(--text-dim);
-  background: repeating-linear-gradient(
-    -45deg,
-    var(--surface-2),
-    var(--surface-2) 4px,
-    var(--surface) 4px,
-    var(--surface) 8px
-  );
-  border: 1px dashed var(--border);
-  border-radius: 4px;
-  padding: 1px 6px;
-  cursor: default;
-}
-
-/* User-editable free tags rendered as removable chips. */
-.editableTag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 4px 1px 6px;
-}
-.tagRemove {
-  width: auto;
-  border: none;
-  background: none;
-  color: var(--text-dim);
-  font-size: 14px;
-  line-height: 1;
-  padding: 0 2px;
-  cursor: pointer;
-}
-.tagRemove:hover {
-  color: var(--text);
-}
 .tagInput {
   width: 90px;
   font-size: 11px;
@@ -98,7 +48,6 @@
 }
 
 .description {
-  white-space: pre-wrap;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -141,9 +90,6 @@
 .commentDate {
   font-size: 12px;
   color: var(--text-dim);
-}
-.commentBody {
-  white-space: pre-wrap;
 }
 .commentControls {
   display: flex;
