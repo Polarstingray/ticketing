@@ -1,10 +1,4 @@
 import { test, expect } from "@playwright/test";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Screenshot lands in docs/img/ so the README can show the resolver cost UI.
-const IMG = path.resolve(__dirname, "../../docs/img");
 
 const TITLE = "Review: batch the activity-feed queries (fix N+1)";
 // The title carries regex-special chars ("(", "+"), so escape before RegExp.
@@ -56,7 +50,7 @@ test("resolver cost UI: agent-run timeline and cost badge", async ({ page }) => 
     expect(res.status()).toBe(201);
   }
 
-  // --- Reload so the detail page picks up the runs, then screenshot ----------
+  // --- Reload so the detail page picks up the runs ---------------------------
   await page.reload();
   const runs = page.getByRole("heading", { name: "Agent runs" }).locator("..");
   await expect(page.getByRole("heading", { name: "Agent runs" })).toBeVisible();
@@ -67,5 +61,4 @@ test("resolver cost UI: agent-run timeline and cost badge", async ({ page }) => 
   await expect(runs.getByText("Implement", { exact: true })).toBeVisible();
   await expect(runs.getByText("Review", { exact: true })).toBeVisible();
 
-  await page.screenshot({ path: path.join(IMG, "resolver-cost.png"), fullPage: true });
 });
