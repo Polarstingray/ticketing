@@ -1,6 +1,32 @@
 # Stingray Tickets — common tasks. `make help` lists them.
 DC ?= docker compose
 
+# Resolve a Python interpreter at recipe time, into $$p.
+#
+# A bare `python` is absent on plenty of systems that have `python3` (Debian and
+# Ubuntu among them), so hardcoding it makes these targets fail as "command not
+# found" rather than as a test result. The system interpreter is not enough on its
+# own either — pytest and the app's dependencies live in a virtualenv, not on it.
+#
+# Order: the project's own .venv, then the backend's (the fullest one in the repo,
+# and what cli/ uses since it ships no venv of its own), then whatever is on PATH.
+# Override for a one-off with `make backend-test PY=/path/to/python`.
+PY ?=
+define resolve_py
+p="$(PY)"; \
+if [ -z "$$p" ]; then \
+  for c in .venv/bin/python ../backend/.venv/bin/python; do \
+    [ -x "$$c" ] && { p="$$c"; break; }; \
+  done; \
+fi; \
+[ -n "$$p" ] || p="$$(command -v python3 || command -v python)"; \
+if [ -z "$$p" ]; then echo "no python interpreter found" >&2; exit 1; fi; \
+"$$p" -c "import pytest" 2>/dev/null || { \
+  echo "$$p has no pytest — create the venv (see README > Local development)" >&2; \
+  exit 1; \
+}
+endef
+
 .DEFAULT_GOAL := help
 
 .PHONY: help install up down logs restart test lint backend-test resolver-test cli-test frontend-test desktop-dev desktop-build
@@ -27,19 +53,21 @@ logs: ## Tail backend logs
 test: backend-test resolver-test cli-test frontend-test ## Run all test suites
 
 backend-test: ## Run backend pytest suite
-	cd backend && python -m pytest -q
+	@cd backend && $(resolve_py) && "$$p" -m pytest -q
 
 resolver-test: ## Run resolver pytest suite
-	cd resolver && python -m pytest -q
+	@cd resolver && $(resolve_py) && "$$p" -m pytest -q
 
 cli-test: ## Run stingray CLI pytest suite
-	cd cli && python -m pytest -q
+	@cd cli && $(resolve_py) && "$$p" -m pytest -q
 
 frontend-test: ## Run frontend tests
 	cd frontend && npm test --silent
 
 lint: ## Ruff-lint the Python code
-	ruff check backend resolver cli
+	@r="$$(command -v ruff || echo backend/.venv/bin/ruff)"; \
+	 [ -x "$$r" ] || { echo "ruff not found; pip install ruff" >&2; exit 1; }; \
+	 "$$r" check backend resolver cli
 
 desktop-dev: ## Run the desktop app in dev mode (needs Rust + Node)
 	cd desktop && npm install && npm run tauri:dev

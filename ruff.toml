@@ -21,6 +21,13 @@ extend-exclude = [
     # Scaffold templates: deliberately-unfinished code with {{placeholders}} that
     # is rendered, not imported. Linting it would flag the stubs it exists to ship.
     "cli/stingray_cli/templates",
+    # Packaging output. These are gitignored (cli/.gitignore), but respect-gitignore
+    # is off above, so ruff would otherwise walk them — and cli/build/lib holds a
+    # stale *copy* of the sources, making every finding in it a duplicate of one in
+    # cli/stingray_cli that gets fixed in the wrong place.
+    "build",
+    "dist",
+    "*.egg-info",
 ]
 
 [lint]

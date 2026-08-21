@@ -89,6 +89,17 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   in a body stays escaped (no `rehype-raw`).
 
 ### Fixed
+- Ruff linted `cli/build/`, a stale *copy* of the CLI sources left by packaging.
+  Every finding there duplicated one in `cli/stingray_cli/`, inviting a fix in the
+  throwaway copy that the real sources would never see. Build output is now
+  excluded — it is gitignored, but `ruff.toml` sets `respect-gitignore = false`,
+  so ruff walked it anyway.
+- `make backend-test`, `resolver-test`, `cli-test` and `lint` invoked bare `python`
+  and `ruff`, neither of which is on PATH on a stock Debian/Ubuntu box — so they
+  failed as "command not found" rather than as a test result. Each target now
+  resolves an interpreter at run time (the project's own `.venv`, then the
+  backend's, then PATH) and reports a useful error when pytest is missing.
+  Override with `make backend-test PY=/path/to/python`.
 - The `tag` filter escaped no LIKE wildcards, so a tag containing `_` (legal in a tag)
   matched any character in that position — `a_b` also matched `axb`.
 - **Spoofable client IP** (security): nginx forwarded `X-Forwarded-For` by *appending* to the
