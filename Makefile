@@ -29,7 +29,7 @@ endef
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install up down logs restart test lint backend-test resolver-test cli-test frontend-test desktop-dev desktop-build
+.PHONY: help install up down logs restart test lint backend-test resolver-test cli-test frontend-test desktop-dev desktop-build deploy deploy-log hooks-install hooks-uninstall
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -49,6 +49,18 @@ restart: ## Restart all services
 
 logs: ## Tail backend logs
 	$(DC) logs -f backend
+
+deploy: ## Rebuild + restart locally, gated on the test suites
+	./deploy/autodeploy.sh manual
+
+deploy-log: ## Tail the auto-deploy log
+	tail -f deploy/.autodeploy.log
+
+hooks-install: ## Auto-deploy on every commit/merge to main
+	./deploy/install-hooks.sh
+
+hooks-uninstall: ## Remove the auto-deploy git hooks
+	./deploy/install-hooks.sh --uninstall
 
 test: backend-test resolver-test cli-test frontend-test ## Run all test suites
 
