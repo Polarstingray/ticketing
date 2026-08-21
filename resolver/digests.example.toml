@@ -1,0 +1,67 @@
+# Digest configuration — copy to `digests.toml` and edit.
+#
+# Each [[digest]] block is one named report. Run one with `./digest.py --name
+# <name>`, or all of them with no --name. Cadence is NOT set here: it comes from
+# the cron entry / systemd timer that invokes each name (see resolver/README.md
+# → "Daily digest"), so `schedule` below is documentation only.
+#
+# `query` is a `GET /tickets` query string — the exact same string a **saved
+# view** stores, so you can build a filter in the UI, save it, and paste it here.
+# Supported params: status, type, assigned_to, created_by, priority, tag,
+# tag_match, q, archived, sort, order. Anything else is rejected at load time
+# rather than silently ignored by the server.
+
+[[digest]]
+name      = "daily"
+schedule  = "daily 08:15"                    # documentation only
+title     = "Daily digest — {date}"          # {date} = the run's UTC date
+query     = "sort=priority&order=desc"
+# `GET /tickets` takes one status; a digest cares about several. This fans the
+# query out over each and merges — without it, a digest pinned to `status=open`
+# could never show an awaiting-fix or awaiting-plan section, since the resolver
+# parks those tickets at `in_review`.
+statuses  = ["open", "in_review", "changes_requested"]
+assign_to = 1                                # user id who receives the report
+priority  = "low"
+tags      = []                               # extra free tags on the report
+
+window_hours = 24    # how far back "opened recently" / "closed recently" look
+stale_days   = 7     # untouched this long ⇒ the `stale` section
+max_tickets  = 80    # cap on what enters the prompt and the checklist
+max_per_section = 15 # per-section cap, so one big pile can't bury the rest
+# Drop tickets carrying any of these (`digest` itself is always implicit). `stub`
+# is here because a guided-project scaffold files one exercise ticket per stub —
+# a coursework backlog, not work waiting to be picked up. Left in, a few hundred
+# of them bury every real signal in the report.
+exclude_tags = ["stub"]
+
+# Each ticket lands in the FIRST section it matches, in this order — so the
+# checklist reads as a to-do list instead of repeating one ticket four times.
+# Drop a section to leave it out entirely.
+sections = [
+  "overdue",
+  "high-priority",
+  "awaiting-fix",
+  "awaiting-plan-approval",
+  "awaiting-pr-review",
+  "stale",
+  "unassigned",
+  "new",
+  "recently-resolved",
+]
+
+# Optional extra steer for the summary paragraph.
+prompt = """
+Call out anything that has been blocked on a human for more than two days.
+"""
+
+# A second digest, scoped to one repo and run weekly.
+[[digest]]
+name         = "ticketing-weekly"
+schedule     = "Mondays 09:00"
+title        = "Weekly digest: ticketing — {date}"
+query        = "tag=repo:ticketing&sort=updated&order=desc"
+assign_to    = 1
+window_hours = 168
+stale_days   = 14
+sections     = ["high-priority", "stale", "recently-resolved"]
