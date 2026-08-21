@@ -14,7 +14,7 @@ quick operator's guide; the full docs live in the repository's `README.md` and
   assigned to its bot user, plans the change, opens a pull request, and reviews code.
   It needs an agent CLI (Claude Code or opencode) and your own provider API keys.
 - **`stingray` CLI** (optional): files review tickets straight from a git checkout, so
-  you never paste code by hand.
+  you never paste code by hand, and scaffolds new projects with a ready-made backlog.
 - **Desktop app** (optional): a small Tauri client that wraps this web app and remembers
   which server you point it at.
 
@@ -104,6 +104,51 @@ Two things worth knowing before the first run:
 
 Credentials are stored at `~/.config/stingray/config.toml`, mode 0600.
 
+## Guided projects
+
+A guided project is a repository shaped like a class assignment: every non-trivial
+function is left as a stub, each stub has its own ticket, and an `ASSIGNMENT.md` handout
+lays out the brief, ordered milestones and a rubric. It is the inverse of the resolver's
+usual job — the point is to _not_ implement the thing, so someone can.
+
+A stub is two lines, machine-scannable and fatal if you forget it:
+
+```python
+def charge_card(token: str, cents: int) -> str:
+    # STINGRAY-STUB: implement against the payment provider.
+    # ACCEPTANCE: idempotent per token; raises on a declined card.
+    raise NotImplementedError("STINGRAY-STUB")
+```
+
+There are two ways in, depending on whether the code exists yet.
+
+**An empty directory** — the CLI renders a template:
+
+```bash
+stingray scaffold fastapi-spa ./hw3 --guided \
+    --intent "a library loan tracker" --course-level intro --milestones 5
+```
+
+`--course-level intro|intermediate|advanced` controls how much of the design the handout
+gives away, and `--milestones N` how many groups the stubs are gathered into.
+
+**A repo that already has code** — file a ticket with `/scaffold <what to build>` in its
+description and let the resolver do it. It stubs the feature in next to what is already
+there, opens a pull request of the skeleton, and files the same backlog. Because it is an
+ordinary `task` ticket, it plans first: you see the proposed skeleton and `/approve` it
+before any code exists.
+
+Either way you end up with an **epic** ticket and one **exercise ticket per stub**, linked
+by an `epic:<id>` tag. That tag is deliberately not the resolver's reserved `parent:<id>`,
+which would make each child self-driving — exactly wrong for a backlog meant to be worked
+through by hand. Nothing in the backlog gets implemented for you.
+
+**The handout never enters a commit.** `ASSIGNMENT.md` is gitignored on purpose: it is
+coursework, not code, so a learner pushing their work doesn't publish the brief, and an
+instructor can hand out a different one against the same skeleton. Since a gitignored file
+is easy to lose, the whole handout is mirrored onto the epic ticket — on the resolver path,
+posted as a comment. That copy is the one that survives.
+
 ## The optional resolver
 
 The resolver is for teams that want tickets resolved by an AI agent. In short:
@@ -149,8 +194,9 @@ Focus on the new auth router.
 ```
 
 The ticket's own title and description stay as supporting context. Bundled commands are
-`/security-audit`, `/dependency-audit`, and `/test-coverage`; new ones are Markdown files
-dropped into `resolver/commands/`, picked up on the next sweep.
+`/security-audit`, `/dependency-audit`, `/test-coverage`, and `/scaffold` (described
+under **Guided projects** above); new ones are Markdown files dropped into
+`resolver/commands/`, picked up on the next sweep.
 
 ### Managing resolvers from the UI
 
