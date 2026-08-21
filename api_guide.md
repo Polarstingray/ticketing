@@ -139,8 +139,7 @@ them via the [API-keys endpoints](#api-keys).
 ### Tickets
 
 #### `GET /tickets`
-List tickets, newest first, **paginated**. All filters are optional query params and combine
-(AND).
+List tickets, **paginated**. All filters are optional query params and combine (AND).
 
 | Param         | Values |
 |---------------|--------|
@@ -149,14 +148,23 @@ List tickets, newest first, **paginated**. All filters are optional query params
 | `assigned_to` | user id (int) |
 | `created_by`  | user id (int) |
 | `priority`    | `low` `medium` `high` `critical` |
-| `tag`         | a single tag string; matches tickets containing that exact tag |
+| `tag`         | a tag string, matched exactly. **Repeatable** — pass `tag` more than once to filter on several tags at a time. |
+| `tag_match`   | `all` (default) `any`; how several `tag` params combine. `all` requires every tag, `any` matches tickets carrying at least one. Ignored with fewer than two tags. |
 | `q`           | free-text search; case-insensitive substring match over `title` or `description` (blank/whitespace-only ignored) |
 | `archived`    | `true` `false`; omitted by default, which **hides** archived tickets. Pass `true` for the archive view, `false` to list only non-archived. |
+| `sort`        | `created` (default) `updated` `priority` `due` `title` |
+| `order`       | `desc` (default) `asc`. For `priority`, `desc` means most urgent first; tickets with no `due_date` always sort last. |
 | `limit`       | page size, 1–200 (default `50`) |
 | `offset`      | number to skip (default `0`) |
 
 ```bash
 curl -s -H "X-API-Key: $KEY" "$BASE/tickets?type=code_review&status=open&limit=20&offset=0"
+
+# Tickets that are tagged BOTH `backend` and `urgent`, most urgent first:
+curl -s -H "X-API-Key: $KEY" "$BASE/tickets?tag=backend&tag=urgent&sort=priority"
+
+# Tickets tagged EITHER `backend` or `frontend`:
+curl -s -H "X-API-Key: $KEY" "$BASE/tickets?tag=backend&tag=frontend&tag_match=any"
 ```
 Response `200`: a **paginated envelope** — `items` is the page, `total` is the full count
 across all pages (ignoring `limit`/`offset`):
@@ -164,6 +172,23 @@ across all pages (ignoring `limit`/`offset`):
 { "items": [ /* ticket objects */ ], "total": 137, "limit": 20, "offset": 0 }
 ```
 To page, increase `offset` by `limit` until `offset + items.length >= total`.
+
+#### `GET /tickets/tags`
+Every tag in use across the tickets **you can see**, with a usage count — the tag picker's
+data source. Honors the same visibility rules as `GET /tickets`, so it never reveals a tag
+that exists only on someone else's ticket.
+
+| Param      | Values |
+|------------|--------|
+| `archived` | `true` `false`; as on `GET /tickets`, archived tickets are excluded by default |
+
+```bash
+curl -s -H "X-API-Key: $KEY" "$BASE/tickets/tags"
+```
+Response `200`, ordered by count (descending), ties broken alphabetically:
+```json
+{ "items": [ { "tag": "repo:ticketing", "count": 42 }, { "tag": "bug", "count": 9 } ] }
+```
 
 #### `POST /tickets`
 Create a ticket. `created_by` is set to the authenticated user automatically.
@@ -270,6 +295,50 @@ oldest first.
 curl -s -H "X-API-Key: $KEY" "$BASE/tickets/1/activity"
 ```
 Response `200`: array of [activity objects](#activity-object).
+
+---
+
+### Saved views
+
+Named, reusable dashboard filters. A view stores the ticket list's **raw query string**
+(the same one `GET /tickets` takes), so saving a view and sharing a filtered link are the
+same thing. The stored `query` is opaque to the server — it is echoed back and applied by
+the client, never parsed or executed.
+
+Every route is scoped to the authenticated user: you can only see and modify your own
+views, and someone else's id returns `404` (not `403`, which would confirm it exists).
+Admins are not exempt — these are personal, not moderated content.
+
+#### `GET /saved-views`
+Your saved views, ordered by name.
+```bash
+curl -s -H "X-API-Key: $KEY" "$BASE/saved-views"
+```
+Response `200`:
+```json
+[ { "id": 1, "name": "My open bugs", "query": "status=open&tag=bug&sort=priority",
+    "created_at": "...", "updated_at": "..." } ]
+```
+
+#### `POST /saved-views`
+| Field   | Type   | Required | Notes |
+|---------|--------|----------|-------|
+| `name`  | string | yes      | 1–60 chars, unique per user |
+| `query` | string | no       | max 1000 chars; a leading `?` is stripped. Defaults to `""`. |
+
+```bash
+curl -s -X POST "$BASE/saved-views" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "My open bugs", "query": "status=open&tag=bug&sort=priority"}'
+```
+Response `201`: the saved view. `409` if you already have a view by that name; `422` past
+50 views.
+
+#### `PATCH /saved-views/{id}`
+Partial update — send `name`, `query`, or both. `409` on a name you already use.
+
+#### `DELETE /saved-views/{id}`
+Response `204`.
 
 ---
 

@@ -6,6 +6,7 @@ import { PriorityBadge, StatusBadge, TypeBadge } from "../components/Badges";
 import CodeBlockViewer from "../components/CodeBlockViewer";
 import Markdown from "../components/Markdown";
 import MarkdownEditor from "../components/MarkdownEditor";
+import Tag from "../components/Tag";
 import {
   AGENT_PHASE_LABELS,
   PRIORITIES,
@@ -270,7 +271,7 @@ export default function TicketDetail() {
           <TypeBadge type={ticket.type} />
           <StatusBadge status={ticket.status} />
           <PriorityBadge priority={ticket.priority} />
-          {ticket.archived && <span className={styles.tag}>Archived</span>}
+          {ticket.archived && <Tag muted>Archived</Tag>}
           {agentRuns.length > 0 && (
             <span
               className={styles.costBadge}
@@ -284,29 +285,13 @@ export default function TicketDetail() {
             </span>
           )}
           {reservedTags.map((t) => (
-            <span key={t} className={styles.systemTag} title="System tag — managed by automation">
-              {t}
-            </span>
+            <Tag key={t}>{t}</Tag>
           ))}
-          {canModify
-            ? freeTags.map((t) => (
-                <span key={t} className={styles.editableTag}>
-                  {t}
-                  <button
-                    type="button"
-                    className={styles.tagRemove}
-                    aria-label={`Remove tag ${t}`}
-                    onClick={() => removeTag(t)}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))
-            : freeTags.map((t) => (
-                <span key={t} className={styles.tag}>
-                  {t}
-                </span>
-              ))}
+          {freeTags.map((t) => (
+            <Tag key={t} onRemove={canModify ? () => removeTag(t) : undefined}>
+              {t}
+            </Tag>
+          ))}
           {canModify && (
             <input
               className={styles.tagInput}

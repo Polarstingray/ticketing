@@ -1,8 +1,9 @@
 """Ticket routes: list/filter, create, retrieve, update, delete."""
-from typing import Optional
+from collections import Counter
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from activity import record_activity
@@ -23,6 +24,7 @@ from control_tags import (
 from database import get_db
 from inbox import create_notification
 from models import (
+    PRIORITY_ORDER,
     Activity,
     AgentRun,
     Ticket,
@@ -41,6 +43,8 @@ from schemas import (
     CostRollup,
     CostRollupChild,
     PaginatedTickets,
+    TagFacet,
+    TagFacets,
     TicketCreate,
     TicketOut,
     TicketUpdate,
@@ -99,6 +103,99 @@ def _authorize_tags(
     return pinned + [t for t in submitted if t not in pinned]
 
 
+def _visible_tickets(db: Session, user: User):
+    """Base query honoring the read boundary.
+
+    Non-admins may only see tickets they created or are assigned to; code_review
+    tickets embed private source in code_blocks. Every listing/aggregation route
+    must start here, or it can leak the existence of another user's tickets.
+    """
+    query = db.query(Ticket)
+    if not is_admin(user):
+        query = query.filter(or_(Ticket.created_by == user.id, Ticket.assigned_to == user.id))
+    return query
+
+
+def _tag_clause(tag: str):
+    r"""SQL matching one exact tag inside the serialized JSON array.
+
+    ``tags`` is a JSON column, which SQLite stores as text (``'["auth", "bug"]'``),
+    so we match the quoted token. The surrounding quotes make this exact rather
+    than a prefix match — the tag charset (schemas._TAG_CHARS) forbids ``"``, so
+    ``"auth"`` cannot appear inside any other tag. LIKE wildcards still have to be
+    escaped though: ``_`` is allowed in tags (it is in ``\w``) and would otherwise
+    match any single character, so ``a_b`` would wrongly match ``axb``.
+    """
+    escaped = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return Ticket.tags.like(f'%"{escaped}"%', escape="\\")
+
+
+# `?sort=` value -> the column to order by. `priority` is a String column, so
+# ordering by it directly is alphabetical and meaningless; PRIORITY_ORDER (in
+# models, beside the enum) becomes a CASE that ranks critical..low.
+_SORT_COLUMNS = {
+    "created": Ticket.created_at,
+    "updated": Ticket.updated_at,
+    "title": Ticket.title,
+    "due": Ticket.due_date,
+    "priority": case(PRIORITY_ORDER, value=Ticket.priority, else_=len(PRIORITY_ORDER)),
+}
+
+
+def _order_by(sort: str, order: str):
+    """Ordering terms for a sort/direction pair.
+
+    Two wrinkles worth stating: `priority` reads best ascending (most urgent
+    first), so its rank column is inverted relative to dates, where "desc" means
+    newest first. And tickets with no due date sort last in *both* directions —
+    an empty due date is "no deadline", not "the earliest deadline".
+    """
+    column = _SORT_COLUMNS[sort]
+    descending = (order == "desc")
+    if sort == "priority":
+        descending = not descending
+    terms = []
+    if sort == "due":
+        terms.append(Ticket.due_date.is_(None).asc())
+    terms.append(column.desc() if descending else column.asc())
+    # Stable tiebreak so paging can't repeat or skip a row when the sort key ties.
+    terms.append(Ticket.id.desc())
+    return terms
+
+
+@router.get("/tags", response_model=TagFacets)
+def list_ticket_tags(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    archived: Optional[bool] = Query(default=None),
+):
+    """Every tag on a ticket this caller can see, with a usage count.
+
+    Feeds the dashboard's tag picker. Tags live in a JSON column with no portable
+    SQL unnest, so the counting happens in Python over just that one column —
+    fine at this scale, and it keeps the visibility rules in one place
+    (`_visible_tickets`) instead of duplicating them into raw SQL.
+
+    Declared before `/{ticket_id}` so the literal path wins the route match.
+    """
+    query = _visible_tickets(db, user).with_entities(Ticket.tags)
+    if archived is None:
+        query = query.filter(Ticket.archived == False)  # noqa: E712
+    else:
+        query = query.filter(Ticket.archived == archived)
+
+    counts: Counter[str] = Counter()
+    for (tags,) in query.all():
+        counts.update(t for t in (tags or []) if isinstance(t, str))
+
+    # Most-used first, then alphabetically so the order is stable between calls.
+    items = [
+        TagFacet(tag=tag, count=count)
+        for tag, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return TagFacets(items=items)
+
+
 @router.get("", response_model=PaginatedTickets)
 def list_tickets(
     db: Session = Depends(get_db),
@@ -108,17 +205,18 @@ def list_tickets(
     assigned_to: Optional[int] = Query(default=None),
     created_by: Optional[int] = Query(default=None),
     priority: Optional[TicketPriority] = Query(default=None),
-    tag: Optional[str] = Query(default=None),
+    # Repeatable: ?tag=a&tag=b. A single ?tag= still arrives as a one-element
+    # list, so pre-existing callers (the CLI, api_guide.md) are unaffected.
+    tag: Optional[List[str]] = Query(default=None),
+    tag_match: Literal["all", "any"] = Query(default="all"),
     q: Optional[str] = Query(default=None),
     archived: Optional[bool] = Query(default=None),
+    sort: Literal["created", "updated", "priority", "due", "title"] = Query(default="created"),
+    order: Literal["asc", "desc"] = Query(default="desc"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    query = db.query(Ticket)
-    # Non-admins may only see tickets they created or are assigned to;
-    # code_review tickets embed private source in code_blocks.
-    if not is_admin(user):
-        query = query.filter(or_(Ticket.created_by == user.id, Ticket.assigned_to == user.id))
+    query = _visible_tickets(db, user)
     if status is not None:
         query = query.filter(Ticket.status == status.value)
     if type is not None:
@@ -134,12 +232,12 @@ def list_tickets(
         query = query.filter(Ticket.archived == False)  # noqa: E712
     else:
         query = query.filter(Ticket.archived == archived)
-    if tag is not None:
-        # tags are stored as a JSON text array (e.g. '["auth", "urgent"]'); match the
-        # quoted token in SQL so the filter composes with LIMIT/OFFSET. This is a
-        # substring match, so a tag that is a substring of another could over-match —
-        # acceptable for our exact-token usage.
-        query = query.filter(Ticket.tags.like(f'%"{tag}"%'))
+    # Blank values survive the frontend's param building, so ignore them rather
+    # than filtering for a tag that is the empty string (which matches nothing).
+    tags = [t.strip() for t in (tag or []) if t and t.strip()]
+    if tags:
+        clauses = [_tag_clause(t) for t in tags]
+        query = query.filter(and_(*clauses) if tag_match == "all" else or_(*clauses))
     # Free-text search over title/description; ignore an empty/whitespace-only term.
     if q is not None and q.strip():
         term = q.strip()
@@ -149,7 +247,7 @@ def list_tickets(
 
     total = query.count()
     items = (
-        query.order_by(Ticket.created_at.desc()).offset(offset).limit(limit).all()
+        query.order_by(*_order_by(sort, order)).offset(offset).limit(limit).all()
     )
     return PaginatedTickets(items=items, total=total, limit=limit, offset=offset)
 

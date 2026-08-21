@@ -15,6 +15,7 @@ from routers import comments as comments_router
 from routers import notifications as notifications_router
 from routers import preferences as preferences_router
 from routers import resolver_settings as resolver_settings_router
+from routers import saved_views as saved_views_router
 from routers import tickets as tickets_router
 from routers import users as users_router
 from seed import seed_admin, seed_resolver_bot
@@ -63,6 +64,7 @@ app.include_router(notifications_router.router)
 app.include_router(preferences_router.router)
 app.include_router(resolver_settings_router.router)
 app.include_router(resolver_settings_router.registry_router)
+app.include_router(saved_views_router.router)
 app.include_router(users_router.router)
 
 

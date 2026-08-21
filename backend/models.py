@@ -50,6 +50,18 @@ class TicketPriority(str, enum.Enum):
     critical = "critical"
 
 
+# Sort rank for `priority`. The column is a String, so ordering by it directly
+# would be alphabetical ("critical" < "high" < "low" < "medium") — meaningless.
+# Lives here, next to the enum, so the two can't drift; routers.tickets turns it
+# into a SQL CASE for `?sort=priority`.
+PRIORITY_ORDER: dict[str, int] = {
+    TicketPriority.critical.value: 0,
+    TicketPriority.high.value: 1,
+    TicketPriority.medium.value: 2,
+    TicketPriority.low.value: 3,
+}
+
+
 class NotificationType(str, enum.Enum):
     assigned = "assigned"
     commented = "commented"
@@ -324,3 +336,29 @@ class Activity(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
     actor = relationship("User", foreign_keys=[actor_id])
+
+
+class SavedView(Base):
+    """A named, reusable ticket-list filter belonging to one user.
+
+    `query` is the dashboard's raw URL query string (e.g.
+    ``tag=repo:ticketing&status=open&sort=priority``) rather than a set of typed
+    columns. The list page already keeps its whole filter state in the URL, so
+    storing that string means a saved view and a shared link are the same thing —
+    and a new filter can be added without a migration here.
+
+    It is opaque to the backend: it is echoed back to the client, never parsed or
+    executed server-side, so an unknown or malformed key can't do anything worse
+    than produce a view that filters nothing.
+    """
+    __tablename__ = "saved_views"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_saved_view_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    query = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
