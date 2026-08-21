@@ -333,6 +333,102 @@ See [`stingray-resolver.service`](./stingray-resolver.service) and
 Bound a busy sweep with `--max-tickets N` (or `MAX_TICKETS_PER_SWEEP`) so one
 tick does a fixed amount of work under the lock and the next tick continues.
 
+## Daily digest (optional)
+
+Everything above is **reactive**: the resolver works whatever was assigned to its
+bot. `digest.py` is the other half — a scheduled pass that looks at the backlog *as
+a whole* and files one **report ticket**: a short summary paragraph over a markdown
+checklist of every ticket it covered.
+
+```bash
+cp digests.example.toml digests.toml     # then edit
+.venv/bin/python digest.py --list        # what's configured
+.venv/bin/python digest.py --name daily --dry-run   # render to stdout, file nothing
+.venv/bin/python digest.py --name daily             # file it
+resolver digest --name daily                        # same, via the CLI
+```
+
+Nothing auto-runs off a digest. It is a report for a human; acting on a line means
+opening that ticket and working it the usual way.
+
+### Configuring digests
+
+Each `[[digest]]` block in `digests.toml` is one named report. The `query` field is
+a `GET /tickets` query string — **the exact string a saved view stores**, so you can
+build a filter in the UI, save it, and paste it in:
+
+```toml
+[[digest]]
+name      = "daily"
+title     = "Daily digest — {date}"
+query     = "sort=priority&order=desc"
+statuses  = ["open", "in_review", "changes_requested"]
+assign_to = 1          # user id who receives the report
+sections  = ["overdue", "high-priority", "awaiting-fix", "stale", "unassigned"]
+exclude_tags = ["stub"]
+```
+
+`GET /tickets` takes **one** status, but a digest cares about several — the
+resolver parks a reviewed ticket at `in_review`, so a digest pinned to
+`status=open` could never show an `awaiting-fix` or `awaiting-pr-review` section
+at all. `statuses` fans the same query out over each one and merges the results
+(re-sorting by urgency, since the merge destroys the server's ordering).
+
+`exclude_tags` drops tickets client-side. `stub` is in the shipped default because
+a guided-project scaffold files one exercise ticket per stub — a coursework
+backlog, not work waiting to be picked up; left in, a few hundred of them bury
+every real signal.
+
+An unsupported query param is rejected **at load time** rather than ignored by the
+server — a typo'd filter would otherwise silently produce a digest of the wrong set
+of tickets. `digests.toml` is gitignored (it carries user ids and repo scopes);
+`digests.example.toml` documents every field.
+
+Each ticket lands in the **first** section it matches, in the order you list them,
+so the checklist reads as a to-do list instead of repeating one ticket under four
+headings. Available sections: `overdue`, `high-priority`, `awaiting-fix`,
+`awaiting-plan-approval`, `awaiting-pr-review`, `stale`, `unassigned`, `new`,
+`recently-resolved`.
+
+Note `stale` outranks `unassigned` by default: "untouched for 70 days" is a
+stronger signal than "nobody owns it", and in a tracker where little is ever
+assigned, an `unassigned` section placed first swallows the whole backlog. Two
+caps keep the report readable — `max_tickets` (whole run) and `max_per_section`,
+so one big pile can't bury the rest; both report what they trimmed.
+
+### `DIGEST_ADMIN_KEY` is required, and must really be an admin's
+
+The API shows non-admins **only tickets they created or are assigned to**. The
+resolver's own key is a least-privilege member, so running the digest on it would
+quietly report on the bot's queue rather than the backlog — a digest covering a
+fraction of the tracker is worse than none. `digest.py` therefore refuses to start
+without `DIGEST_ADMIN_KEY`, and warns loudly if that key turns out to belong to a
+non-admin. Mint one as an admin from Profile → API keys.
+
+The summary paragraph comes from one OpenAI-compatible chat completion
+(`DIGEST_API_*`, falling back to `REVIEW_API_*`). It is optional in the strong
+sense: with no endpoint configured, or on a 429, the digest still files — you lose
+the paragraph, not the report. **The checklist is always derived from the query
+results, never from model output**, and the model is told not to emit ticket
+numbers, so the prose can never contradict or invent a line.
+
+### Scheduling
+
+Cadence comes from the schedule, not the config file — one entry per digest name.
+Cron, matching the resolver's pattern:
+
+```cron
+RESOLVER_DIR=/opt/ticketing/resolver
+15 8 * * * /usr/bin/flock -n /tmp/stingray-digest.lock \
+  $RESOLVER_DIR/.venv/bin/python $RESOLVER_DIR/digest.py --name daily \
+  >> $RESOLVER_DIR/logs/cron-digest.log 2>&1
+```
+
+Or systemd — see [`stingray-digest.service`](./stingray-digest.service) and
+[`stingray-digest.timer`](./stingray-digest.timer). A digest files **at most once
+per name per day** (it checks for its own `digest:<name>:<date>` tag first), so a
+timer that fires twice, or a manual re-run, is harmless; `--force` overrides.
+
 ## Scaling: multiple resolvers / identities
 
 The resolver claims work by sweeping tickets **assigned to its own bot user**

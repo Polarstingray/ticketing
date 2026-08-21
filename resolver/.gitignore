@@ -6,3 +6,6 @@ work/
 .venv/
 __pycache__/
 *.pyc
+
+# Digest config: a real one carries user ids and repo scopes; the example is tracked.
+digests.toml
