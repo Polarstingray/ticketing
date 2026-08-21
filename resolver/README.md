@@ -262,7 +262,7 @@ command ran — mirroring the `/ticket` directive above.
 
 - **One library, every project.** Commands live in `resolver/commands/*.md`, so a
   recurring cross-project task is defined once. The seeded set includes
-  `/security-audit`, `/dependency-audit`, and `/test-coverage`.
+  `/security-audit`, `/dependency-audit`, `/test-coverage`, and `/scaffold`.
 - **`type` controls routing.** A command's frontmatter `type: code_review` runs the
   read-only review lifecycle (findings posted, no PR) — even on a ticket whose own
   type is `task`. `type: task` (the default) runs plan → approve → implement.
@@ -278,6 +278,52 @@ command ran — mirroring the `/ticket` directive above.
 
 `/ticket`, `/approve`, `/revise`, and `/review` are reserved control verbs and are
 never treated as standard commands.
+
+### `/scaffold` — a guided exercise out of an existing repo
+
+`/scaffold` inverts what the resolver normally does: instead of implementing a
+ticket, it writes the **skeleton** of a feature and hands the work back as a
+backlog for a human to fill in. It is the existing-codebase counterpart to
+`stingray scaffold --guided`, which does the same thing for an empty directory.
+
+```
+/scaffold add a payments module
+
+Card charges and webhook handling. Third-year coursework —
+requirements only, leave the architecture open.
+```
+
+The lifecycle is the ordinary `task` one, which is the point: it plans first, so
+you see the proposed skeleton and `/approve` (or `/revise`) it before any code
+exists. The implement run then:
+
+1. writes stubs — `STINGRAY-STUB:` / `ACCEPTANCE:` plus a `NotImplementedError`
+   — with everything around them (signatures, imports, routes, wiring) real and
+   correct, so the tree still imports and the existing tests still pass;
+2. writes an `ASSIGNMENT.md` handout (learning goals, milestones, rubric) and
+   gitignores it;
+3. opens a PR of the skeleton, as usual.
+
+Then `resolver/scaffold_followup.py` finishes the job deterministically:
+
+- The handout is **lifted out of the worktree before the commit** and posted as a
+  comment on the ticket. `git add -A` honours `.gitignore`, so a correctly-ignored
+  handout could never reach anyone via the PR — the comment is how it is
+  delivered.
+- The finished tree is **scanned** for `STINGRAY-STUB` markers, restricted to the
+  files the run touched, and one ticket is filed per marker. Scanning rather than
+  scraping `created ticket #N` out of the agent log (the way delegation does) is
+  what guarantees every marker gets exactly one ticket over a ten-plus-stub
+  backlog.
+- Children carry `epic:<this ticket's id>` and **never** `parent:` — `parent:`
+  makes a child self-driving, and a learner's exercise being auto-implemented by
+  a bot defeats the entire feature. The scaffold ticket is itself the epic; no
+  second epic is created.
+- A re-run (a rework after review) rebuilds the skeleton but does **not** refile
+  the backlog — those tickets may already have been worked on.
+
+Capped at 30 exercise tickets per run; over that the roll-up comment says how many
+were left untracked.
 
 ## The `resolver` CLI (one-stop)
 

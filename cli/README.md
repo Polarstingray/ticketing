@@ -116,6 +116,48 @@ Stub tickets are grouped by a free `epic:<id>` tag, **not** the reserved
 its plan and goes straight to implementing — which is wrong for a backlog you
 intend to write by hand.
 
+### `--guided`: a project shaped like a class assignment
+
+`--guided` turns a scaffold into coursework. On top of the stubs and their
+tickets it writes **`ASSIGNMENT.md`** — learning goals, the brief, ordered
+milestones with a "Done when" for each, a rubric, and the project's real run
+commands — and rewrites the ticket bodies as exercises instead of echoing the
+marker text.
+
+```bash
+stingray scaffold fastapi-spa ./hw3 --guided \
+    --intent "a library loan tracker" --course-level intro --milestones 5
+```
+
+| flag | effect |
+|---|---|
+| `--guided` | write the handout and exercise-style ticket bodies |
+| `--course-level intro\|intermediate\|advanced` | how much of the design the handout gives away (default `intermediate`) |
+| `--milestones N` | how many milestones to group the stubs into (default 4, capped at the stub count) |
+| `--no-assignment` | skip the file; the epic still carries the coursework |
+
+**`ASSIGNMENT.md` is gitignored, on purpose.** The handout is coursework, not
+code: a learner pushing their work shouldn't publish the brief, and an instructor
+should be able to hand out a different one against the same skeleton. So it never
+enters a commit — and because it could therefore be lost, everything down to the
+rubric is mirrored into the epic ticket's description, which is the copy that
+survives.
+
+The handout comes from a second agent pass over the finished tree, using the same
+`[describe]` agent/model/timeout as `--intent`. It is best-effort like every other
+agent pass: a timeout, a missing agent, or `--no-ai` all fall back to a handout
+generated from the scanned stubs and their `ACCEPTANCE:` lines. You always get a
+handout; with an agent you get a better-written one.
+
+The pass also leaves a scratch `.stingray-exercises.json` mapping each
+`path:line` to that stub's ticket prose. It is read once and deleted — it never
+reaches the project or a commit.
+
+To stub a feature into a repo that **already has code**, don't use the CLI: file a
+ticket with `/scaffold <what to build>` in its description and let the resolver do
+it. Same convention, same backlog shape, applied to an existing codebase. See
+`resolver/commands/README.md`.
+
 ### Templates
 
 | name | shape |
