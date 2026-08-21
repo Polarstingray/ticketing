@@ -215,3 +215,66 @@ describe("TicketDetail resolver fix loop", () => {
     expect(screen.queryByRole("button", { name: /Apply fixes/i })).not.toBeInTheDocument();
   });
 });
+
+describe("TicketDetail markdown rendering", () => {
+  // A realistic resolver review comment: bold marker, a severity list citing
+  // file:line, and a fenced diff.
+  const RESOLVER_COMMENT = {
+    id: 7,
+    author: 2,
+    created_at: "2026-01-02T00:00:00Z",
+    body: [
+      "🔎 **Code review** (Stingray resolver)",
+      "",
+      "## blocker",
+      "",
+      "- `backend/auth.py:98` — session is never cleared.",
+      "",
+      "```diff",
+      "-    session.pop(key)",
+      "+    session.clear()",
+      "```",
+    ].join("\n"),
+  };
+
+  it("renders a resolver comment as markdown, not literal text", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.listComments.mockResolvedValue([RESOLVER_COMMENT]);
+    const { container } = renderDetail();
+    await waitForLoaded();
+
+    expect(screen.getByRole("heading", { name: "blocker" })).toBeInTheDocument();
+    expect(screen.getByText("Code review").tagName).toBe("STRONG");
+    expect(screen.getByRole("listitem").textContent).toContain("backend/auth.py:98");
+    const pre = container.querySelector("pre");
+    expect(pre.textContent).toContain("session.clear()");
+    // The raw marker text must not leak through as literal markdown.
+    expect(screen.queryByText(/\*\*Code review\*\*/)).not.toBeInTheDocument();
+  });
+
+  it("renders the ticket description as markdown", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.getTicket.mockResolvedValue(makeTicket({ description: "see **this** part" }));
+    renderDetail();
+    await waitForLoaded();
+
+    expect(screen.getByText("this").tagName).toBe("STRONG");
+  });
+
+  it("previews the comment draft as markdown", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    renderDetail();
+    await waitForLoaded();
+
+    fireEvent.change(screen.getByPlaceholderText("Add a comment…"), {
+      target: { value: "a **bold** draft" },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
+
+    expect(screen.getByText("bold").tagName).toBe("STRONG");
+    expect(screen.queryByPlaceholderText("Add a comment…")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Write" }));
+    expect(screen.getByPlaceholderText("Add a comment…")).toHaveValue("a **bold** draft");
+  });
+});

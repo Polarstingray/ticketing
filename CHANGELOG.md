@@ -39,6 +39,14 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   `docker-compose.images.yml` to run them without a source build.
 - Project governance docs: `LICENSE` (MIT), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, this
   changelog, and GitHub issue/PR templates.
+- **Markdown in comments and descriptions**: ticket comment bodies and descriptions now
+  render as markdown — headings, lists, tables, task lists, links, inline code, and
+  syntax-highlighted fenced code blocks with a copy button. The resolver already wrote
+  markdown (bold state markers, severity-grouped findings, `diff` fences, the `/scaffold`
+  handout with its rubric table); it now reads as intended instead of as literal text.
+  The comment composer gained a Write/Preview toggle. No schema change — raw bodies are
+  stored and served unchanged, so the resolver's marker parsing is unaffected. Raw HTML
+  in a body stays escaped (no `rehype-raw`).
 
 ### Fixed
 - **Spoofable client IP** (security): nginx forwarded `X-Forwarded-For` by *appending* to the

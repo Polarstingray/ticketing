@@ -40,9 +40,20 @@ test("log in, create a ticket, comment, and resolve it", async ({ page }) => {
   await expect(page.locator('label:text-is("Priority") + select')).toHaveValue("high");
 
   // --- Comment ---------------------------------------------------------------
-  await page.getByPlaceholder("Add a comment…").fill("On it — batching with a single IN query.");
+  // Markdown body: the fence and the emphasis should come back rendered, not literal.
+  const BODY = [
+    "On it — batching with a **single** IN query.",
+    "",
+    "```sql",
+    "SELECT * FROM activity WHERE ticket_id IN (:ids)",
+    "```",
+  ].join("\n");
+  await page.getByPlaceholder("Add a comment…").fill(BODY);
   await page.getByRole("button", { name: "Comment" }).click();
-  await expect(page.getByText("On it — batching with a single IN query.")).toBeVisible();
+  await expect(page.getByText("On it — batching with a")).toBeVisible();
+  await expect(page.locator("strong", { hasText: "single" }).first()).toBeVisible();
+  await expect(page.locator("pre", { hasText: "SELECT * FROM activity" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy" })).toBeVisible();
 
   // --- Resolve ---------------------------------------------------------------
   await page.locator('label:text-is("Status") + select').selectOption("resolved");

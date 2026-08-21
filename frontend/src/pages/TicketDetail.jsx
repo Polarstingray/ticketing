@@ -4,6 +4,8 @@ import { api } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { PriorityBadge, StatusBadge, TypeBadge } from "../components/Badges";
 import CodeBlockViewer from "../components/CodeBlockViewer";
+import Markdown from "../components/Markdown";
+import MarkdownEditor from "../components/MarkdownEditor";
 import {
   AGENT_PHASE_LABELS,
   PRIORITIES,
@@ -323,7 +325,9 @@ export default function TicketDetail() {
         </div>
 
         {ticket.description && (
-          <div className={styles.description}>{ticket.description}</div>
+          <div className={styles.description}>
+            <Markdown>{ticket.description}</Markdown>
+          </div>
         )}
 
         {ticket.type === "code_review" && ticket.code_blocks?.length > 0 && (
@@ -357,10 +361,7 @@ export default function TicketDetail() {
                 </div>
                 {editingCommentId === c.id ? (
                   <div className={styles.commentEdit}>
-                    <textarea
-                      value={editingBody}
-                      onChange={(e) => setEditingBody(e.target.value)}
-                    />
+                    <MarkdownEditor value={editingBody} onChange={setEditingBody} />
                     <div className={styles.commentActions}>
                       <button
                         className="primary"
@@ -376,15 +377,15 @@ export default function TicketDetail() {
                     </div>
                   </div>
                 ) : (
-                  <div className={styles.commentBody}>{c.body}</div>
+                  <Markdown>{c.body}</Markdown>
                 )}
               </div>
             ))}
           </div>
           <form onSubmit={submitComment} className={styles.commentForm}>
-            <textarea
+            <MarkdownEditor
               value={commentBody}
-              onChange={(e) => setCommentBody(e.target.value)}
+              onChange={setCommentBody}
               placeholder="Add a comment…"
             />
             <div className={styles.commentActions}>
