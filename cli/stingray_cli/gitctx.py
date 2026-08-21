@@ -16,24 +16,17 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from stingray_client.languages import LANGUAGES, language_for  # noqa: F401
+
 # git's canonical empty tree, used so a repo's first commit is still diffable.
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
-# Extension → the language label stored on a code block (drives UI highlighting).
-_LANGUAGES = {
-    ".py": "python", ".pyi": "python",
-    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
-    ".ts": "typescript", ".tsx": "typescript",
-    ".go": "go", ".rs": "rust", ".rb": "ruby", ".java": "java", ".kt": "kotlin",
-    ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp",
-    ".cs": "csharp", ".php": "php", ".swift": "swift", ".scala": "scala",
-    ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".fish": "fish",
-    ".sql": "sql", ".css": "css", ".scss": "scss", ".html": "html",
-    ".json": "json", ".yml": "yaml", ".yaml": "yaml", ".toml": "toml",
-    ".md": "markdown", ".rst": "rst", ".xml": "xml",
-}
+# The extension → language map is shared with the stub scanner, which the
+# resolver imports; it lives in the client package so neither side depends on the
+# other. Re-exported under the old private name for existing callers.
+_LANGUAGES = LANGUAGES
 
 # Paths never worth reviewing: generated, vendored, or binary-ish.
 DEFAULT_EXCLUDES = (
@@ -242,10 +235,6 @@ def _file_lines(root: Path, path: str, rev: str | None) -> list[str] | None:
         return target.read_text(encoding="utf-8").splitlines()
     except (UnicodeDecodeError, OSError):
         return None
-
-
-def language_for(path: str) -> str:
-    return _LANGUAGES.get(Path(path).suffix.lower(), "text")
 
 
 @dataclass

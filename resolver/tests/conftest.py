@@ -23,11 +23,20 @@ class FakeClient:
         self._comments = comments or []
         self.comments_added: list[tuple[int, str]] = []
         self.updates: list[dict] = []
+        self.created: list[dict] = []
+        self._next_id = 101
         # id -> ticket dict, for get_ticket/iter_tickets (delegation paths).
         self._tickets: dict[int, dict] = {t["id"]: t for t in (tickets or [])}
 
     def list_comments(self, ticket_id):
         return self._comments
+
+    def create_ticket(self, **fields):
+        self.created.append(fields)
+        ticket = {"id": self._next_id, **fields}
+        self._next_id += 1
+        self._tickets[ticket["id"]] = ticket
+        return ticket
 
     def add_comment(self, ticket_id, body):
         self.comments_added.append((ticket_id, body))
