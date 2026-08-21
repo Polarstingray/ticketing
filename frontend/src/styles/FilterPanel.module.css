@@ -1,0 +1,307 @@
+/* Wide screens: a persistent left rail (see TicketList.module.css .layout).
+   Narrow: a collapsible drawer toggled by .disclosure. */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  align-self: start;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.panelTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin: 0;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.clear {
+  width: auto;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.section {
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.section:first-of-type {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: none;
+}
+.sectionTitle {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 10px;
+}
+.label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.field select,
+.field input {
+  width: 100%;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.checkbox input {
+  width: auto;
+  margin: 0;
+}
+
+/* --- Tag picker ---------------------------------------------------------- */
+
+.tagHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.tagSearch {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.matchToggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.matchToggle button {
+  width: auto;
+  border: none;
+  border-radius: 0;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+.matchToggle button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.matchOn {
+  background: var(--accent) !important;
+  color: #fff !important;
+}
+
+.tagList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.tagRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  min-width: 0;
+}
+.tagRow:hover {
+  background: var(--surface-2);
+}
+.tagRow input {
+  width: auto;
+  margin: 0;
+  flex-shrink: 0;
+}
+.tagCount {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.workflowGroup {
+  margin-top: 8px;
+}
+.groupToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.groupToggle:hover {
+  color: var(--text);
+}
+.caret {
+  font-size: 10px;
+}
+
+.emptyHint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 4px 0;
+}
+
+/* --- Saved views --------------------------------------------------------- */
+
+.viewList {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.viewRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.viewApply {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viewApply:hover {
+  background: var(--surface-2);
+}
+.viewActive {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+.viewDelete {
+  width: auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.viewDelete:hover {
+  color: var(--danger);
+}
+.viewForm {
+  display: flex;
+  gap: 6px;
+}
+.viewForm input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.viewForm button {
+  width: auto;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.viewError {
+  font-size: 12px;
+  color: var(--danger);
+  margin: 4px 0;
+}
+.saveView {
+  width: 100%;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+/* --- Responsive ---------------------------------------------------------- */
+
+/* The disclosure button only exists on narrow screens; on wide ones the panel
+   is always visible and a toggle would be a dead control. */
+.disclosure {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .disclosure {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    margin-bottom: 12px;
+  }
+  .panel {
+    display: none;
+    position: static;
+    max-height: none;
+    margin-bottom: 16px;
+  }
+  .panelOpen {
+    display: block;
+  }
+  .panelHead {
+    /* The disclosure button already says "Filters" above the open drawer. */
+    justify-content: flex-end;
+  }
+  .panelTitle {
+    display: none;
+  }
+}

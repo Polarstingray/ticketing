@@ -2,6 +2,8 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-bottom: 18px;
 }
 .head h1 {
@@ -23,30 +25,102 @@
   width: auto;
 }
 
-.filters {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 18px;
+/* Filter rail + list. The rail collapses to a drawer under 900px, where the
+   grid falls back to a single column (see the media query at the bottom). */
+.layout {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
 }
-.filters select {
-  width: auto;
-  min-width: 140px;
+.main {
+  min-width: 0;
 }
-.filters button {
-  width: auto;
-}
-.archivedToggle {
+
+.headControls {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sort {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sort select {
+  width: auto;
+  min-width: 150px;
   font-size: 13px;
+  padding: 5px 8px;
+}
+.orderToggle {
+  width: auto;
+  padding: 5px 9px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.density {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.density button {
+  width: auto;
+  border: none;
+  border-radius: 0;
+  background: var(--surface-2);
   color: var(--text-dim);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+.densityOn {
+  background: var(--accent) !important;
+  color: #fff !important;
+}
+
+/* Summary of the active query, so it is legible without opening the panel and
+   any single filter can be dropped in one click. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.archivedToggle input {
+.chip:hover {
+  border-color: var(--accent);
+}
+.chipClear {
   width: auto;
-  margin: 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 3px 4px;
+  cursor: pointer;
+}
+.chipClear:hover {
+  color: var(--text);
 }
 
 .list {
@@ -102,13 +176,17 @@
   flex-wrap: wrap;
   align-items: center;
 }
-.tag {
-  font-size: 11px;
-  color: var(--text-dim);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 6px;
+
+/* Compact density: tighter rows and no tag line, to fit far more tickets on a
+   screen when scanning. The tags are still on the ticket, just not shown here. */
+.rowCompact {
+  padding: 6px 16px;
+}
+.rowCompact .rowMeta {
+  margin-top: 2px;
+}
+.rowCompact .rowMeta > *:not(:first-child) {
+  display: none;
 }
 
 .rowSide {
@@ -133,6 +211,12 @@
 .empty {
   text-align: center;
   color: var(--text-dim);
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 720px) {
