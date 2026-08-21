@@ -2,8 +2,9 @@
  * Record the demo walkthrough as a video.
  *
  * Drives the demo container (deploy/demo/) with a real browser and captures a
- * ~90s tour: the board, the resolver's costed agent-run timeline, the delegation
- * rollup, and one human create → comment → resolve loop.
+ * ~90s tour: the board, filtering it down by tag and re-sorting, the resolver's
+ * costed agent-run timeline, the delegation rollup, and one human
+ * create → comment → resolve loop.
  *
  * This is a recording, not a test — it lives outside e2e/ so `npm run test:e2e`
  * (and CI) never picks it up. It expects the demo's seeded data, so point it at
@@ -57,6 +58,22 @@ async function main() {
   await page.waitForURL(/\/tickets$/);
   await page.getByRole("heading", { name: /^Tickets/ }).waitFor();
   await pause(page, BEAT.settle);
+
+  // --- 2b. Triage: narrow the board with the tag filter ----------------------
+  // Two tags, ANDed — the point is that the board is navigable, not just long.
+  await page.getByRole("checkbox", { name: "backend", exact: true }).check();
+  await pause(page, BEAT.read);
+  // repo:* is automation state, so it lives in the collapsed Workflow group.
+  await page.getByRole("button", { name: /Workflow tags/i }).click();
+  await pause(page, BEAT.tick);
+  await page.getByRole("checkbox", { name: "repo:ticketing", exact: true }).check();
+  await pause(page, BEAT.settle);
+  // Sort the survivors by priority so the urgent ones surface.
+  await page.getByLabel("Sort by").selectOption("priority");
+  await pause(page, BEAT.settle);
+  // Then drop the filters and get the whole board back.
+  await page.getByRole("button", { name: /Clear all/i }).first().click();
+  await pause(page, BEAT.read);
 
   // --- 3. The hero: the resolver's costed agent-run timeline ------------------
   await page.getByText("Review: batch the activity-feed queries").first().click();

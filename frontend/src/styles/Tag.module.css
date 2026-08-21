@@ -1,0 +1,53 @@
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reserved/system tags: visible but not something a person set. The dashed
+   border + stripes read as "machine-managed" at a glance, so they don't compete
+   with free tags in a long list. */
+.reserved {
+  color: var(--text-dim);
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--surface-2),
+    var(--surface-2) 4px,
+    var(--surface) 4px,
+    var(--surface) 8px
+  );
+  border-style: dashed;
+  cursor: default;
+}
+
+/* Not a tag at all — derived row badges like Archived / Overdue. */
+.muted {
+  color: var(--text-dim);
+}
+
+.removable {
+  padding-right: 4px;
+}
+.remove {
+  width: auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.remove:hover {
+  color: var(--text);
+}

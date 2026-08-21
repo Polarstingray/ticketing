@@ -10,6 +10,9 @@
   --danger: #e5534b;
   --danger-hover: #cf463f;
   --radius: 8px;
+  /* Height of the sticky topbar. Anything else that sticks must offset by this
+     or it scrolls underneath the nav (see FilterPanel .panel). */
+  --topbar-h: 57px;
 }
 
 * {
