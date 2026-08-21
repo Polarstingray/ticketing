@@ -11,6 +11,7 @@ door so an operator can stand up and run bots from a single place:
     resolver roster
     resolver run --env .env.open --dry-run
     resolver stats --ticket 42
+    resolver digest --name daily --dry-run
 
 Admin operations (``bot create``/``bot list``) need an admin API key
 (``--admin-key`` or ``$STINGRAY_ADMIN_KEY``) since the resolver's own key is a
@@ -211,6 +212,10 @@ def cmd_file(args) -> int:
     return _run_script("file_ticket.py", args.rest, args.env)
 
 
+def cmd_digest(args) -> int:
+    return _run_script("digest.py", args.rest, args.env)
+
+
 def cmd_stats(args) -> int:
     # Imported lazily so the admin/run paths don't pay Config.load's validation.
     if args.env:
@@ -308,6 +313,12 @@ def build_parser() -> argparse.ArgumentParser:
     filecmd.add_argument("--env", help="resolver .env file to use (sets RESOLVER_ENV_FILE)")
     filecmd.add_argument("rest", nargs=argparse.REMAINDER, help="args for file_ticket.py")
     filecmd.set_defaults(func=cmd_file)
+
+    digest = sub.add_parser("digest", help="file a backlog digest ticket (wraps digest.py)")
+    digest.add_argument("--env", help="resolver .env file to use (sets RESOLVER_ENV_FILE)")
+    digest.add_argument("rest", nargs=argparse.REMAINDER,
+                        help="args for digest.py (e.g. --name daily --dry-run)")
+    digest.set_defaults(func=cmd_digest)
 
     return p
 

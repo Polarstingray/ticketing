@@ -10,6 +10,25 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 ## [Unreleased]
 
 ### Added
+- **Daily digest**: `resolver/digest.py` files one report ticket summarizing a slice of
+  the backlog — a short summary paragraph over a checklist grouped into sections
+  (overdue, high priority, awaiting your approval, stale, …). It runs on its own
+  schedule rather than as part of a sweep, and nothing auto-runs off it. Scope comes
+  from `[[digest]]` blocks in `resolver/digests.toml`, each holding a `GET /tickets`
+  query string — the same string a saved view stores, so a filter built in the UI can be
+  pasted straight in. The checklist is always derived from the query results, never from
+  model output; the summary prose is optional, so a missing key or a 429 costs the
+  paragraph and not the report. Needs `DIGEST_ADMIN_KEY`, an admin key, because the API
+  shows non-admins only tickets they created or are assigned to.
+- **Guided projects**: a repository shaped like a class assignment — every non-trivial
+  function left as a `STINGRAY-STUB`, one exercise ticket per stub under an epic, and an
+  `ASSIGNMENT.md` handout with milestones and a rubric. Two front doors onto the same
+  backlog: `stingray scaffold <template> <dest> --guided` for an empty directory, and the
+  resolver's `/scaffold <what to build>` standard command for a repo that already has
+  code (it stubs the feature in and opens a PR of the skeleton). The handout is
+  gitignored on purpose and mirrored onto the epic ticket instead of committed; children
+  are linked by a free `epic:<id>` tag rather than the reserved `parent:<id>`, so the
+  backlog stays hand-worked instead of self-driving.
 - **Demo assets regenerated for the new dashboard**, and captured from the *demo*
   container rather than as a byproduct of the E2E run — the demo seed is curated
   (a lived-in board, a realistic tag spread, a resolver-worked ticket), whereas the

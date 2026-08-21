@@ -39,8 +39,10 @@ import agents
 import audit
 import commands
 import file_ticket
+import scaffold_followup
 from config import Config, RepoNotAllowed, RepoNotFound
 from stingray import StingrayClient
+from stingray_client import stubs as stubs_mod
 
 HERE = Path(__file__).resolve().parent
 
@@ -1904,6 +1906,12 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         if verify_banner:
             summary = verify_banner + summary
 
+        # A /scaffold run writes a handout that is deliberately gitignored, so it
+        # must be lifted out of the worktree before the commit — see
+        # scaffold_followup. Everything else about the run publishes normally.
+        is_scaffold = scaffold_followup.is_scaffold(command)
+        assignment = scaffold_followup.take_assignment(wt) if is_scaffold else ""
+
         run(["git", "-C", str(wt), "add", "-A"])
         # Set the committer identity explicitly: on a host with no global git
         # identity the commit otherwise fails, and the empty tree downstream gets
@@ -1928,15 +1936,71 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                 phase("filed-no-code", ticket,
                       f"#{ticket['id']}: filed {ids}, no code changes — handed back")
                 return
+            if assignment:
+                # A /scaffold run that wrote the handout but no skeleton still
+                # failed — but the handout was lifted out of the worktree before
+                # the commit, so failing silently would destroy the only copy.
+                client.add_comment(ticket["id"],
+                    "The handout below was written, but no skeleton was — this run "
+                    "produced no code changes.\n\n---\n\n" + assignment)
             fail(client, ticket, f"{agent_label} produced no code changes for this ticket.",
                  reimplementable=True)
             return
+
+        if is_scaffold:
+            summary += do_scaffold_followup(cfg, client, ticket, repo, wt,
+                                            base_ref, assignment)
 
         stat = run(["git", "-C", str(wt), "diff", "--stat", f"{base_ref}..HEAD"])[1].strip()
         publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch,
                 summary, stat, origin=origin, pr_ok=pr_ok)
     finally:
         remove_worktree(repo, wt)
+
+
+def do_scaffold_followup(cfg: Config, client: StingrayClient, ticket: dict,
+                         repo: Path, wt: Path, base_ref: str,
+                         assignment: str) -> str:
+    """After a `/scaffold` implement run: file the backlog and post the handout.
+
+    Returns a note to append to the implementation summary. Best-effort — the
+    skeleton is already committed and worth publishing, so a tracker hiccup here
+    must not fail the ticket.
+    """
+    tid = ticket["id"]
+    try:
+        comments = client.list_comments(tid)
+    except Exception:
+        comments = []
+    if scaffold_followup.already_scaffolded(comments, cfg.bot_user_id):
+        # A re-run (a /revise, or a rework after review) legitimately rewrites the
+        # skeleton, but the exercise tickets are already filed and may have been
+        # worked on. Refile nothing; just re-deliver the handout if it changed.
+        phase("scaffold-refresh", ticket, f"#{tid}: skeleton rebuilt, backlog already filed")
+        return "\n\nThe exercise tickets for this scaffold were filed on an earlier run."
+
+    touched = scaffold_followup.touched_files(run, wt, base_ref)
+    stubs = stubs_mod.scan_stubs(wt, only=touched) if touched else []
+    truncated = max(0, len(stubs) - stubs_mod.MAX_STUB_TICKETS)
+    stubs = stubs[:stubs_mod.MAX_STUB_TICKETS]
+
+    logger = audit.get_logger()
+    filed = scaffold_followup.file_stub_tickets(
+        client, ticket, repo, wt, stubs,
+        priority=ticket.get("priority") or "medium",
+        warn=lambda m: audit.audit_event(logger, "scaffold_child_failed", m,
+                                         ticket_id=tid))
+
+    try:
+        client.add_comment(tid, scaffold_followup.rollup(
+            ticket, assignment, stubs, filed, truncated))
+    except Exception as exc:
+        audit.audit_event(logger, "scaffold_rollup_failed",
+                          f"could not post the scaffold roll-up: {exc}", ticket_id=tid)
+
+    phase("scaffolded", ticket,
+          f"#{tid}: {len(stubs)} stub(s) found, {len(filed)} exercise ticket(s) filed")
+    return scaffold_followup.pr_note(filed)
 
 
 def _delegation_rollup(client: StingrayClient, cfg: Config, filed: list[int],

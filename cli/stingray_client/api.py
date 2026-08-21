@@ -171,6 +171,12 @@ class StingrayClient:
         return self._request("GET", f"/tickets/{ticket_id}/cost-rollup").json()
 
     # --- identity --------------------------------------------------------
+    def list_users(self) -> list[dict]:
+        """Every user, in the public shape. **Admin-only** server-side; a
+        non-admin key gets 403, so callers that only want display names for a
+        report should treat a failure as "fall back to user ids"."""
+        return self._request("GET", "/users").json()
+
     def whoami(self) -> dict:
         """The user this key authenticates as. Used by `stingray auth login` to
         validate a key before storing it."""

@@ -9,14 +9,20 @@ from pathlib import Path
 
 import requests
 
+from stingray_cli import guided
 from stingray_cli import scaffold as sc
 from stingray_cli.common import client_from, confirm, profile_from
 from stingray_cli.config import ConfigError
+from stingray_client.stubs import (
+    MAX_STUB_TICKETS,
+    build_stub_payload,
+    filed_checklist,
+    stub_checklist,
+)
+from stingray_client.stubs import (
+    epic_tag as stub_epic_tag,
+)
 from stingray_client.tickets import build_payload
-
-# Bound how many tickets one scaffold can file, so an enthusiastic AI pass can't
-# dump 200 tickets into the tracker.
-MAX_STUB_TICKETS = 30
 
 # The adaptation pass rewrites a whole tree, so it is a strictly bigger job than
 # describing a diff — give it more headroom than describe.DEFAULT_TIMEOUT. Agent
@@ -33,7 +39,9 @@ def add_parser(sub, add_connection_flags) -> None:
         description=(
             "Renders a template, optionally adapts it with a local agent, commits "
             "it, then files one ticket per STINGRAY-STUB marker plus an epic that "
-            "tracks them."
+            "tracks them. With --guided it also writes an ASSIGNMENT.md handout "
+            "(learning goals, milestones, rubric) and writes the ticket bodies as "
+            "exercises — a project shaped like a CS-class assignment."
         ),
     )
     parser.add_argument("template", nargs="?", help="template name")
@@ -47,6 +55,18 @@ def add_parser(sub, add_connection_flags) -> None:
     # warns and `--intent` is the documented spelling.
     parser.add_argument("--describe", metavar="TEXT", dest="describe_alias",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--guided", action="store_true",
+                        help="also write an ASSIGNMENT.md handout and exercise-style "
+                             "ticket bodies (a guided, class-project-shaped repo)")
+    parser.add_argument("--course-level", choices=guided.COURSE_LEVELS,
+                        default="intermediate", metavar="LEVEL",
+                        help="how much of the design the handout gives away "
+                             f"({'|'.join(guided.COURSE_LEVELS)}; default: intermediate)")
+    parser.add_argument("--milestones", type=int, default=4, metavar="N",
+                        help="how many milestones to group the stubs into (default: 4)")
+    parser.add_argument("--no-assignment", action="store_true",
+                        help="with --guided, skip the handout but still write "
+                             "exercise-style ticket bodies")
     parser.add_argument("--list-templates", action="store_true")
     parser.add_argument("--no-ai", action="store_true", help="template only, no agent pass")
     parser.add_argument("--agent", metavar="NAME", help="agent to adapt with (claude|opencode)")
@@ -122,6 +142,14 @@ def cmd_scaffold(args) -> int:
 
     print(f"scaffolded {template.name} into {dest}")
 
+    # The handout has to be written before the commit (so .gitignore lands in it)
+    # but needs the real stub list to build milestones from — hence a scan here and
+    # a re-scan below. The second scan is what tickets are filed from: it sees the
+    # committed tree, so every code block's line numbers are stable.
+    assignment, exercises = "", {}
+    if args.guided:
+        assignment, exercises = _guide(dest, template, args, intent, sc.scan_stubs(dest))
+
     if not args.no_git:
         sc.git_init_and_commit(dest, f"scaffold: {name} from {template.name}")
         print("committed the scaffold (line numbers are now stable)")
@@ -136,7 +164,7 @@ def cmd_scaffold(args) -> int:
               f"filing the first {args.max_tickets}", file=sys.stderr)
         stubs = stubs[:args.max_tickets]
 
-    return _file_tickets(args, dest, name, template, stubs)
+    return _file_tickets(args, dest, name, template, stubs, assignment, exercises)
 
 
 def _resolve_intent(args) -> str | None:
@@ -202,59 +230,120 @@ def _adapt(work: Path, template: sc.Template, args, variables: dict) -> None:
         print("skipping the AI adaptation pass", file=sys.stderr)
         return
 
-    # Flag > profile > default, the same precedence as everything else. Local-agent
-    # settings live in the profile's [describe] block and are shared by both passes.
-    settings = dict(getattr(_profile_or_none(args), "describe", None) or {})
-    agent = args.agent or settings.get("agent") or None
-    timeout = args.agent_timeout or int(settings.get("timeout", DEFAULT_ADAPT_TIMEOUT))
-
+    agent, model, timeout = _agent_settings(args)
     try:
-        run_agent(prompt, work, agent=agent, model=settings.get("model") or None,
-                  timeout=timeout, edit=True)
+        run_agent(prompt, work, agent=agent, model=model, timeout=timeout, edit=True)
         print("agent adapted the scaffold")
     except AgentError as exc:
         print(f"warning: adaptation pass failed ({exc}); using the plain template",
               file=sys.stderr)
 
 
-def _stub_block(dest: Path, stub: sc.Stub) -> dict | None:
-    from stingray_cli.gitctx import language_for
+def _agent_settings(args) -> tuple[str | None, str | None, int]:
+    """``(agent, model, timeout)`` for a local agent pass.
+
+    Flag > profile > default, the same precedence as everything else. Local-agent
+    settings live in the profile's ``[describe]`` block and are shared by every
+    pass, so ``--intent`` and ``--guided`` can never drift onto different models.
+    """
+    settings = dict(getattr(_profile_or_none(args), "describe", None) or {})
+    return (
+        args.agent or settings.get("agent") or None,
+        settings.get("model") or None,
+        args.agent_timeout or int(settings.get("timeout", DEFAULT_ADAPT_TIMEOUT)),
+    )
+
+
+def _guide(dest: Path, template: sc.Template, args, intent: str | None,
+           stubs: list[sc.Stub]) -> tuple[str, dict]:
+    """Write the assignment handout and collect per-stub exercise prose.
+
+    Returns ``(assignment_markdown, exercises)``; either may be empty. Best-effort
+    throughout — a scaffold that produced stubs is already useful, so nothing here
+    is allowed to fail the command.
+    """
+    from stingray_cli.agent import AgentError
+    from stingray_cli.agent import run as run_agent
+
+    assignment, exercises = "", {}
+
+    if not args.no_ai and stubs:
+        prompt = guided.assignment_prompt(
+            project_name=args.name or dest.name,
+            template_description=template.description,
+            template_notes=template.notes,
+            intent=intent,
+            stubs=stubs,
+            level=args.course_level,
+            milestones=args.milestones,
+        )
+        if confirm(f"Let an agent write the assignment in {dest}?", assume_yes=args.yes):
+            agent, model, timeout = _agent_settings(args)
+            try:
+                run_agent(prompt, dest, agent=agent, model=model,
+                          timeout=timeout, edit=True)
+            except AgentError as exc:
+                print(f"warning: the assignment pass failed ({exc}); "
+                      "writing a generated handout instead", file=sys.stderr)
+            else:
+                exercises = guided.read_exercises(dest)
+                path = dest / guided.ASSIGNMENT_FILE
+                if path.is_file():
+                    try:
+                        assignment = path.read_text(encoding="utf-8").strip()
+                    except (OSError, UnicodeDecodeError) as exc:
+                        print(f"warning: could not read {guided.ASSIGNMENT_FILE} ({exc})",
+                              file=sys.stderr)
+
+    if not assignment:
+        assignment = guided.deterministic_assignment(
+            project_name=args.name or dest.name,
+            template_description=template.description,
+            template_notes=template.notes,
+            intent=intent,
+            stubs=stubs,
+            milestones=args.milestones,
+        )
+
+    if args.no_assignment:
+        # The handout was still generated — the epic mirrors it — but the learner
+        # asked not to have the file in their tree.
+        (dest / guided.ASSIGNMENT_FILE).unlink(missing_ok=True)
+        return assignment, exercises
+
     try:
-        lines = (dest / stub.path).read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return None
-    start = max(1, stub.block_start)
-    end = min(stub.block_end, len(lines))
-    if end < start:
-        return None
-    return {
-        "filename": stub.path,
-        "language": language_for(stub.path),
-        "line_start": start,
-        "line_end": end,
-        "content": "\n".join(lines[start - 1:end]),
-    }
+        (dest / guided.ASSIGNMENT_FILE).write_text(assignment + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"warning: could not write {guided.ASSIGNMENT_FILE} ({exc})", file=sys.stderr)
+        return assignment, exercises
+
+    guided.ensure_gitignored(dest, guided.ASSIGNMENT_FILE)
+    print(f"wrote {guided.ASSIGNMENT_FILE} (gitignored; also mirrored onto the epic)")
+    return assignment, exercises
 
 
 def _file_tickets(args, dest: Path, name: str, template: sc.Template,
-                  stubs: list[sc.Stub]) -> int:
-    checklist = "\n".join(
-        f"- [ ] `{s.path}:{s.line}` — {s.summary}" for s in stubs
+                  stubs: list[sc.Stub], assignment: str = "",
+                  exercises: dict | None = None) -> int:
+    exercises = exercises or {}
+    header = (
+        # The handout is gitignored, so the epic is the copy that survives.
+        [guided.epic_summary(assignment), "", "---", ""] if assignment else
+        [f"Scaffolded from the `{template.name}` template.",
+         template.notes or template.description, ""]
     )
-    epic_description = "\n".join([
-        f"Scaffolded from the `{template.name}` template.",
-        template.notes or template.description,
-        "",
+    epic_description = "\n".join(header + [
         f"**{len(stubs)} stub(s) to implement**",
         "",
-        checklist,
+        stub_checklist(stubs),
         "",
         f"Each stub is marked `{sc.STUB_MARKER}:` in the source and has its own ticket.",
     ])
 
     epic_payload = build_payload(
         type="task",
-        title=f"{name}: scaffold ({len(stubs)} stubs)",
+        title=(f"{name}: guided project ({len(stubs)} stubs)" if assignment
+               else f"{name}: scaffold ({len(stubs)} stubs)"),
         description=epic_description,
         priority=args.priority,
         tags=["scaffold"],
@@ -285,30 +374,20 @@ def _file_tickets(args, dest: Path, name: str, template: sc.Template,
     epic_id = epic["id"]
     print(f"created epic #{epic_id}: {epic['title']}")
 
-    # `epic:<id>` is a FREE tag on purpose. The reserved `parent:<id>` would make
-    # each child self-driving (the resolver auto-approves a child's plan and goes
-    # straight to implement) — wrong for a backlog meant to be filled in by hand.
-    epic_tag = f"epic:{epic_id}"
+    epic_tag = stub_epic_tag(epic_id)
     filed: list[tuple[int, str]] = []
     for stub in stubs:
-        block = _stub_block(dest, stub)
-        description = [f"Implement the `{sc.STUB_MARKER}` at `{stub.path}:{stub.line}`.", ""]
-        description.append(stub.summary)
-        if stub.acceptance:
-            description += ["", f"**Acceptance:** {stub.acceptance}"]
-        description += ["", f"Part of epic #{epic_id}."]
-
-        payload = build_payload(
-            type="code_review" if block else "task",
-            title=f"{name}: {stub.summary}"[:200],
-            description="\n".join(description),
+        title, body = guided.exercise_for(exercises, stub)
+        payload = build_stub_payload(
+            dest, name, stub,
+            epic_id=epic_id,
             priority=args.priority,
-            tags=["scaffold", "stub", epic_tag],
-            code_blocks=[block] if block else [],
-            root=dest,
-            repo=name,
             assign=args.assign,
+            repo=name,
+            body=body,
         )
+        if title:
+            payload["title"] = f"{name}: {title}"[:200]
         try:
             child = client.create_ticket(**payload)
         except requests.HTTPError as exc:
@@ -321,7 +400,7 @@ def _file_tickets(args, dest: Path, name: str, template: sc.Template,
     # Link the children back, and tag the epic with its own id so one query
     # returns parent + children. (Note the server's tag filter is a substring
     # match, so `epic:4` also matches `epic:42` — filter client-side.)
-    links = "\n".join(f"- [ ] #{tid} {title}" for tid, title in filed)
+    links = filed_checklist(filed)
     try:
         client.update_ticket(
             epic_id,

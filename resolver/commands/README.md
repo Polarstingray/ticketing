@@ -42,6 +42,21 @@ The premade prompt text. This becomes the ticket's objective.
 The frontmatter parser is intentionally minimal (flat `key: value` lines only) so
 the resolver has no YAML dependency.
 
+## Commands with follow-up code
+
+Most commands are pure prompt — the library file is the whole feature. One is not:
+
+- **`/scaffold`** has a post-implement hook (`resolver/scaffold_followup.py`,
+  called from `do_implement`). The prompt has the agent stub a feature into the
+  repo and write an `ASSIGNMENT.md` handout; the hook then lifts the handout out
+  of the worktree before the commit (it is gitignored, so it could never ride the
+  PR) and scans the finished tree to file one exercise ticket per
+  `STINGRAY-STUB` marker, in the files the run actually touched.
+
+  This means **`Command.name` is load-bearing for `scaffold`**: the hook keys off
+  `command.name == "scaffold"`. Renaming the file detaches the follow-up and
+  leaves the prompt filing nothing.
+
 ## Reserved names
 
 `/ticket`, `/approve`, `/revise`, and `/review` are reserved control verbs and are
