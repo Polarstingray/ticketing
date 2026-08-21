@@ -33,6 +33,20 @@
 > ticket's description and the resolver injects a premade prompt and runs it. See
 > `resolver/README.md` → "Standard commands" and the library in `resolver/commands/`.
 
+> **A digest of the backlog** (what's overdue / stale / blocked on a human, as one
+> report ticket with a checklist) is filed by `resolver/digest.py`, on its own
+> schedule rather than as part of a sweep:
+>
+> ```bash
+> resolver digest --name daily --dry-run   # render it, file nothing
+> resolver digest --name daily             # file the report ticket
+> ```
+>
+> Scopes are `[[digest]]` blocks in `resolver/digests.toml`, each holding a
+> `GET /tickets` query string (the same string a saved view stores). It needs
+> `DIGEST_ADMIN_KEY` — an **admin** key, since the API shows non-admins only their
+> own tickets. See `resolver/README.md` → "Daily digest".
+
 When asked to file a review, create a ticket in **Stingray Tickets** via its REST API.
 
 - **Endpoint:** `POST $STINGRAY_URL/api/tickets`

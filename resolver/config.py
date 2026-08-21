@@ -245,6 +245,17 @@ class Config:
     # Hard cap on sub-tasks one delegation run may file (enforced in file_ticket.py),
     # so a single orchestration can't spawn unbounded tickets / agent cost.
     max_delegations: int
+    # --- daily digest (see digest.py) ------------------------------------------
+    # The digest surveys the WHOLE backlog, so it needs an admin-user key: the
+    # resolver's own key is non-admin and `_visible_tickets` would silently narrow
+    # the survey to the bot's own queue. Empty ⇒ `digest.py` refuses to run.
+    digest_admin_key: str
+    # Prose backend for the digest — the same OpenAI-compatible shape as
+    # review_api_*. Each falls back to its REVIEW_API_* counterpart when unset; with
+    # neither configured the digest still files, just without the summary paragraph.
+    digest_api_url: str
+    digest_api_key: str
+    digest_api_model: str
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
@@ -391,6 +402,13 @@ class Config:
             in ("1", "true", "yes"),
             workers=_parse_workers(os.environ.get("RESOLVER_WORKERS", "")),
             max_delegations=int(os.environ.get("RESOLVER_MAX_DELEGATIONS", "10")),
+            # Daily digest. DIGEST_ADMIN_KEY must belong to an *admin* user (see the
+            # field comment); the API trio falls back to REVIEW_API_* in digest.py so
+            # a resolver that already has a cheap chat model needs no extra config.
+            digest_admin_key=_env("DIGEST_ADMIN_KEY", default=""),
+            digest_api_url=_env("DIGEST_API_URL", default=""),
+            digest_api_key=_env("DIGEST_API_KEY", default=""),
+            digest_api_model=_env("DIGEST_API_MODEL", default=""),
         )
         cfg.logs_dir.mkdir(exist_ok=True)
         if not cfg.projects_root.is_dir():

@@ -1,0 +1,26 @@
+# Stingray digest — oneshot run, driven by stingray-digest.timer.
+#
+# Files one report ticket per configured digest (resolver/digests.toml). Separate
+# from the resolver sweep on purpose: it surveys the whole backlog on an ADMIN key
+# (DIGEST_ADMIN_KEY) rather than working the bot's own queue.
+#
+# Install:
+#   sed "s#/opt/ticketing/resolver#$(pwd)#" stingray-digest.service \
+#     | sudo tee /etc/systemd/system/stingray-digest.service
+#   sudo cp stingray-digest.timer /etc/systemd/system/
+#   sudo systemctl enable --now stingray-digest.timer
+#
+# Edit User= to the account that owns the checkout. For a second digest on its own
+# cadence, template this unit (`stingray-digest@.service` with `--name %i`).
+[Unit]
+Description=Stingray backlog digest (one run)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=stingray
+WorkingDirectory=/opt/ticketing/resolver
+ExecStart=/opt/ticketing/resolver/.venv/bin/python /opt/ticketing/resolver/digest.py --name daily
+# One chat completion plus a paged listing; nothing here should take minutes.
+TimeoutStartSec=600

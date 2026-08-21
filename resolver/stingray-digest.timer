@@ -1,0 +1,16 @@
+# Runs stingray-digest.service once a day. systemd serializes runs of the same
+# unit, so this replaces the cron + flock pattern.
+#
+# Persistent=true matters more here than for the resolver: a machine that was
+# asleep at 08:15 should still get its digest when it wakes, rather than skipping
+# the day entirely.
+[Unit]
+Description=Run the Stingray backlog digest daily
+
+[Timer]
+OnCalendar=*-*-* 08:15:00
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
