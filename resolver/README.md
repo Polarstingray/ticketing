@@ -458,6 +458,65 @@ the paragraph, not the report. **The checklist is always derived from the query
 results, never from model output**, and the model is told not to emit ticket
 numbers, so the prose can never contradict or invent a line.
 
+### Against an instance hosted elsewhere
+
+The digest only ever talks to the API — it checks nothing out and runs no agent — so it
+does **not** need to live on a resolver host, or near your repositories, or on the machine
+running Stingray. It needs network access and two settings:
+
+```bash
+STINGRAY_URL=https://tickets.example.com/api
+DIGEST_ADMIN_KEY=sk_...
+```
+
+That is the whole config. `Config.load(api_only=True)` relaxes the three requirements
+that exist for the sweep (`STINGRAY_API_KEY`, `RESOLVER_BOT_USER_ID`, `PROJECTS_ROOT`),
+so a box whose only job is filing a digest doesn't have to invent a bot id and an empty
+directory to satisfy checks nothing on its path reads.
+
+Three things to get right for a remote instance:
+
+- **The URL is the API base, so it ends in `/api`** on the default deployment (nginx
+  serves the SPA at the root and proxies `/api`). Point it at the root and every call
+  returns the web page; the client catches this and says so rather than surfacing a JSON
+  decode error. A backend you reach directly needs no suffix.
+- **Mint `DIGEST_ADMIN_KEY` on that instance**, as an admin, from **Profile → API keys**.
+  Keys are per-instance — a key from your local server is meaningless remotely. Give it a
+  name you'll recognise (`digest-cron`) so it can be revoked on its own, and consider an
+  expiry.
+- **Use HTTPS.** The key travels in an `X-API-Key` header on every request.
+
+The env file is optional: `_load_env_file` ignores a missing path and falls through to the
+real environment, so a container or a systemd unit can inject both values without one:
+
+```bash
+docker run --rm \
+  -e STINGRAY_URL=https://tickets.example.com/api \
+  -e DIGEST_ADMIN_KEY \
+  -v "$PWD/digests.toml:/app/digests.toml:ro" \
+  <your-image> python digest.py --name daily
+```
+
+For systemd, keep the key out of the unit file with
+`EnvironmentFile=/etc/stingray-digest.env` (mode 0600) rather than `Environment=`, which
+is world-readable via `systemctl show`.
+
+Two failure modes worth knowing, because both are quiet rather than loud:
+
+- A key that isn't an admin's still works — the API just shows it only the tickets it
+  created or is assigned to, so you get a digest of a slice. The run warns loudly and
+  names this; don't ignore it.
+- The prose model is optional, so a wrong/expired `DIGEST_API_KEY` costs you the summary
+  paragraph and files the report anyway. The reason lands in the log, not the ticket.
+
+Verify a new deployment with a dry run before scheduling anything — it renders to stdout
+and files nothing:
+
+```bash
+STINGRAY_URL=https://tickets.example.com/api DIGEST_ADMIN_KEY=sk_... \
+  python digest.py --name daily --dry-run
+```
+
 ### Scheduling
 
 Cadence comes from the schedule, not the config file — one entry per digest name.
