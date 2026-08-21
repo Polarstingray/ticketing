@@ -732,7 +732,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"Run with --list to see what's configured."
             )
 
-    cfg = Config.load()
+    cfg = Config.load(api_only=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     logger = audit.setup_logging(cfg, run_id)
     client = _client(cfg, logger)
