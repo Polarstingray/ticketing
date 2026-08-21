@@ -10,6 +10,13 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 ## [Unreleased]
 
 ### Added
+- **Local auto-deploy hooks**: `make hooks-install` arms `post-commit`/`post-merge`
+  hooks that rebuild and restart the Docker stack whenever a commit lands on `main`
+  touching `backend/`, `frontend/` or `docker-compose.yml` — gated on both test
+  suites passing, so a red run leaves the previous build serving. The hooks detach,
+  so `git commit` never blocks on a Docker build. Logic is tracked in
+  `deploy/autodeploy.sh` with `.git/hooks` holding only a shim; `make deploy` runs
+  the same path by hand from any branch.
 - **Dashboard filter panel**: the ticket list's single row of dropdowns becomes a proper
   filtering surface — a sticky left rail on wide screens, a collapsible drawer below
   900px. It gathers search, type, status, priority, assignee and archived alongside the
@@ -89,6 +96,12 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   in a body stays escaped (no `rehype-raw`).
 
 ### Fixed
+- Editing `deploy/autodeploy.sh` while a deploy was in flight crashed the running
+  deploy. Bash reads a script incrementally as it executes, so an edit shifts the
+  byte offset under the running shell and it resumes mid-token — surfacing as a
+  syntax error on a file that is perfectly valid. The body now sits in `main()`,
+  called on the last line, which forces bash to parse the whole file before any
+  work starts.
 - Ruff linted `cli/build/`, a stale *copy* of the CLI sources left by packaging.
   Every finding there duplicated one in `cli/stingray_cli/`, inviting a fix in the
   throwaway copy that the real sources would never see. Build output is now

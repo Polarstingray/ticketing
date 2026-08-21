@@ -264,6 +264,47 @@ npm install
 npm run dev      # http://localhost:5173, proxies /api -> localhost:8000
 ```
 
+### Auto-deploy on this machine
+
+`make up` rebuilds and restarts the stack at <http://localhost:3000>. To have that
+happen by itself whenever a feature lands:
+
+```bash
+make hooks-install     # arm it
+make hooks-uninstall   # disarm it
+```
+
+This installs `post-commit` and `post-merge` git hooks. On a commit or merge that
+(a) is on `main` and (b) touches `backend/`, `frontend/` or `docker-compose.yml`,
+it runs the backend and frontend test suites and — only if both are green —
+rebuilds the images and restarts the containers. A red suite is logged and the
+running build is left alone, so the box keeps serving the last good version
+instead of going down with a broken one.
+
+The hooks detach immediately, so `git commit` returns at once and the deploy
+continues in the background. Budget roughly 5–8 minutes end to end — the bulk of
+it is the two test suites, not the Docker build:
+
+```bash
+make deploy-log                      # watch it
+make deploy                          # deploy now, any branch, same test gate
+touch deploy/.autodeploy-disabled    # pause (delete the file to resume)
+```
+
+Two things worth knowing. The deploy builds from the **working tree**, not the
+commit, so a dirty tree deploys uncommitted code — the log says so when that
+happens. And `git commit --no-verify` does *not* skip it (that flag only covers
+`pre-commit`/`commit-msg`), which is what the disable file above is for.
+
+Editing `deploy/autodeploy.sh` while a deploy is running is safe: the script's body
+is wrapped in a function called on its last line, so bash parses the whole file
+before any work begins rather than reading it incrementally underneath itself.
+
+The hooks are tracked in [`deploy/hooks/`](./deploy/hooks) and the logic lives in
+[`deploy/autodeploy.sh`](./deploy/autodeploy.sh); `.git/hooks` only gets a shim
+that execs them, so changing the behavior is an ordinary reviewable commit.
+Tune the branch with `DEPLOY_BRANCH=` (empty means any branch).
+
 **Demo data** (for a screenshot/walkthrough or a hosted demo — a lived-in board
 with a resolved code-review ticket, its per-phase agent-run cost timeline, and a
 delegated parent→child fan-out):
