@@ -57,8 +57,80 @@ rotate_log() {
   fi
 }
 
+# Bring the Python venvs back in line with the requirements files the checkout now
+# has. This exists because of a real outage: `resolver/requirements.txt` gained
+# `-e ../cli` (the shared client package), a pull brought the code that imports it,
+# and nothing reinstalled — so every cron tick died at import with
+# ModuleNotFoundError. It looked exactly like "the resolver isn't scheduled", and the
+# evidence was buried in an append-only cron log.
+#
+# Note this must run BEFORE the deployable-paths gate below: that gate skips any
+# commit touching only resolver/ or cli/, which is precisely the commit that changes
+# these requirements. It also runs before the auto-deploy kill switch, so a
+# resolver-only box (deploy/.autodeploy-disabled, no docker) still gets its venvs
+# synced on pull.
+#
+# Keyed on a hash of the requirements file so an ordinary pull costs nothing. A
+# missing stamp counts as changed, which is what heals a venv that drifted before
+# this existed.
+sync_venv() {
+  local dir="$1" venv="$REPO_ROOT/$1/.venv" reqs="$REPO_ROOT/$1/requirements.txt"
+  [[ -f "$reqs" ]] || return 0
+  # Never build a venv that was never there: a checkout may deliberately not run
+  # this component, and silently creating one hides that.
+  if [[ ! -x "$venv/bin/pip" ]]; then
+    log "  venv-sync: $dir/.venv absent — skipping (run resolver/setup.sh to create it)"
+    return 0
+  fi
+
+  local stamp="$venv/.requirements-sha" want have=""
+  want="$(sha256sum "$reqs" | cut -d' ' -f1)"
+  [[ -f "$stamp" ]] && have="$(cat "$stamp" 2>/dev/null)"
+  if [[ "$want" == "$have" ]]; then
+    return 0
+  fi
+
+  # cd into the component: requirements may use paths relative to it (`-e ../cli`),
+  # which pip resolves against the working directory, not the requirements file.
+  log "  venv-sync: $dir/requirements.txt changed — installing…"
+  if (cd "$REPO_ROOT/$dir" && "$venv/bin/pip" install -q -r requirements.txt) >>"$LOG" 2>&1; then
+    printf '%s\n' "$want" >"$stamp"
+    log "  venv-sync: $dir OK"
+  else
+    # Deliberately not fatal. A failed sync must not also block a deploy that would
+    # otherwise be fine, and leaving the stamp unwritten means the next pull retries.
+    log "  venv-sync: WARN $dir install failed — see $LOG"
+  fi
+}
+
+sync_venvs() {
+  # Serialized separately from the deploy lock, which is taken later and is skipped
+  # entirely when auto-deploy is disabled.
+  exec 8>"$REPO_ROOT/deploy/.venv-sync.lock"
+  flock -w 300 8 || { log "SKIP venv-sync: lock busy"; return 0; }
+  local d
+  for d in backend resolver; do
+    sync_venv "$d"
+  done
+  flock -u 8
+}
+
 main() {
   cd "$REPO_ROOT" || exit 1
+
+  local trigger="${1:-manual}"
+
+  # Keeping the venvs in step with the checkout is not a deploy, so it happens
+  # before every gate below — including the kill switch, so a resolver-only box
+  # with auto-deploy disabled still gets synced on pull. See sync_venvs.
+  rotate_log
+  sync_venvs
+
+  # `make venv-sync`: do the sync above and nothing else. Useful on a box where
+  # auto-deploy is off, and for healing a venv without waiting for a pull.
+  if [[ "$trigger" == "venv-sync-only" ]]; then
+    return 0
+  fi
 
   # --- Kill switch -----------------------------------------------------------
   # post-commit ignores `git commit --no-verify`, so there has to be a real way to
@@ -67,8 +139,6 @@ main() {
     log "SKIP: auto-deploy disabled (STINGRAY_AUTODEPLOY=0 or deploy/.autodeploy-disabled)"
     return 0
   fi
-
-  local trigger="${1:-manual}"
 
   # --- Serialize -------------------------------------------------------------
   exec 9>"$LOCK"
@@ -109,7 +179,6 @@ main() {
     fi
   fi
 
-  rotate_log
   log "START [$trigger] $branch@$sha"
   if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
     log "  NOTE: working tree is dirty — deploying the tree on disk, not $sha"

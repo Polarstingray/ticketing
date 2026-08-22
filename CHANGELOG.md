@@ -10,6 +10,25 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 ## [Unreleased]
 
 ### Fixed
+- **Pulls now keep the Python venvs in step with the checkout.** `resolver/requirements.txt`
+  gained `-e ../cli` (the shared client package); a pull brought the code that imports it
+  and nothing reinstalled, so every cron tick died at import with `ModuleNotFoundError`
+  and both resolvers on that box went silent for over an hour. It presented as "the
+  resolver isn't scheduled" — cron was firing perfectly, each run just died before it
+  could log a sweep. `deploy/autodeploy.sh` now reinstalls any component whose
+  `requirements.txt` hash changed, keyed on a stamp so an ordinary pull costs nothing.
+  It runs ahead of every gate — including the "nothing deployable changed" check, which
+  skips exactly the resolver-only commits that move these requirements, and the
+  auto-deploy kill switch, so a resolver-only box with `deploy/.autodeploy-disabled`
+  still gets synced. Also available as `make venv-sync`.
+- **A resolver that can't start now still rotates its cron log.** `audit.maintain_logs`
+  runs once the module has imported and a config has loaded, which is too late for the
+  failure it most needs to survive: an import-time crash relaunching on cron every few
+  minutes, appending a traceback to a log that can never roll itself. Rotation now also
+  happens at the top of `resolve_tickets`, before the imports that can fail, reading the
+  env file with nothing but stdlib.
+
+### Fixed
 - **Reviews and fixes now follow the commit a ticket was filed against.** A ticket
   recorded which repo to work in (`repo:<name>`) but not where in it, so every git
   decision was made from ambient checkout state: a review read whatever branch was

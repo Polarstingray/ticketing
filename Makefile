@@ -56,6 +56,9 @@ deploy: ## Rebuild + restart locally, gated on the test suites
 deploy-log: ## Tail the auto-deploy log
 	tail -f deploy/.autodeploy.log
 
+venv-sync: ## Reinstall any venv whose requirements.txt changed (runs on pull too)
+	./deploy/autodeploy.sh venv-sync-only
+
 hooks-install: ## Auto-deploy on every commit/merge to main
 	./deploy/install-hooks.sh
 
