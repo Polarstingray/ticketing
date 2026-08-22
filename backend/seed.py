@@ -122,3 +122,101 @@ def seed_resolver_bot(db: Session) -> None:
         f"[seed] Created resolver bot '{username}' (id={bot.id}) with API key {raw_key}\n"
         f"[seed] Wrote {path} for install.sh; this key is shown only once."
     )
+
+
+DIGEST_KEY_NAME = "digest"
+
+
+def seed_digest_admin_key(db: Session) -> None:
+    """Mint a dedicated admin API key for the daily digest when ``SEED_DIGEST_BOT``
+    is truthy.
+
+    The digest surveys the *whole* backlog, and the API shows non-admins only their
+    own tickets — so unlike the resolver it cannot run on a least-privilege bot user
+    and needs an admin's key. Rather than creating a second admin (which would hand
+    a scheduled job its own privileged login), this mints an extra key named
+    ``digest`` for the admin that already exists, so it can be revoked on its own
+    from Profile → API keys without touching the admin's primary key.
+
+    The raw key is written next to the database as ``digest-bootstrap.json`` (mode
+    600); ``install.sh`` reads it to fill in ``DIGEST_ADMIN_KEY`` in
+    ``resolver/.env``. Idempotent: skips if the admin already has a ``digest`` key,
+    which also means revoking the key does not re-mint it on the next boot — mint a
+    replacement by hand from Profile → API keys. That is deliberate: a boot loop
+    must not be able to resurrect a credential an operator just revoked.
+    """
+    if not _truthy(os.environ.get("SEED_DIGEST_BOT")):
+        return
+
+    admin = _digest_key_owner(db)
+    if admin is None:
+        print("[seed] SEED_DIGEST_BOT is set but no admin user exists — skipping.")
+        return
+
+    existing = (
+        db.query(ApiKey)
+        .filter(ApiKey.user_id == admin.id, ApiKey.name == DIGEST_KEY_NAME)
+        .first()
+    )
+    if existing is not None:
+        return  # already minted on an earlier boot
+
+    raw_key = generate_api_key()
+    db.add(
+        ApiKey(
+            user_id=admin.id,
+            name=DIGEST_KEY_NAME,
+            key_prefix=raw_key[:11],
+            key_hash=hash_api_key(raw_key),
+        )
+    )
+    db.commit()
+
+    path = os.path.join(os.path.dirname(DATABASE_PATH), "digest-bootstrap.json")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"user_id": admin.id, "username": admin.username, "api_key": raw_key}, fh
+            )
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 600 — it holds a live admin key
+        print(
+            f"[seed] Minted digest admin key for '{admin.username}' (id={admin.id}).\n"
+            f"[seed] Wrote {path} for install.sh; the key is in that file only."
+        )
+    except OSError as exc:
+        # Non-fatal, but the key exists in the DB and nowhere else now, so it has to
+        # go somewhere the operator can read it. stdout may be captured by a log
+        # collector or CI — treat this printed key as compromised and rotate it from
+        # Profile → API keys once the digest is configured.
+        print(
+            f"[seed] WARNING: could not write digest bootstrap file: {exc}\n"
+            f"[seed] Falling back to printing the key (secure or rotate it): {raw_key}"
+        )
+
+
+def _digest_key_owner(db: Session) -> User | None:
+    """Pick the admin the ``digest`` key is minted for.
+
+    ``ADMIN_USERNAME`` names the admin ``seed_admin`` created, so it is the answer
+    on any install that has not been renamed. When it does not resolve, fall back to
+    the lowest-id admin: on the single-admin deployment this installer targets that
+    is the same user under a new name, and the alternative — skipping — leaves the
+    digest silently unconfigured on exactly the installs where the operator has
+    already customised things. The key is scoped and separately revocable either
+    way, so the blast radius of picking the "wrong" admin is one report ticket
+    filed by the wrong account.
+    """
+    username = os.environ.get("ADMIN_USERNAME", "admin")
+    admin = (
+        db.query(User)
+        .filter(User.username == username, User.role == UserRole.admin.value)
+        .first()
+    )
+    if admin is not None:
+        return admin
+    return (
+        db.query(User)
+        .filter(User.role == UserRole.admin.value)
+        .order_by(User.id)
+        .first()
+    )

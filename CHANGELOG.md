@@ -135,6 +135,16 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   The comment composer gained a Write/Preview toggle. No schema change — raw bodies are
   stored and served unchanged, so the resolver's marker parsing is unaffected. Raw HTML
   in a body stays escaped (no `rehype-raw`).
+- **Daily digest setup is now part of `./install.sh`**, alongside the resolver bot.
+  `SEED_DIGEST_BOT=true` mints an extra API key named `digest` for the *existing* admin
+  rather than creating a second admin user — the digest needs an admin key because the
+  API shows non-admins only their own tickets, and a separately named key can be revoked
+  from Profile → API keys without disturbing the admin's primary one. The raw key is
+  written to `digest-bootstrap.json` next to the database at mode 600; the installer's
+  new digest prompt reads it out of the backend container, sets `DIGEST_ADMIN_KEY` in
+  `resolver/.env`, and copies `digests.example.toml` → `digests.toml` if there isn't one
+  (an existing config is never clobbered). Minting is idempotent and one-way: a revoked
+  key is not re-issued on the next boot.
 
 ### Fixed
 - The dashboard's sticky filter rail used `top: 16px`, which is *behind* the sticky
