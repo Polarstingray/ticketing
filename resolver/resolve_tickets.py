@@ -35,6 +35,18 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Rotate this bot's cron stdout log before the imports below get a chance to fail.
+# A stale venv or a moved dependency makes every cron tick die here, and each death
+# appends a traceback to a log that the sweep-time rotation can never reach, because
+# the sweep never starts. config is stdlib-only, so it cannot fail for the reason the
+# imports below can; the guard keeps a rotation problem from becoming a startup one.
+try:
+    from config import rotate_cron_log_early as _rotate_cron_log_early
+
+    _rotate_cron_log_early()
+except Exception:
+    pass
+
 import agents
 import audit
 import commands

@@ -2035,6 +2035,68 @@ def test_rotate_cron_log_only_when_over_cap(tmp_path):
     assert cron.exists()
 
 
+# --- early rotation: survives an import-time crash ----------------------------
+# The sweep-time rotation runs after the module has imported, so a resolver that
+# dies on `import` (stale venv, moved dependency) relaunches on cron every few
+# minutes and appends a traceback to a log nothing can ever roll.
+
+def _early_env(monkeypatch, tmp_path, body, env_name=".env"):
+    """Point rotate_cron_log_early at a scratch env file and logs dir."""
+    import config
+    (tmp_path / env_name).write_text(body)
+    monkeypatch.setattr(config, "HERE", tmp_path)
+    monkeypatch.setenv("RESOLVER_ENV_FILE", env_name)
+    monkeypatch.delenv("CRON_LOG", raising=False)
+    monkeypatch.delenv("CRON_LOG_MAX_BYTES", raising=False)
+    return config
+
+
+def test_rotate_cron_log_early_rolls_an_oversized_log(monkeypatch, tmp_path):
+    config = _early_env(monkeypatch, tmp_path,
+                        "CRON_LOG=cron.log\nCRON_LOG_MAX_BYTES=10\n")
+    cron = tmp_path / "cron.log"
+    cron.write_text("x" * 100)
+    assert config.rotate_cron_log_early() is True
+    assert (tmp_path / "cron.log.1").read_text() == "x" * 100
+    assert not cron.exists()
+
+
+def test_rotate_cron_log_early_leaves_a_small_log(monkeypatch, tmp_path):
+    config = _early_env(monkeypatch, tmp_path,
+                        "CRON_LOG=cron.log\nCRON_LOG_MAX_BYTES=10000\n")
+    cron = tmp_path / "cron.log"
+    cron.write_text("tiny")
+    assert config.rotate_cron_log_early() is False
+    assert cron.read_text() == "tiny"
+
+
+def test_rotate_cron_log_early_is_a_noop_without_cron_log(monkeypatch, tmp_path):
+    # Back-compat: an env file that never set CRON_LOG must not start rotating.
+    config = _early_env(monkeypatch, tmp_path, "STINGRAY_URL=http://x\n")
+    assert config.rotate_cron_log_early() is False
+
+
+def test_rotate_cron_log_early_honors_the_env_file_selector(monkeypatch, tmp_path):
+    """Each identity rotates its OWN log — the whole point of RESOLVER_ENV_FILE."""
+    config = _early_env(monkeypatch, tmp_path,
+                        "CRON_LOG=cron-lite.log\nCRON_LOG_MAX_BYTES=10\n",
+                        env_name=".env.claude-lite")
+    (tmp_path / "cron-lite.log").write_text("y" * 50)
+    other = tmp_path / "cron.log"
+    other.write_text("z" * 50)
+    assert config.rotate_cron_log_early() is True
+    assert (tmp_path / "cron-lite.log.1").exists()
+    assert other.read_text() == "z" * 50, "must not touch another identity's log"
+
+
+def test_rotate_cron_log_early_survives_a_bad_cap(monkeypatch, tmp_path):
+    # It runs before anything validates config, so it must not raise on junk.
+    config = _early_env(monkeypatch, tmp_path,
+                        "CRON_LOG=cron.log\nCRON_LOG_MAX_BYTES=not-a-number\n")
+    (tmp_path / "cron.log").write_text("small")
+    assert config.rotate_cron_log_early() is False
+
+
 def test_logs_collect_picks_newest_run(tmp_path):
     (tmp_path / "ticket-42-implement-20260101-000000.log").write_text("first")
     (tmp_path / "ticket-42-implement-20260102-000000.log").write_text("second")
