@@ -280,7 +280,7 @@ def test_do_implement_hard_fails_on_worktree_escape(fake_cfg, monkeypatch, tmp_p
     monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
     monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
     monkeypatch.setattr(rt, "has_origin", lambda repo: False)
-    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "resolve_base", lambda repo, ticket, **kw: ("HEAD", "main", ""))
     monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
     monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
     monkeypatch.setattr(rt, "run_agent_tracked", lambda *a, **k: (True, "did the work"))
@@ -327,7 +327,7 @@ def _route_harness(fake_cfg, monkeypatch, tmp_path):
     monkeypatch.setattr(rt, "set_state",
                         lambda client, ticket, tags, **f: rec["states"].append((tags, f)) or {})
     monkeypatch.setattr(rt, "has_origin", lambda repo: False)
-    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "resolve_base", lambda repo, ticket, **kw: ("HEAD", "main", ""))
     monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
     monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
     monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # never escapes
@@ -434,7 +434,7 @@ def _impl_harness(fake_cfg, monkeypatch, tmp_path, agent_results, verify_results
     monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
     monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
     monkeypatch.setattr(rt, "has_origin", lambda repo: False)
-    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "resolve_base", lambda repo, ticket, **kw: ("HEAD", "main", ""))
     monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
     monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
     monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # never escapes
@@ -548,7 +548,8 @@ def _init_repo(tmp_path: Path) -> Path:
 
 def test_resolve_base_no_origin_pins_head_sha(tmp_path):
     repo = _init_repo(tmp_path)
-    base_ref, base_branch = rt.resolve_base(repo)
+    base_ref, base_branch, warning = rt.resolve_base(repo, {})
+    assert warning == ""
     head = _git(repo, "rev-parse", "HEAD").strip()
     # The fix: a stable SHA, not the symbolic "HEAD" (which degenerates in the worktree).
     assert base_ref == head
@@ -561,7 +562,7 @@ def test_resolve_base_no_origin_ahead_count_is_one_after_commit(tmp_path):
     # Reproduces the live bug end-to-end: branch from base_ref in a worktree, commit, and
     # confirm `{base_ref}..HEAD` counts 1 (it was 0 when base_ref was the symbolic "HEAD").
     repo = _init_repo(tmp_path)
-    base_ref, _ = rt.resolve_base(repo)
+    base_ref, _, _ = rt.resolve_base(repo, {})
     wt = tmp_path / "wt"
     _git(repo, "worktree", "add", "-q", "-B", "claude/ticket-1", str(wt), base_ref)
     (wt / "f.txt").write_text("changed\n")
@@ -569,6 +570,93 @@ def test_resolve_base_no_origin_ahead_count_is_one_after_commit(tmp_path):
     ahead = _git(wt, "rev-list", "--count", f"{base_ref}..HEAD").strip()
     assert ahead == "1"
     _git(repo, "worktree", "remove", "--force", str(wt))
+
+
+# --- commit pinning: rev:/branch: tags decide where work happens ---------------
+# The bug this closes: a ticket filed on a feature branch was reviewed against, and
+# fixed on top of, whatever the checkout happened to be sitting on at sweep time.
+
+# Captured before the autouse conftest fixture stands the helper down.
+_REAL_READONLY_WT = rt.prepare_readonly_worktree
+
+
+def _pinned(repo, branch=None):
+    """A ticket pinned to `repo`'s current HEAD."""
+    tags = [f"rev:{_git(repo, 'rev-parse', 'HEAD').strip()}"]
+    if branch:
+        tags.append(f"branch:{branch}")
+    return {"id": 1, "tags": tags}
+
+
+def test_resolve_base_honors_a_reachable_pin(tmp_path):
+    repo = _init_repo(tmp_path)
+    feature = _git(repo, "rev-parse", "HEAD").strip()
+    ticket = _pinned(repo, "feat/probe")
+    # Move the checkout on, the way a user switching branches would.
+    (repo / "f.txt").write_text("later\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-aqm", "later")
+
+    base_ref, base_branch, warning = rt.resolve_base(repo, ticket)
+    assert base_ref == feature, "must use the pinned commit, not the moved-on HEAD"
+    assert base_branch == "feat/probe", "the PR stacks on the ticket's branch"
+    assert warning == ""
+
+
+def test_resolve_base_without_a_pin_is_unchanged(tmp_path):
+    # Every ticket filed before pinning existed, and every hand-written curl.
+    repo = _init_repo(tmp_path)
+    assert rt.resolve_base(repo, {"id": 1, "tags": ["repo:r"]}) == rt.resolve_base(repo, {})
+
+
+def test_resolve_base_unreachable_pin_falls_back_and_warns(tmp_path):
+    repo = _init_repo(tmp_path)
+    ticket = {"id": 1, "tags": ["rev:" + "0" * 40, "branch:feat/gone"]}
+    base_ref, base_branch, warning = rt.resolve_base(repo, ticket)
+    # Falling back keeps the ticket moving; the warning is what stops it being silent.
+    assert base_ref == _git(repo, "rev-parse", "HEAD").strip()
+    assert base_branch == "main"
+    assert "000000000000" in warning and "feat/gone" in warning
+
+
+def test_resolve_base_pin_without_branch_keeps_the_ambient_branch(tmp_path):
+    repo = _init_repo(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    base_ref, base_branch, warning = rt.resolve_base(repo, {"id": 1, "tags": [f"rev:{head}"]})
+    assert (base_ref, base_branch, warning) == (head, "main", "")
+
+
+def test_readonly_worktree_is_detached_and_at_the_pin(tmp_path, monkeypatch):
+    repo = _init_repo(tmp_path)
+    pinned = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "f.txt").write_text("later\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-aqm", "later")
+    monkeypatch.setattr(rt, "WORK_DIR", tmp_path / "work")
+
+    wt = _REAL_READONLY_WT(repo, 7, pinned, "review")
+    try:
+        assert _git(wt, "rev-parse", "HEAD").strip() == pinned
+        assert (wt / "f.txt").read_text() == "hi\n", "must show the pinned content"
+        # Detached: it must NOT hold claude/ticket-7, which the implement run needs.
+        assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD").strip() == "HEAD"
+        assert "claude/ticket-7" not in _git(repo, "branch", "--list")
+    finally:
+        _git(repo, "worktree", "remove", "--force", str(wt))
+
+
+def test_review_and_implement_worktrees_coexist(tmp_path, monkeypatch):
+    # A review worktree holding claude/ticket-<id> would clobber the fix branch, which
+    # is why the read-only one is detached and in its own directory.
+    repo = _init_repo(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    monkeypatch.setattr(rt, "WORK_DIR", tmp_path / "work")
+    review_wt = _REAL_READONLY_WT(repo, 9, head, "review")
+    impl_wt, branch = rt.prepare_worktree(repo, 9, head)
+    try:
+        assert review_wt != impl_wt
+        assert _git(impl_wt, "rev-parse", "--abbrev-ref", "HEAD").strip() == branch
+    finally:
+        _git(repo, "worktree", "remove", "--force", str(review_wt))
+        _git(repo, "worktree", "remove", "--force", str(impl_wt))
 
 
 def test_resolve_base_prefers_origin_default(tmp_path):
@@ -579,7 +667,7 @@ def test_resolve_base_prefers_origin_default(tmp_path):
     _git(repo, "remote", "add", "origin", str(bare))
     _git(repo, "fetch", "-q", "origin")
     _git(repo, "remote", "set-head", "origin", "main")
-    base_ref, base_branch = rt.resolve_base(repo)
+    base_ref, base_branch, _ = rt.resolve_base(repo, {})
     assert base_ref == "origin/main"
     assert base_branch == "main"
 
@@ -2580,7 +2668,7 @@ def test_do_delegate_files_rollup_and_hands_back(fake_cfg, monkeypatch, tmp_path
     ]
     client = FakeClient(tickets=children)
     monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
-    monkeypatch.setattr(rt, "resolve_base", lambda repo: ("HEAD", "main"))
+    monkeypatch.setattr(rt, "resolve_base", lambda repo, ticket, **kw: ("HEAD", "main", ""))
     monkeypatch.setattr(rt, "prepare_worktree",
                         lambda repo, tid, base: (tmp_path / "wt", f"claude/ticket-{tid}"))
     monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)

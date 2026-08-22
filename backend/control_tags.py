@@ -6,6 +6,7 @@ workflow signals (mirrored here so the two definitions can't silently drift):
 - ``claude:*`` — workflow state (planning, implementing, awaiting-pr-review,
   attempt counters) that drives whether the bot plans/implements/opens a PR.
 - ``repo:<name>`` — which repository the resolver checks out and operates on.
+- ``rev:<sha>`` / ``branch:<name>`` — which commit/branch it operates *at*.
 - ``dangerous`` / ``fix`` — safety / behavior gates.
 
 If an ordinary user could set these (via the UI or their own API key) on a
@@ -27,7 +28,12 @@ from models import User, UserRole
 # `review-by:<id>` records who its finished PR is handed back to; both must be trusted
 # so a user can't forge them to redirect another ticket's PR handoff. See the
 # resolver's delegation flow.
-RESERVED_PREFIXES = ("claude:", "repo:", "parent:", "review-by:")
+#
+# `rev:<sha>` / `branch:<name>` pin a ticket to the commit it was filed against, so a
+# review reads the code under review rather than whatever the checkout happens to be
+# sitting on, and a fix stacks on the right branch. Like `repo:` they *aim* the
+# automation, so forging them would point a fix at arbitrary code.
+RESERVED_PREFIXES = ("claude:", "repo:", "parent:", "review-by:", "rev:", "branch:")
 # Reserved *exact* tags. `delegate` opts a ticket into resolver-to-resolver
 # fan-out (the lead may decompose it and assign sub-tasks to other resolvers); like
 # `dangerous` it must be trusted so a user can't self-trigger autonomous fan-out.
@@ -52,13 +58,14 @@ RESOLVER_BOT_USER_IDS: frozenset[int] = frozenset(
 # decorative.
 SCOPE_CLI = "cli"
 
-# Which reserved tag prefixes each scope unlocks. `cli` gets `repo:` and nothing
-# else: it names the checkout to review, and the resolver's PROJECTS_ROOT allowlist
-# already bounds which checkouts exist. Deliberately excluded are the tags that
-# would let a caller hijack the automation rather than merely aim it: `claude:*`
+# Which reserved tag prefixes each scope unlocks. `cli` gets the three *aiming* tags
+# and nothing else: `repo:` names the checkout to review, and `rev:`/`branch:` pin it
+# to a commit — all three merely say "look here", and the resolver's PROJECTS_ROOT
+# allowlist already bounds which checkouts exist. Deliberately excluded are the tags
+# that would let a caller hijack the automation rather than merely aim it: `claude:*`
 # (workflow phase), `dangerous`/`fix` (safety gates), `delegate` (autonomous
 # fan-out), and `parent:`/`review-by:` (PR handoff routing).
-SCOPE_TAG_PREFIXES: dict[str, tuple[str, ...]] = {SCOPE_CLI: ("repo:",)}
+SCOPE_TAG_PREFIXES: dict[str, tuple[str, ...]] = {SCOPE_CLI: ("repo:", "rev:", "branch:")}
 
 ALL_SCOPES = frozenset(SCOPE_TAG_PREFIXES)
 

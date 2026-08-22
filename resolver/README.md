@@ -127,6 +127,14 @@ curl -s -X POST "$STINGRAY_URL/api/tickets" -H "X-API-Key: $YOUR_KEY" \
   hand, and without it the resolver can only review embedded code blocks (never fix
   them) — `file_ticket.py` fills it in from the checkout you run it in, so prefer that
   over `curl`.
+- **`tags: ["rev:<full-sha>", "branch:<name>"]`** pins the ticket to the commit it
+  was filed against. Without them the resolver uses ambient checkout state: it reviews
+  and plans against whatever branch happens to be checked out when the sweep runs, and
+  branches the fix off the remote default. File a review from a feature branch, switch
+  branches, and the review reads the wrong code while the fix lands beside your work
+  rather than on it. `stingray review` and `file_ticket.py --rev/--branch` set them for
+  you. A pin that has become unreachable (force-push, deleted branch) falls back to the
+  old behavior and says so in a comment.
 - **`type: code_review`** keeps your `code_blocks` (they're dropped for `task`).
 - Add **`"dangerous"`** to `tags` to skip the plan gate.
 
@@ -150,6 +158,12 @@ resolves a review request another bot (or you) filed.
 - **What it reviews:** the ticket's `code_blocks` if present, otherwise it explores the
   repo (selected by the `repo:<name>` tag) to find the code your description refers to —
   so you can just file *"Review program installation in repman"* without attaching code.
+- **Where it reviews:** a throwaway **detached worktree** at the ticket's `rev:` pin, so
+  the review sees the code the ticket was filed against and your live checkout is never
+  touched or switched. A `/fix` then cuts `claude/ticket-<id>` from that same commit —
+  the reviewed commits are present in the worktree — and targets its PR at the ticket's
+  `branch:`. Planning works the same way. Unpinned tickets fall back to the default
+  branch, as before.
 - **Reviewed once:** a re-swept review ticket isn't re-reviewed unless a human comment
   says `/review`.
 - **Also fix it:** add the **`fix`** tag to a `code_review` ticket and, after reviewing,

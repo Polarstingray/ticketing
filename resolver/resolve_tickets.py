@@ -62,6 +62,8 @@ TAG_ESCALATE = "claude"                     # free bot: manual "send this to Cla
 TAG_DELEGATE = "delegate"                   # opt a ticket into resolver-to-resolver fan-out
 TAG_DELEGATING = "resolver:delegating"      # delegation/orchestration run in flight
 REPO_TAG_PREFIX = "repo:"
+REV_TAG_PREFIX = "rev:"                     # rev:<sha> = the commit this ticket is pinned to
+BRANCH_TAG_PREFIX = "branch:"               # branch:<name> = the branch that commit is on
 PARENT_TAG_PREFIX = "parent:"               # parent:<id> links a sub-task to its lead ticket
 REVIEW_BY_TAG_PREFIX = "review-by:"         # review-by:<id> = who a sub-task's PR goes back to
 
@@ -219,6 +221,27 @@ def repo_name_of(ticket: dict) -> str | None:
     for t in ticket.get("tags", []):
         if t.startswith(REPO_TAG_PREFIX):
             return t[len(REPO_TAG_PREFIX):].strip()
+    return None
+
+
+def rev_of(ticket: dict) -> str | None:
+    """The commit from this ticket's `rev:<sha>` tag, else None.
+
+    Set by `stingray review` at file time. Its absence is normal and means "figure
+    the base out from the checkout" (a hand-written curl, or a ticket filed before
+    pinning existed)."""
+    for t in ticket.get("tags", []):
+        if t.startswith(REV_TAG_PREFIX):
+            return t[len(REV_TAG_PREFIX):].strip() or None
+    return None
+
+
+def branch_of(ticket: dict) -> str | None:
+    """The branch from this ticket's `branch:<name>` tag, else None. This is what a
+    fix stacks on and what its PR targets."""
+    for t in ticket.get("tags", []):
+        if t.startswith(BRANCH_TAG_PREFIX):
+            return t[len(BRANCH_TAG_PREFIX):].strip() or None
     return None
 
 
@@ -1182,8 +1205,8 @@ def ref_exists(repo: Path, ref: str) -> bool:
     return run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])[0] == 0
 
 
-def resolve_base(repo: Path) -> tuple[str, str]:
-    """Determine where to branch the fix from and what the PR base branch is.
+def _ambient_base(repo: Path) -> tuple[str, str]:
+    """Where to branch from when the ticket says nothing — the historical behavior.
 
     Returns (base_ref, base_branch): `base_ref` is a commit-ish guaranteed to exist
     (so `git worktree add` can't fail with 'invalid reference'); `base_branch`
@@ -1195,7 +1218,10 @@ def resolve_base(repo: Path) -> tuple[str, str]:
     do_implement later measures progress with `{base_ref}..HEAD` run *inside the
     worktree*, where the symbolic "HEAD" would resolve to the new commit on both
     sides (HEAD..HEAD == 0) and a real change would be misreported as "no changes".
-    A pinned SHA keeps the range well-defined for origin-less / local-only repos."""
+    A pinned SHA keeps the range well-defined for origin-less / local-only repos.
+
+    Note this reads *ambient* state: whatever branch the checkout is on right now.
+    That is exactly why tickets carry `rev:`/`branch:` — see resolve_base."""
     remote_default = None
     rc, out = run(["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
     if rc == 0 and out.strip():
@@ -1219,6 +1245,49 @@ def resolve_base(repo: Path) -> tuple[str, str]:
     return base_ref, base_branch
 
 
+def resolve_base(repo: Path, ticket: dict, *, fetch_ok: bool = False,
+                 git_net_timeout: int = 120) -> tuple[str, str, str]:
+    """Where this *ticket's* work belongs: (base_ref, base_branch, warning).
+
+    A ticket filed by `stingray review` carries `rev:<sha>` and `branch:<name>`
+    recording the commit it was filed against. Honoring them is what keeps the
+    lifecycle coherent: the review reads the code that was actually reviewed, the
+    fix branches off it (so the reviewed commits are present in the worktree), and
+    the PR targets the branch the work lives on instead of landing beside it on main.
+
+    Without those tags we fall back to `_ambient_base` — unchanged behavior for
+    hand-written tickets and everything filed before pinning existed.
+
+    A pinned commit can go away (force-push, deleted branch, a rebase). We try one
+    targeted fetch to recover it, and if it is still unreachable we fall back rather
+    than dead-end the ticket, returning a non-empty `warning` for the caller to post
+    as a comment. Falling back silently is the one thing we must not do: that is the
+    original bug, and it looks like a successful run.
+    """
+    fallback_ref, fallback_branch = _ambient_base(repo)
+    rev = rev_of(ticket)
+    branch = branch_of(ticket)
+    if not rev:
+        return fallback_ref, fallback_branch, ""
+
+    if not ref_exists(repo, rev) and fetch_ok and branch:
+        # Targeted, not a blanket `fetch origin`: the commit may only exist on the
+        # remote's copy of that branch, and fetching one ref is cheap.
+        run(["git", "-C", str(repo), "fetch", "origin", branch], timeout=git_net_timeout)
+
+    if not ref_exists(repo, rev):
+        return fallback_ref, fallback_branch, (
+            f"⚠️ This ticket is pinned to commit `{rev[:12]}`"
+            + (f" on branch `{branch}`" if branch else "")
+            + ", which isn't reachable in this checkout (force-pushed, rebased, or a "
+            f"deleted branch?). Falling back to `{fallback_branch}` — findings and any "
+            "fix will be against that, not the code this ticket was filed for."
+        )
+
+    # Pinned and reachable. Keep the ambient branch only if the ticket named none.
+    return rev, (branch or fallback_branch), ""
+
+
 def prepare_worktree(repo: Path, ticket_id: int, base_ref: str) -> tuple[Path, str]:
     """Create an isolated worktree on branch claude/ticket-<id>. Reuses the
     branch if it already exists (rework); otherwise creates it off base_ref."""
@@ -1239,6 +1308,31 @@ def prepare_worktree(repo: Path, ticket_id: int, base_ref: str) -> tuple[Path, s
     if rc != 0:
         raise RuntimeError(f"git worktree add failed: {out}")
     return wt, branch
+
+
+def prepare_readonly_worktree(repo: Path, ticket_id: int, base_ref: str,
+                              kind: str) -> Path:
+    """A throwaway DETACHED worktree at `base_ref`, for a read-only phase.
+
+    Deliberately not `prepare_worktree`: that one creates and holds the branch
+    `claude/ticket-<id>`, which the later implement run needs — a review holding it
+    would clobber the fix branch. Detached at a commit is all a reader needs.
+
+    `kind` ("review"/"plan") keeps the directory distinct from the implement
+    worktree so the two can coexist within one sweep."""
+    WORK_DIR.mkdir(exist_ok=True)
+    wt = WORK_DIR / f"{kind}-{ticket_id}"
+    # Same stale-cleanup preamble as prepare_worktree: a crashed previous run leaves
+    # both a registration and a directory, and either alone breaks `worktree add`.
+    run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)])
+    if wt.exists():
+        shutil.rmtree(wt, ignore_errors=True)
+    run(["git", "-C", str(repo), "worktree", "prune"])
+
+    rc, out = run(["git", "-C", str(repo), "worktree", "add", "--detach", str(wt), base_ref])
+    if rc != 0:
+        raise RuntimeError(f"git worktree add --detach failed: {out}")
+    return wt
 
 
 def remove_worktree(repo: Path, wt: Path) -> None:
@@ -1306,22 +1400,34 @@ _PLAN_PATH = re.compile(
     r")")
 
 
-def _reanchor(text: str | None, main_repo: "Path | None", wt: Path) -> str | None:
-    """Rewrite absolute paths rooted at the main checkout (`main_repo`) to point at
-    the per-ticket worktree (`wt`) instead. Plans are generated against the main
-    checkout (plan_prompt stamps its absolute path), so an approved plan is full of
-    `/.../<repo>/...` paths; feeding those verbatim into the worktree-anchored
-    implement run lets the agent follow them back OUT of the sandbox and edit the
-    main checkout. Because the worktree is a full checkout, a file's path relative to
-    the repo root is identical relative to the worktree root, so a boundary-aware
-    prefix swap is exact. Boundary lookahead avoids rewriting a sibling like
-    `<repo>-backup`."""
+def _reanchor(text: str | None, main_repo: "Path | None", wt: Path,
+              ticket_id: "int | None" = None) -> str | None:
+    """Rewrite absolute paths rooted at the checkout a plan was WRITTEN against so they
+    point at the per-ticket implement worktree (`wt`) instead. An approved plan is full
+    of `/.../<repo>/...` paths (plan_prompt stamps its absolute path); feeding those
+    verbatim into the worktree-anchored implement run lets the agent follow them back
+    OUT of the sandbox and edit the source tree. Because a worktree is a full checkout,
+    a file's path relative to the repo root is identical relative to the worktree root,
+    so a boundary-aware prefix swap is exact. Boundary lookahead avoids rewriting a
+    sibling like `<repo>-backup`.
+
+    Two roots need remapping. `main_repo` is the historical one — plans in flight from
+    before do_plan moved into a worktree, and any path the agent inferred from the repo
+    name. `ticket_id` names the second: do_plan now works in `work/plan-<id>`, so a
+    fresh plan's paths are rooted there. Longest-first so a nested root wins."""
     if not text or not main_repo:
         return text
-    # Match the repo root only at a path boundary: the next char must NOT be a
+    roots = [str(main_repo)]
+    if ticket_id is not None:
+        roots.append(str(WORK_DIR / f"plan-{ticket_id}"))
+    # Match a root only at a path boundary: the next char must NOT be a
     # filename-continuation char ([\w.-]), so `<repo>` and `<repo>/sub` are rewritten
     # but a sibling like `<repo>-backup` is left intact.
-    return re.sub(re.escape(str(main_repo)) + r"(?![\w.\-])", str(wt), text)
+    for root in sorted(roots, key=len, reverse=True):
+        if root == str(wt):
+            continue
+        text = re.sub(re.escape(root) + r"(?![\w.\-])", str(wt), text)
+    return text
 
 
 def _strip_residual_abs_paths(text: str | None, allowed_root: "Path | None") -> str | None:
@@ -1441,8 +1547,8 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
     # `<wt>/sub/f.py` rather than being flattened to `f.py`. Both steps are gated on
     # main_repo: it's always set in real runs; main_repo=None is the prompt-builder
     # unit-test call shape, which passes text through untouched for back-compat.
-    plan = _reanchor(plan, main_repo, repo)
-    reviewer_notes = _reanchor(reviewer_notes, main_repo, repo)
+    plan = _reanchor(plan, main_repo, repo, ticket.get("id"))
+    reviewer_notes = _reanchor(reviewer_notes, main_repo, repo, ticket.get("id"))
     if main_repo:
         plan = _strip_residual_abs_paths(plan, repo)
         reviewer_notes = _strip_residual_abs_paths(reviewer_notes, repo)
@@ -1526,14 +1632,30 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
 
 
 def review_prompt(ticket: dict, repo: Path | None, want_fix: bool,
-                  command: "commands.Command | None" = None) -> str:
+                  command: "commands.Command | None" = None, *,
+                  pinned_ref: str = "", pinned_branch: str = "") -> str:
     # repo is None for a code_review filed without a `repo:` tag (and no
     # DEFAULT_REPO): there's no checkout to explore, so the review works purely
-    # off the embedded code_blocks.
+    # off the embedded code_blocks. Otherwise `repo` is the read-only worktree
+    # checked out at the ticket's pinned commit, not the live checkout.
     header = f"You are performing a CODE REVIEW for Stingray ticket #{ticket['id']}"
     header += f" in the repository at {repo}." if repo else "."
     p = [
         header,
+    ]
+    if repo and pinned_ref:
+        # Name the baseline so findings cite the right one, and so the agent doesn't
+        # go hunting for a branch that isn't checked out here (it's detached).
+        where = f"commit {pinned_ref[:12]}"
+        if pinned_branch:
+            where += f" (branch `{pinned_branch}`)"
+        p += [
+            "",
+            f"This checkout is pinned to {where} — the state the ticket was filed "
+            "against. It is a detached, throwaway worktree: review it, don't switch "
+            "branches or edit anything.",
+        ]
+    p += [
         "",
         *command_block(command),
         f"Title: {ticket['title']}",
@@ -1664,8 +1786,26 @@ def do_plan(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     phase("planning", ticket, f"#{ticket['id']}: planning ({'revise' if revise_notes else 'fresh'})")
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-plan-{ts}.log"
-    ok, result = run_agent_tracked(cfg, client, ticket,
-                                   plan_prompt(ticket, repo, revise_notes, command), repo, "plan", log_path)
+    # Plan against the ticket's pinned commit, for the same reason do_review does: a
+    # plan written against whatever branch is checked out describes code the ticket
+    # isn't about, and do_implement then branches somewhere else again. Read-only and
+    # detached, so it can't disturb the live checkout or the fix branch.
+    plan_ref, _plan_branch, base_warning = resolve_base(
+        repo, ticket, fetch_ok=has_origin(repo), git_net_timeout=cfg.git_net_timeout)
+    if base_warning:
+        client.add_comment(ticket["id"], base_warning)
+    try:
+        plan_wt = prepare_readonly_worktree(repo, ticket["id"], plan_ref, "plan")
+    except RuntimeError as exc:
+        fail(client, ticket, f"Couldn't prepare a checkout to plan against at "
+             f"`{plan_ref[:12]}`.\n\n```\n{tail(str(exc))}\n```")
+        return
+    try:
+        ok, result = run_agent_tracked(
+            cfg, client, ticket,
+            plan_prompt(ticket, plan_wt, revise_notes, command), plan_wt, "plan", log_path)
+    finally:
+        remove_worktree(repo, plan_wt)
     if not ok:
         if _is_quota_failure(result):
             quota_backoff(cfg, client, ticket, TAG_PLANNING, result)
@@ -1823,7 +1963,12 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     pr_ok = origin and run(["gh", "auth", "status"])[0] == 0
     if origin:
         run(["git", "-C", str(repo), "fetch", "origin"], timeout=cfg.git_net_timeout)
-    base_ref, base_branch = resolve_base(repo)
+    # `origin` was just fetched above, so a pinned commit that only exists on the
+    # remote is already local; still allow the targeted per-branch fetch as a backstop.
+    base_ref, base_branch, base_warning = resolve_base(
+        repo, ticket, fetch_ok=origin, git_net_timeout=cfg.git_net_timeout)
+    if base_warning:
+        client.add_comment(ticket["id"], base_warning)
     wt, branch = prepare_worktree(repo, ticket["id"], base_ref)
     try:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -2043,7 +2188,10 @@ def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path |
         "other resolvers — read-only, no changes to this repo. I'll post a roll-up and hand "
         "it back to you when done.")
     phase("delegating", ticket, f"#{tid}: delegating")
-    base_ref, base_branch = resolve_base(repo)
+    base_ref, base_branch, base_warning = resolve_base(
+        repo, ticket, fetch_ok=has_origin(repo), git_net_timeout=cfg.git_net_timeout)
+    if base_warning:
+        client.add_comment(tid, base_warning)
     wt, branch = prepare_worktree(repo, tid, base_ref)
     try:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -2264,7 +2412,34 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
           + (" (+fix)" if want_fix else ""))
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = cfg.logs_dir / f"ticket-{ticket['id']}-review-{ts}.log"
-    prompt = review_prompt(ticket, repo, want_fix, command)
+
+    # Review the code this ticket was FILED against, not whatever the checkout happens
+    # to be sitting on. Reading `repo` directly meant a ticket filed on a feature branch
+    # got reviewed against main as soon as anyone switched branches — findings about
+    # code that was never under review. A detached worktree at the pinned commit makes
+    # the review reproducible and keeps the main checkout untouched.
+    review_wt = None
+    pinned_ref = pinned_branch = ""
+    if repo is not None:
+        pinned_ref, pinned_branch, base_warning = resolve_base(
+            repo, ticket, fetch_ok=has_origin(repo), git_net_timeout=cfg.git_net_timeout)
+        if base_warning:
+            client.add_comment(ticket["id"], base_warning)
+        if not single_shot:
+            # A single-shot review has no filesystem at all, so building a worktree
+            # for it would be pure overhead.
+            try:
+                review_wt = prepare_readonly_worktree(
+                    repo, ticket["id"], pinned_ref, "review")
+            except RuntimeError as exc:
+                # pinned_ref is guaranteed reachable by resolve_base, so this is a real
+                # git failure. Falling back to the live checkout would silently
+                # reintroduce the wrong-branch bug, so stop instead.
+                fail(client, ticket, f"Couldn't prepare a checkout to review at "
+                     f"`{pinned_ref[:12]}`.\n\n```\n{tail(str(exc))}\n```")
+                return
+    prompt = review_prompt(ticket, review_wt or repo, want_fix, command,
+                           pinned_ref=pinned_ref, pinned_branch=pinned_branch)
     # Surface the review as an AgentRun too (#56), uniformly for either backend: a
     # _RUN_USAGE sink collects whatever _emit_token_usage records (single-shot fills
     # it from the API response; the agent path from its runner) and we POST once.
@@ -2281,12 +2456,15 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
             # so any empty scratch dir will do. Clean it up afterwards.
             scratch = Path(tempfile.mkdtemp(prefix=f"review-{ticket['id']}-")) if repo is None else None
             try:
-                ok, result = run_agent(cfg, prompt, repo or scratch, "review", log_path)
+                ok, result = run_agent(cfg, prompt, review_wt or repo or scratch,
+                                       "review", log_path)
             finally:
                 if scratch is not None:
                     shutil.rmtree(scratch, ignore_errors=True)
     finally:
         _RUN_USAGE.reset(usage_token)
+        if review_wt is not None:
+            remove_worktree(repo, review_wt)
     try:
         client.create_agent_run(
             ticket["id"],

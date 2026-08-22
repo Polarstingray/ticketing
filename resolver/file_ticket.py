@@ -83,6 +83,8 @@ def build_payload(args: argparse.Namespace) -> dict:
         root=args.root,
         repo=getattr(args, "repo", None),
         no_repo=getattr(args, "no_repo", False),
+        rev=getattr(args, "rev", None),
+        branch=getattr(args, "branch", None),
         parent=getattr(args, "parent", None),
         assign=args.assign,
         warn=lambda msg: print(msg, file=sys.stderr),
@@ -119,6 +121,12 @@ def _parser() -> argparse.ArgumentParser:
         "--code-block", action="append", dest="code_block", metavar="PATH:LANG:START-END",
         help="repeatable; reads the lines from disk (code_review only)",
     )
+    p.add_argument("--rev", metavar="SHA",
+                   help="pin the ticket to this commit (rev:<SHA>) so a review reads "
+                        "the code as of that commit, not whatever is checked out")
+    p.add_argument("--branch", metavar="NAME",
+                   help="branch the pinned commit is on (branch:<NAME>); a fix stacks "
+                        "on it and its PR targets it")
     p.add_argument("--root", default=".", help="base dir for --code-block paths (default: cwd)")
     p.add_argument("--dry-run", action="store_true", help="print the payload, don't POST")
     return p
