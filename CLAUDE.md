@@ -75,6 +75,11 @@ When asked to file a review, create a ticket in **Stingray Tickets** via its RES
   - `tags`: string array — **always include `"repo:<repo-name>"`** (the basename of the
     git checkout the code lives in). It tells the resolver which repo to check out; only
     admin/bot API keys may set it, and the reviewed ticket can't be auto-fixed without it.
+    Also include **`"rev:<full-sha>"` and `"branch:<name>"`** — the commit the code lives
+    on. Without them the resolver reviews whatever branch the checkout happens to be on
+    when the sweep runs, and branches its fix off the remote default, so a ticket filed
+    from a feature branch gets reviewed against `main` and its fix lands beside the work
+    instead of on it. `stingray review` sets all three for you.
   - `assigned_to`: reviewer's user id (optional)
   - `code_blocks`: array of `{ filename, language, line_start, line_end, content }` —
     capture the **exact files and line ranges you changed**.
@@ -90,7 +95,7 @@ curl -s -X POST "$STINGRAY_URL/api/tickets" \
     "title": "Review: <what changed>",
     "description": "<why, and what to look at>",
     "priority": "medium",
-    "tags": ["repo:<repo-name>", "backend"],
+    "tags": ["repo:<repo-name>", "rev:<full-sha>", "branch:<branch-name>", "backend"],
     "code_blocks": [
       { "filename": "path/to/file.py", "language": "python",
         "line_start": 10, "line_end": 20, "content": "<the code>" }

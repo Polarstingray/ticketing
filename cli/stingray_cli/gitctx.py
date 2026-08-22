@@ -77,6 +77,27 @@ def default_branch(root: Path) -> str:
     return "HEAD"
 
 
+def head_sha(root: Path, rev: str = "HEAD") -> str:
+    """``rev`` resolved to a full 40-char SHA, or "" if it doesn't resolve.
+
+    Full, not abbreviated: this is what the ticket pins its review to, and the
+    resolver feeds it straight to `git worktree add`. An abbreviation is fine for
+    display but can go ambiguous as a repo grows.
+    """
+    out = git(root, "rev-parse", "--verify", f"{rev}^{{commit}}", check=False).strip()
+    return out if len(out) == 40 else ""
+
+
+def current_branch(root: Path) -> str:
+    """The checked-out branch name, or "" on a detached HEAD.
+
+    "" is a real answer, not a failure: a detached checkout has no branch for a fix
+    to stack onto, so the ticket records the SHA alone and the resolver falls back.
+    """
+    out = git(root, "rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
+    return "" if out in ("", "HEAD") else out
+
+
 @dataclass
 class ChangeSet:
     """What is being reviewed, and how to read its content."""
@@ -85,6 +106,11 @@ class ChangeSet:
     range: str = ""
     # The rev whose content the committed blocks reflect (the range's right side).
     rev: str = ""
+    # `rev` resolved to a full SHA, and the branch it was filed from. These are what
+    # pin the ticket: the resolver reviews *this* commit and stacks a fix on *this*
+    # branch, instead of guessing from whatever the checkout looks like at sweep time.
+    head_sha: str = ""
+    branch: str = ""
     # Whether uncommitted working-tree changes are folded in.
     worktree: bool = False
     # True when the worktree is the *only* source (e.g. --staged).
@@ -103,8 +129,13 @@ def resolve_range(root: Path, spec: str | None, *, staged: bool = False,
     quietly fold in the worktree unless asked, so `stingray review abc123` is
     reproducible.
     """
+    # Pin every path to the same two facts, so a ticket always records where it was
+    # filed from even when the content itself is uncommitted.
+    branch = current_branch(root)
+
     if staged:
         return ChangeSet(root=root, worktree=True, worktree_only=True, staged_only=True,
+                         head_sha=head_sha(root), branch=branch,
                          description="staged changes")
 
     has_commits = _rev_exists(root, "HEAD")
@@ -113,6 +144,9 @@ def resolve_range(root: Path, spec: str | None, *, staged: bool = False,
         rng, rev = _normalize_spec(root, spec)
         return ChangeSet(
             root=root, range=rng, rev=rev,
+            # The spec's own right-hand side, not HEAD: `stingray review abc123` is
+            # meant to be reproducible, so it pins the commit it actually reviewed.
+            head_sha=head_sha(root, rev), branch=branch,
             worktree=bool(include_worktree),
             commits=_commit_subjects(root, rng),
             description=rng + (" + working tree" if include_worktree else ""),
@@ -120,7 +154,8 @@ def resolve_range(root: Path, spec: str | None, *, staged: bool = False,
 
     if not has_commits:
         # A fresh repo: everything is uncommitted.
-        return ChangeSet(root=root, worktree=True, worktree_only=True,
+        # No commits at all: there is nothing to pin to, so head_sha stays "".
+        return ChangeSet(root=root, worktree=True, worktree_only=True, branch=branch,
                          description="working tree (no commits yet)")
 
     if _rev_exists(root, "HEAD~1"):
@@ -133,6 +168,7 @@ def resolve_range(root: Path, spec: str | None, *, staged: bool = False,
     dirty = want_worktree and bool(git(root, "status", "--porcelain").strip())
     return ChangeSet(
         root=root, range=rng, rev="HEAD", worktree=dirty,
+        head_sha=head_sha(root), branch=branch,
         commits=_commit_subjects(root, rng),
         description="last commit" + (" + working tree" if dirty else ""),
     )

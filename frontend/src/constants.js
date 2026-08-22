@@ -60,6 +60,8 @@ const RESERVED_TAG_PREFIXES = [
   "repo:",
   "parent:",
   "review-by:",
+  "rev:",
+  "branch:",
 ];
 const RESERVED_TAG_EXACT = new Set(["dangerous", "fix", "delegate"]);
 
@@ -75,6 +77,12 @@ export function isReservedTag(tag) {
 // (resolve_tickets.TAG_AWAIT_FIX).
 export const TAG_AWAITING_FIX = "resolver:awaiting-fix";
 export const REPO_TAG_PREFIX = "repo:";
+
+// Where in that repo: the commit a code_review was filed against, and the branch it
+// sits on. Set by `stingray review`; the resolver reviews at this commit and stacks
+// any fix on this branch (resolve_tickets.REV_TAG_PREFIX / BRANCH_TAG_PREFIX).
+export const REV_TAG_PREFIX = "rev:";
+export const BRANCH_TAG_PREFIX = "branch:";
 
 // Prefix the resolver stamps on the comment carrying its findings
 // (resolve_tickets.REVIEW_MARKER) — identifies which bot to hand the ticket back to.
