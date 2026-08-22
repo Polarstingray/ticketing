@@ -71,6 +71,48 @@ def _cron_log_path() -> "Path | None":
     return p if p.is_absolute() else HERE / p
 
 
+def rotate_cron_log_early() -> bool:
+    """Size-rotate this resolver's cron stdout log *before* anything that can fail
+    has been imported. Returns True if it rotated.
+
+    ``audit.maintain_logs`` already does this every sweep, but it runs once the whole
+    module has imported and a config has loaded. That is too late for the failure it
+    most needs to survive: an import-time crash (a stale venv, a dependency that moved)
+    makes cron relaunch every few minutes, each run appending a traceback to a log that
+    can now never rotate itself. The one log guaranteed to grow without bound is the one
+    belonging to a resolver that cannot start.
+
+    So this deliberately duplicates a little of Config.load: it reads the env file
+    directly and touches nothing but stdlib, which is what lets it run first. It is
+    also safe to run twice — the later sweep-time rotation simply finds the file under
+    the cap and does nothing."""
+    env_file = os.environ.get("RESOLVER_ENV_FILE", "").strip() or ".env"
+    env_path = Path(env_file)
+    if not env_path.is_absolute():
+        env_path = HERE / env_path
+    _load_env_file(env_path)
+
+    path = _cron_log_path()
+    if path is None:
+        return False
+    try:
+        max_bytes = int(os.environ.get("CRON_LOG_MAX_BYTES", "5000000"))
+    except ValueError:
+        max_bytes = 5_000_000
+    if max_bytes <= 0:
+        return False
+    try:
+        if path.stat().st_size <= max_bytes:
+            return False
+        # Rename rather than truncate: cron's `>>` keeps writing into the renamed
+        # inode, and the next tick opens a fresh file. Same rationale as
+        # audit.rotate_cron_log, which this mirrors.
+        os.replace(path, path.with_name(path.name + ".1"))
+    except OSError:
+        return False
+    return True
+
+
 def _identity_name(env_file: str) -> str:
     """`.env` -> 'default'; `.env.gemini` -> 'gemini'. Mirrors cli._identity_name
     so the manager roster and the CLI agree on a resolver's short name."""
