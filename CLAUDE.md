@@ -19,6 +19,8 @@
 > stingray review --describe      # let a local agent write the title/description
 > stingray review --assign-bot    # file it straight at the resolver
 > stingray file --type task --title "..." --priority low
+> stingray explore                # a review ticket per feature in this codebase
+> stingray explore --teach        # …written to teach the codebase to a student
 > ```
 >
 > `stingray review` turns the diff into `code_blocks` for you, so you never paste code

@@ -212,3 +212,15 @@ def test_unknown_command_posts_one_time_notice_and_handles_normally(
     assert any(rt.UNKNOWN_CMD_MARKER in body for _, body in client.comments_added)
     # falls through to normal handling (no command threaded)
     assert seen["action"] == "plan" and seen["command"] is None
+
+
+# --- the shipped library -------------------------------------------------
+def test_shipped_codebase_review_command_loads():
+    """The real file on disk, not a tmp_path fixture: a frontmatter typo here
+    would silently make `/codebase-review` an unknown command."""
+    c = commands.load_command("codebase-review")
+    assert c is not None
+    assert c.type == "task"
+    assert c.description
+    assert "file_ticket.py" in c.body and "--parent" in c.body
+    assert "codebase-review" in commands.available_commands()
