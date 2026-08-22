@@ -28,6 +28,7 @@ deploy/.autodeploy.log
 deploy/.autodeploy.log.1
 deploy/.autodeploy.lock
 deploy/.autodeploy-disabled
+deploy/.venv-sync.lock
 
 # OS
 .DS_Store
