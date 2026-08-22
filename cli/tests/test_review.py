@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -47,7 +48,7 @@ def test_dry_run_does_not_post(repo_with_change, wired, capsys):
 def test_repo_tag_is_derived(repo_with_change, wired, capsys):
     run(["review", "--dry-run"], repo_with_change)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tags"] == [f"repo:{repo_with_change.name}"]
+    assert payload["tags"][0] == f"repo:{repo_with_change.name}"
 
 
 def test_no_repo_opts_out(repo_with_change, wired, capsys):
@@ -57,7 +58,63 @@ def test_no_repo_opts_out(repo_with_change, wired, capsys):
 
 def test_explicit_repo_wins(repo_with_change, wired, capsys):
     run(["review", "--dry-run", "--repo", "other"], repo_with_change)
-    assert json.loads(capsys.readouterr().out)["tags"] == ["repo:other"]
+    assert json.loads(capsys.readouterr().out)["tags"][0] == "repo:other"
+
+
+# --- commit pinning -----------------------------------------------------------
+# The ticket records WHICH COMMIT it was filed against, so the resolver reviews that
+# code rather than whatever the checkout is sitting on when the sweep runs.
+
+def _tags(capsys):
+    return json.loads(capsys.readouterr().out)["tags"]
+
+
+def test_pins_the_commit_and_branch(repo_with_change, wired, capsys):
+    head = subprocess.run(["git", "-C", str(repo_with_change), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    run(["review", "--dry-run"], repo_with_change)
+    tags = _tags(capsys)
+    assert f"rev:{head}" in tags
+    assert len(head) == 40, "the pin must be a full sha, not an abbreviation"
+    assert any(t.startswith("branch:") for t in tags)
+
+
+def test_pin_follows_the_branch_you_filed_from(repo_with_change, wired, capsys):
+    subprocess.run(["git", "-C", str(repo_with_change), "checkout", "-q", "-b", "feat/probe"],
+                   check=True)
+    run(["review", "--dry-run"], repo_with_change)
+    assert "branch:feat/probe" in _tags(capsys)
+
+
+def test_detached_head_pins_the_commit_only(repo_with_change, wired, capsys):
+    head = subprocess.run(["git", "-C", str(repo_with_change), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "-C", str(repo_with_change), "checkout", "-q", "--detach"], check=True)
+    run(["review", "--dry-run"], repo_with_change)
+    tags = _tags(capsys)
+    # No branch for a fix to stack onto — the sha alone still pins the review.
+    assert f"rev:{head}" in tags
+    assert not any(t.startswith("branch:") for t in tags)
+
+
+def test_overlong_branch_name_is_dropped_but_the_commit_still_pins(
+        repo_with_change, wired, capsys):
+    long_branch = "feat/" + "x" * 60
+    subprocess.run(["git", "-C", str(repo_with_change), "checkout", "-q", "-b", long_branch],
+                   check=True)
+    run(["review", "--dry-run"], repo_with_change)
+    out = capsys.readouterr()
+    tags = json.loads(out.out)["tags"]
+    assert any(t.startswith("rev:") for t in tags)
+    assert not any(t.startswith("branch:") for t in tags)
+    assert "too long to tag" in out.err
+
+
+def test_no_repo_also_drops_the_pin(repo_with_change, wired, capsys):
+    # Without a repo tag there is no checkout to resolve a sha against, so a pin
+    # would point at nothing.
+    run(["review", "--dry-run", "--no-repo"], repo_with_change)
+    assert _tags(capsys) == []
 
 
 def test_title_defaults_to_the_commit_subject(repo_with_change, wired, capsys):

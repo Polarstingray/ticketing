@@ -113,6 +113,26 @@ def fake_cfg(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _stub_readonly_worktrees(monkeypatch, tmp_path):
+    """do_plan and do_review each build a detached worktree at the ticket's pinned
+    commit, so they read the code the ticket was filed against rather than whatever
+    the checkout is sitting on. These unit tests point at a bare tmp_path, not a real
+    git repo, so stand the helper down to a plain directory. Tests that care about the
+    real git behavior (the resolve_base / pinning tests) call it directly and are
+    unaffected — this only replaces the module-level helper the phase handlers use.
+    """
+    import resolve_tickets as rt
+
+    def _fake(repo, ticket_id, base_ref, kind):
+        wt = tmp_path / f"{kind}-wt-{ticket_id}"
+        wt.mkdir(parents=True, exist_ok=True)
+        return wt
+
+    monkeypatch.setattr(rt, "prepare_readonly_worktree", _fake)
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+
+
+@pytest.fixture(autouse=True)
 def _quiet_logger():
     """Keep the 'resolver' logger from spamming stderr during tests."""
     logger = logging.getLogger("resolver")

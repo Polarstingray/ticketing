@@ -113,8 +113,20 @@ def cmd_review(args) -> int:
         root=root,
         repo=args.repo,
         no_repo=args.no_repo,
+        rev=change.head_sha,
+        branch=change.branch,
         assign=_assignee(args),
     )
+
+    # The pin is a commit, so uncommitted work can't be reproduced from it. The
+    # code_blocks below still carry that content verbatim — but a resolver that goes
+    # looking at surrounding code will see the commit, not the dirty tree. Say so
+    # rather than let the difference surface as confusing review findings.
+    if change.worktree and change.head_sha:
+        print(f"warning: {change.description} includes uncommitted changes, which are "
+              f"captured in the code blocks but are not in commit "
+              f"{change.head_sha[:12]}; the resolver reads the repo at that commit. "
+              f"Commit first for a fully faithful review.", file=sys.stderr)
 
     if args.dry_run:
         print(json.dumps(payload, indent=2))

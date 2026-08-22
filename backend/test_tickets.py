@@ -199,7 +199,8 @@ def test_member_can_edit_free_tags_on_own_ticket(client, make_user):
 
 def test_member_cannot_set_reserved_tags_on_create(client, make_user):
     member = make_user()
-    for bad in ("claude:planning", "repo:secret", "dangerous", "fix", "delegate", "parent:7", "review-by:7"):
+    for bad in ("claude:planning", "repo:secret", "dangerous", "fix", "delegate",
+                "parent:7", "review-by:7", "rev:deadbeef", "branch:main"):
         r = client.post(
             "/tickets", json={"type": "task", "title": "x", "tags": [bad]},
             headers={"X-API-Key": member.key},
@@ -210,7 +211,8 @@ def test_member_cannot_set_reserved_tags_on_create(client, make_user):
 def test_member_cannot_set_reserved_tags_on_update(client, make_user):
     member = make_user()
     t = _create(client, member.key, tags=["bug"])
-    for bad in ("claude:implementing", "repo:x", "dangerous", "fix", "delegate", "parent:7", "review-by:7"):
+    for bad in ("claude:implementing", "repo:x", "dangerous", "fix", "delegate",
+                "parent:7", "review-by:7", "rev:deadbeef", "branch:main"):
         r = client.patch(
             f"/tickets/{t['id']}", json={"tags": ["bug", bad]},
             headers={"X-API-Key": member.key},
@@ -316,15 +318,25 @@ def test_non_member_cannot_edit_tags(client, admin_key, make_user):
 
 
 # --- Tags: `cli`-scoped API keys ---------------------------------------------
-# A scope is carried by the *key*, not the user, and unlocks exactly one reserved
-# prefix (`repo:`). These tests pin that boundary: the scope must not leak to any
-# other control tag, and must not leak to the same user's cookie session.
+# A scope is carried by the *key*, not the user, and unlocks only the reserved
+# prefixes that *aim* the resolver (`repo:`, `rev:`, `branch:`). These tests pin that
+# boundary: the scope must not leak to any other control tag, and must not leak to the
+# same user's cookie session.
 
 def test_cli_scoped_key_can_set_repo_tag(client, make_user, scoped_key):
     member = make_user()
     key = scoped_key(member.id)
     t = _create(client, key, tags=["repo:app", "backend"])
     assert _tags(t) == {"repo:app", "backend"}
+
+
+def test_cli_scoped_key_can_pin_a_commit(client, make_user, scoped_key):
+    """`stingray review` records the commit it was filed against, so the resolver
+    reviews that code instead of whatever the checkout is sitting on."""
+    member = make_user()
+    key = scoped_key(member.id)
+    t = _create(client, key, tags=["repo:app", "rev:" + "a" * 40, "branch:feat/probe"])
+    assert _tags(t) == {"repo:app", "rev:" + "a" * 40, "branch:feat/probe"}
 
 
 def test_cli_scoped_key_cannot_set_other_reserved_tags(client, make_user, scoped_key):
@@ -335,6 +347,18 @@ def test_cli_scoped_key_cannot_set_other_reserved_tags(client, make_user, scoped
         r = client.post(
             "/tickets", json={"type": "task", "title": "x", "tags": [bad]},
             headers={"X-API-Key": key},
+        )
+        assert r.status_code == 422, f"{bad}: {r.text}"
+
+
+def test_unscoped_key_still_cannot_pin_a_commit(client, make_user):
+    """A pin aims the resolver at code to change, so it needs the same trust as
+    `repo:` — an ordinary key must not be able to redirect a fix."""
+    member = make_user()
+    for bad in ("rev:" + "a" * 40, "branch:main"):
+        r = client.post(
+            "/tickets", json={"type": "task", "title": "x", "tags": ["bug", bad]},
+            headers={"X-API-Key": member.key},
         )
         assert r.status_code == 422, f"{bad}: {r.text}"
 

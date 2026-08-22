@@ -2,8 +2,10 @@
 
 Files code-review tickets straight from git, optionally writes their prose with a
 local AI agent, and scaffolds new projects with a ready-made backlog. Every
-ticket it files carries a `repo:<name>` tag, which is what lets you assign it to
-a resolver bot and press **Apply fixes**.
+ticket it files carries a `repo:<name>` tag plus a `rev:<sha>`/`branch:<name>` pin,
+which is what lets you assign it to a resolver bot and press **Apply fixes** — and
+what makes the resolver review *the commit you filed from* rather than whatever
+branch your checkout is on when the sweep runs.
 
 ## Install
 
@@ -22,10 +24,34 @@ storing. Credentials live in `~/.config/stingray/config.toml` at mode 0600.
 > directly (e.g. `http://localhost:8000`) needs no suffix. Printed ticket links
 > drop the `/api` again, since that prefix isn't part of a page address.
 
-> **The key needs the `cli` scope.** `repo:` is a reserved control tag; only an
-> admin can mint a scoped key, from **Profile → API keys**. Without it the CLI
-> can still file tickets, but they won't carry a repo tag and the resolver won't
-> be able to check the code out.
+> **The key needs the `cli` scope.** `repo:`, `rev:` and `branch:` are reserved
+> control tags; only an admin can mint a scoped key, from **Profile → API keys**.
+> Without it the CLI can still file tickets, but they won't carry a repo tag or a
+> commit pin, and the resolver won't be able to check the code out.
+
+## What a review ticket pins
+
+`stingray review` records **where** the code is, not just which repo:
+
+| tag | what it does |
+| --- | --- |
+| `repo:<name>` | which checkout under the resolver's `PROJECTS_ROOT` |
+| `rev:<full-sha>` | the commit reviewed — the resolver checks this out, detached |
+| `branch:<name>` | where a fix stacks, and the base its PR targets |
+
+Without the pin the resolver falls back to the repo's default branch, which is
+wrong in the common case: you branch out, build a feature, file a review, then
+switch branches — and the review reads code the ticket was never about while the
+fix is cut from `main`, landing beside your work instead of on it.
+
+Two things worth knowing:
+
+- **Detached HEAD** files `rev:` with no `branch:`; the review is still exact, but a
+  fix has no branch to stack on and falls back to the default.
+- **Uncommitted changes** are captured in the ticket's code blocks, but they exist
+  in no commit, so `rev:` can't reproduce them — the resolver reads the repo at the
+  pinned commit. `stingray review` warns when this applies. Commit first if you want
+  the surrounding-code reads to match exactly.
 
 ## Commands
 
