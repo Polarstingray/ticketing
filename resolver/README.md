@@ -386,6 +386,10 @@ bot. `digest.py` is the other half — a scheduled pass that looks at the backlo
 a whole* and files one **report ticket**: a short summary paragraph over a markdown
 checklist of every ticket it covered.
 
+The repo's `./install.sh` offers to set this up for you — it mints the admin key
+(see below), writes `DIGEST_ADMIN_KEY` into `resolver/.env`, and drops a
+`digests.toml` to edit. To do it by hand:
+
 ```bash
 cp digests.example.toml digests.toml     # then edit
 .venv/bin/python digest.py --list        # what's configured
@@ -450,6 +454,14 @@ quietly report on the bot's queue rather than the backlog — a digest covering 
 fraction of the tracker is worse than none. `digest.py` therefore refuses to start
 without `DIGEST_ADMIN_KEY`, and warns loudly if that key turns out to belong to a
 non-admin. Mint one as an admin from Profile → API keys.
+
+Note that it is an *extra key for an existing admin*, not a second admin user: a
+scheduled job gets no login of its own, and the key is revocable on its own from
+Profile → API keys without disturbing the admin's primary key. Setting
+`SEED_DIGEST_BOT=true` in the app's `.env` mints exactly that key on boot (named
+`digest`) and writes it to `digest-bootstrap.json` next to the database, which is
+what `install.sh` reads. Seeding is idempotent — once the admin has a `digest`
+key, later boots leave it alone, so revoking it means re-minting by hand.
 
 The summary paragraph comes from one OpenAI-compatible chat completion
 (`DIGEST_API_*`, falling back to `REVIEW_API_*`). It is optional in the strong

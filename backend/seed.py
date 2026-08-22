@@ -122,3 +122,74 @@ def seed_resolver_bot(db: Session) -> None:
         f"[seed] Created resolver bot '{username}' (id={bot.id}) with API key {raw_key}\n"
         f"[seed] Wrote {path} for install.sh; this key is shown only once."
     )
+
+
+DIGEST_KEY_NAME = "digest"
+
+
+def seed_digest_admin_key(db: Session) -> None:
+    """Mint a dedicated admin API key for the daily digest when ``SEED_DIGEST_BOT``
+    is truthy.
+
+    The digest surveys the *whole* backlog, and the API shows non-admins only their
+    own tickets — so unlike the resolver it cannot run on a least-privilege bot user
+    and needs an admin's key. Rather than creating a second admin (which would hand
+    a scheduled job its own privileged login), this mints an extra key named
+    ``digest`` for the admin that already exists, so it can be revoked on its own
+    from Profile → API keys without touching the admin's primary key.
+
+    The raw key is written next to the database as ``digest-bootstrap.json`` (mode
+    600); ``install.sh`` reads it to fill in ``DIGEST_ADMIN_KEY`` in
+    ``resolver/.env``. Idempotent: skips if the admin already has a ``digest`` key.
+    """
+    if not _truthy(os.environ.get("SEED_DIGEST_BOT")):
+        return
+
+    username = os.environ.get("ADMIN_USERNAME", "admin")
+    admin = (
+        db.query(User)
+        .filter(User.username == username, User.role == UserRole.admin.value)
+        .first()
+    )
+    if admin is None:  # fall back to any admin (username may have been changed)
+        admin = (
+            db.query(User)
+            .filter(User.role == UserRole.admin.value)
+            .order_by(User.id)
+            .first()
+        )
+    if admin is None:
+        print("[seed] SEED_DIGEST_BOT is set but no admin user exists — skipping.")
+        return
+
+    existing = (
+        db.query(ApiKey)
+        .filter(ApiKey.user_id == admin.id, ApiKey.name == DIGEST_KEY_NAME)
+        .first()
+    )
+    if existing is not None:
+        return  # already minted on an earlier boot
+
+    raw_key = generate_api_key()
+    db.add(
+        ApiKey(
+            user_id=admin.id,
+            name=DIGEST_KEY_NAME,
+            key_prefix=raw_key[:11],
+            key_hash=hash_api_key(raw_key),
+        )
+    )
+    db.commit()
+
+    path = os.path.join(os.path.dirname(DATABASE_PATH), "digest-bootstrap.json")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"user_id": admin.id, "username": admin.username, "api_key": raw_key}, fh)
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 600 — it holds a live admin key
+    except OSError as exc:  # non-fatal: the key is also printed below
+        print(f"[seed] WARNING: could not write digest bootstrap file: {exc}")
+
+    print(
+        f"[seed] Minted digest admin key for '{admin.username}' (id={admin.id}): {raw_key}\n"
+        f"[seed] Wrote {path} for install.sh; this key is shown only once."
+    )

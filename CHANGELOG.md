@@ -19,7 +19,11 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   pasted straight in. The checklist is always derived from the query results, never from
   model output; the summary prose is optional, so a missing key or a 429 costs the
   paragraph and not the report. Needs `DIGEST_ADMIN_KEY`, an admin key, because the API
-  shows non-admins only tickets they created or are assigned to.
+  shows non-admins only tickets they created or are assigned to. `./install.sh` now
+  offers to set it up alongside the resolver: `SEED_DIGEST_BOT=true` mints a separate
+  API key named `digest` for the existing admin (an extra revocable key, not a second
+  admin user) and writes `digest-bootstrap.json`, which the installer reads to fill in
+  `DIGEST_ADMIN_KEY` in `resolver/.env` and to lay down a `digests.toml` to edit.
 - **Guided projects**: a repository shaped like a class assignment — every non-trivial
   function left as a `STINGRAY-STUB`, one exercise ticket per stub under an epic, and an
   `ASSIGNMENT.md` handout with milestones and a rubric. Two front doors onto the same
