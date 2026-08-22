@@ -465,6 +465,32 @@ fraction of the tracker is worse than none. `digest.py` therefore refuses to sta
 without `DIGEST_ADMIN_KEY`, and warns loudly if that key turns out to belong to a
 non-admin. Mint one as an admin from Profile → API keys.
 
+`install.sh` can do that for you. With `SEED_DIGEST_BOT=true` in the app's `.env`
+(the installer sets it when it generates one), boot mints an extra key named
+`digest` **for the admin that already exists** — not a second admin user, so a
+scheduled job never gets its own privileged login, and the key is revocable on
+its own without disturbing the admin's primary key. The raw value lands in
+`digest-bootstrap.json` next to the database at mode 600, and the installer's
+digest prompt reads it out of the container and writes `DIGEST_ADMIN_KEY` into
+`resolver/.env`. That prompt runs after the resolver one and needs
+`resolver/.env` to exist; skip the resolver and it says so and moves on.
+
+Two consequences worth knowing:
+
+- **Minting is one-way.** Later boots skip an admin that already has a `digest`
+  key, so revoking it does not re-issue one — that is deliberate (a boot loop
+  must not resurrect a credential you just revoked), but it means the
+  replacement is a manual mint from Profile → API keys.
+- **The bootstrap file is written once and never rewritten.** The key is stored
+  hashed, so nothing can re-display it later. Lose the file before running the
+  installer's digest step and the recovery is to revoke the `digest` key and
+  mint a fresh one.
+
+If `ADMIN_USERNAME` no longer names an admin (renamed, or deleted), the key goes
+to the lowest-id admin. On the single-admin deployment the installer targets that
+is the same user under a new name; skipping instead would leave the digest
+silently unconfigured on exactly the installs that have been customised.
+
 The summary paragraph comes from one OpenAI-compatible chat completion
 (`DIGEST_API_*`, falling back to `REVIEW_API_*`). It is optional in the strong
 sense: with no endpoint configured, or on a 429, the digest still files — you lose
