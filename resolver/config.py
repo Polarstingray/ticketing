@@ -259,7 +259,18 @@ class Config:
     logs_dir: Path = field(default_factory=lambda: HERE / "logs")
 
     @classmethod
-    def load(cls) -> "Config":
+    def load(cls, *, api_only: bool = False) -> "Config":
+        """Build the config from the selected .env file.
+
+        ``api_only=True`` is for tools that only talk to the Stingray API and never
+        check a repo out or run an agent — ``digest.py`` today. Those need a URL and
+        their own key, nothing else, so the three requirements that exist for the
+        sweep (``STINGRAY_API_KEY``, ``RESOLVER_BOT_USER_ID``, ``PROJECTS_ROOT``, the
+        last of which must name a real directory) are relaxed to defaults. Without
+        this a host whose whole job is filing a digest against a remote instance
+        would have to invent a bot id and an empty directory to satisfy checks
+        nothing on its path ever reads.
+        """
         # Which env file to load (default `.env`). Lets several resolver identities
         # share this one code dir — e.g. RESOLVER_ENV_FILE=.env.gemini selects the
         # opencode/Gemini bot's config. The selector is read from the real
@@ -271,14 +282,15 @@ class Config:
         _load_env_file(env_path)
         cfg = cls(
             stingray_url=_require("STINGRAY_URL").rstrip("/"),
-            api_key=_require("STINGRAY_API_KEY"),
-            bot_user_id=_bot_user_id(),
+            api_key=_env("STINGRAY_API_KEY") if api_only else _require("STINGRAY_API_KEY"),
+            bot_user_id=0 if api_only else _bot_user_id(),
             env_file=env_file,
             name=os.environ.get("RESOLVER_NAME", "").strip() or _identity_name(env_file),
             # Which agent runner drives plan/implement. "claude" today; a resolver
             # on another identity can set RESOLVER_AGENT to a registered runner.
             agent=os.environ.get("RESOLVER_AGENT", "claude").strip() or "claude",
-            projects_root=Path(_require("PROJECTS_ROOT")).resolve(),
+            projects_root=Path(_env("PROJECTS_ROOT") or HERE).resolve() if api_only
+            else Path(_require("PROJECTS_ROOT")).resolve(),
             repo_map=_parse_repo_map(os.environ.get("REPO_MAP", "")),
             default_repo=os.environ.get("DEFAULT_REPO", "").strip(),
             # Agent CLI binary/model. AGENT_* is the agent-neutral name; the legacy

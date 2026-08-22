@@ -452,3 +452,37 @@ def test_stale_outranks_unassigned_by_default(ctx):
     rotting = ticket(1, assigned_to=None, updated_at=iso(days=70))
     sections, _ = dg.bucket([rotting], list(dg.DEFAULT_SECTIONS), ctx)
     assert [name for name, _, _ in sections] == ["stale"]
+
+
+# --- api_only config ---------------------------------------------------------
+
+def test_api_only_config_needs_only_a_url_and_a_key(monkeypatch, tmp_path):
+    """A host whose whole job is filing a digest against a remote instance has no
+    repos and no bot. Demanding PROJECTS_ROOT (which must be a real directory) and
+    a bot user id would make it invent both to satisfy checks the digest never
+    reads."""
+    import config
+    for var in ("STINGRAY_API_KEY", "RESOLVER_BOT_USER_ID", "CLAUDE_BOT_USER_ID",
+                "PROJECTS_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("RESOLVER_ENV_FILE", str(tmp_path / "absent.env"))
+    monkeypatch.setenv("STINGRAY_URL", "https://tickets.example.com/api")
+    monkeypatch.setenv("DIGEST_ADMIN_KEY", "sk_test")
+
+    cfg = config.Config.load(api_only=True)
+    assert cfg.stingray_url == "https://tickets.example.com/api"
+    assert cfg.digest_admin_key == "sk_test"
+    assert cfg.bot_user_id == 0
+
+
+def test_the_sweep_still_demands_its_own_config(monkeypatch, tmp_path):
+    """Relaxing those requirements must not weaken the resolver's fail-fast."""
+    import config
+    for var in ("STINGRAY_API_KEY", "RESOLVER_BOT_USER_ID", "CLAUDE_BOT_USER_ID",
+                "PROJECTS_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("RESOLVER_ENV_FILE", str(tmp_path / "absent.env"))
+    monkeypatch.setenv("STINGRAY_URL", "https://tickets.example.com/api")
+
+    with pytest.raises(SystemExit, match="STINGRAY_API_KEY"):
+        config.Config.load()
