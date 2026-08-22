@@ -19,11 +19,19 @@ TAG_DELEGATE = "delegate"
 PARENT_PREFIX = "parent:"
 REVIEW_BY_PREFIX = "review-by:"
 REPO_PREFIX = "repo:"
+REV_PREFIX = "rev:"
+BRANCH_PREFIX = "branch:"
+
+# Mirrors backend/schemas.MAX_TAG_LENGTH. A 40-char sha fits `rev:` with room to
+# spare; an unusually long branch name does not, and is dropped rather than sent to
+# be rejected — the sha alone still pins the review.
+MAX_TAG_LENGTH = 50
 
 # Reserved tags, mirrored from backend/control_tags.py so a client can reject an
 # unsettable tag before doing expensive work (diffing a range, running an agent)
 # and before the server's 422.
-RESERVED_PREFIXES = ("claude:", "resolver:", "repo:", "parent:", "review-by:")
+RESERVED_PREFIXES = ("claude:", "resolver:", "repo:", "parent:", "review-by:",
+                     "rev:", "branch:")
 RESERVED_EXACT = frozenset({"dangerous", "fix", "delegate"})
 
 
@@ -44,6 +52,9 @@ def inherited_parent_tags(client, parent_id: int) -> list[str]:
       discover this from the parent itself (ticket read access is restricted to a
       ticket's creator/assignee, and the worker is neither), so without this the
       worker fails with "no repo specified" and bounces the child back.
+    - the parent's ``rev:``/``branch:`` — *where* in that repo. Same reasoning: an
+      unpinned child silently falls back to the remote default branch, so a fan-out
+      from a feature branch would have every sub-task working against main.
 
     We stamp these at creation because the lead bot filing the child *can* read the
     parent (it's assigned to it during the run). Best-effort: empty if the parent
@@ -56,7 +67,8 @@ def inherited_parent_tags(client, parent_id: int) -> list[str]:
     owner = parent.get("created_by")
     if owner:
         tags.append(f"{REVIEW_BY_PREFIX}{owner}")
-    tags += [t for t in (parent.get("tags") or []) if t.startswith(REPO_PREFIX)]
+    tags += [t for t in (parent.get("tags") or [])
+             if t.startswith((REPO_PREFIX, REV_PREFIX, BRANCH_PREFIX))]
     return tags
 
 
@@ -135,6 +147,8 @@ def build_payload(
     root: Path | str = ".",
     repo: str | None = None,
     no_repo: bool = False,
+    rev: str | None = None,
+    branch: str | None = None,
     parent: int | None = None,
     assign: int | None = None,
     warn=_warn,
@@ -145,7 +159,8 @@ def build_payload(
     ``file_ticket.py`` (which keeps a thin Namespace adapter) can share it.
     ``code_block_specs`` are ``PATH:LANG:START-END`` strings read off disk;
     ``code_blocks`` are already-built dicts (what ``stingray review`` produces
-    from a diff). Raises ValueError on bad input.
+    from a diff). ``rev``/``branch`` pin the ticket to the commit it was filed
+    against. Raises ValueError on bad input.
     """
     title = (title or "").strip()
     if not title:
@@ -189,6 +204,23 @@ def build_payload(
             tags.append(derived)
             warn(f"auto-tagged {derived} (from the git checkout at {root}; "
                  f"pass --repo NAME or --no-repo to override)")
+
+    # Where in the repo. Only meaningful alongside a repo tag — without a checkout to
+    # resolve them against, a sha and a branch name point at nothing. A sub-task
+    # inherits its parent's pin (see inherited_parent_tags), so don't add one here.
+    if has_repo_tag(tags) and parent is None:
+        rev = (rev or "").strip()
+        branch = (branch or "").strip()
+        if rev and not any(t.startswith(REV_PREFIX) for t in tags):
+            tags.append(f"{REV_PREFIX}{rev}")
+        if branch and not any(t.startswith(BRANCH_PREFIX) for t in tags):
+            tag = f"{BRANCH_PREFIX}{branch}"
+            if len(tag) <= MAX_TAG_LENGTH:
+                tags.append(tag)
+            else:
+                warn(f"branch name {branch!r} is too long to tag "
+                     f"(>{MAX_TAG_LENGTH} chars with the 'branch:' prefix); pinning "
+                     f"the commit only, so a fix will target the default branch")
 
     payload: dict = {
         "type": type,

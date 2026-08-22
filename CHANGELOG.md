@@ -9,6 +9,20 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 
 ## [Unreleased]
 
+### Fixed
+- **Reviews and fixes now follow the commit a ticket was filed against.** A ticket
+  recorded which repo to work in (`repo:<name>`) but not where in it, so every git
+  decision was made from ambient checkout state: a review read whatever branch was
+  checked out at sweep time, a `/fix` branched off the remote default, and its PR
+  targeted that default. Filing a review from a feature branch and then switching
+  branches meant the review saw code the ticket was never about, and the fix was written
+  against a tree missing the very commits under review. `stingray review` now stamps
+  `rev:<sha>` and `branch:<name>` (both reserved, and covered by the `cli` key scope);
+  the resolver reviews and plans in a detached worktree at that commit, cuts the fix
+  branch from it, and targets the PR at that branch. Tickets without the tags behave
+  exactly as before, and a pin that has become unreachable (force-push, deleted branch)
+  falls back with a comment saying so rather than failing the ticket.
+
 ### Added
 - **Daily digest**: `resolver/digest.py` files one report ticket summarizing a slice of
   the backlog — a short summary paragraph over a checklist grouped into sections
