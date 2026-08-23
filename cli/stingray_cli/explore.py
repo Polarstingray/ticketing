@@ -34,10 +34,6 @@ DEFAULT_TIMEOUT = 900
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\[.*?\])\s*```", re.DOTALL)
 
 
-class ExploreError(Exception):
-    """The agent ran but produced no usable feature list."""
-
-
 def list_repo_files(root: Path) -> list[str]:
     """Tracked, reviewable paths in ``root`` — generated and binary files dropped."""
     out = gitctx.git(root, "ls-files")
@@ -231,6 +227,7 @@ class FeatureBlocks:
 
 
 def build_code_blocks_for_feature(root: Path, files: list[str], rev: str | None, *,
+                                  tracked: set[str] | None = None,
                                   max_files: int = MAX_FILES_PER_FEATURE,
                                   max_block_lines: int = 400) -> FeatureBlocks:
     """Quote the head of each representative file as a ticket code block.
@@ -238,13 +235,20 @@ def build_code_blocks_for_feature(root: Path, files: list[str], rev: str | None,
     Content comes from ``rev`` when we have one, so the blocks match the commit the
     ticket pins itself to rather than a worktree that has since drifted — the same
     rule ``gitctx`` follows for a committed range.
+
+    ``tracked`` is the file list the agent was shown. Restricting to it is what keeps
+    a block honest: ``git show <rev>:<path>`` succeeds for a *directory* too, and
+    happily returns its tree listing, so a feature naming ``backend/routers`` would
+    otherwise be filed quoting a list of filenames as if it were code.
     """
     blocks: list[dict] = []
     skipped: list[str] = []
     for path in files[:max_files]:
-        # Hallucinated path, deleted file, traversal or binary: skip it rather than
-        # file a ticket quoting nothing (or quoting something outside the repo).
-        lines = gitctx._file_lines(root, path, rev) if is_safe_repo_path(path) else None
+        # Hallucinated path, directory, deleted file, traversal or binary: skip it
+        # rather than file a ticket quoting nothing (or quoting something that is not
+        # the file the description talks about).
+        readable = is_safe_repo_path(path) and (tracked is None or path in tracked)
+        lines = gitctx._file_lines(root, path, rev) if readable else None
         if not lines:
             skipped.append(path)
             continue

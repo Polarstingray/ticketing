@@ -134,6 +134,24 @@ def test_hallucinated_paths_are_skipped_and_reported(git_repo, commit):
     assert result.skipped == ["nope.py"]
 
 
+def test_untracked_paths_are_skipped_when_the_file_list_is_known(git_repo, commit):
+    sha = commit("init", {"a.py": "x\n"})
+    (git_repo / "loose.py").write_text("y\n", encoding="utf-8")
+    result = explore.build_code_blocks_for_feature(git_repo, ["loose.py", "a.py"], sha,
+                                                   tracked={"a.py"})
+    assert [b["filename"] for b in result.blocks] == ["a.py"]
+    assert result.skipped == ["loose.py"]
+
+
+def test_a_directory_is_not_quoted_as_if_it_were_a_file(git_repo, commit):
+    """`git show <sha>:<dir>` succeeds and prints a tree listing — never file that."""
+    sha = commit("init", {"pkg/a.py": "x\n"})
+    result = explore.build_code_blocks_for_feature(git_repo, ["pkg"], sha,
+                                                   tracked={"pkg/a.py"})
+    assert result.blocks == []
+    assert result.skipped == ["pkg"]
+
+
 def test_only_the_first_few_files_are_quoted(git_repo, commit):
     files = {f"f{i}.py": "x\n" for i in range(6)}
     sha = commit("init", files)
@@ -280,6 +298,29 @@ def test_partially_unreadable_feature_is_filed_but_warns(
     assert [b["filename"] for b in payloads[0]["code_blocks"]] == ["a.py"]
     assert "invented.py" in out.err
     assert "not quoted" in out.err
+
+
+def test_directory_paths_do_not_become_code_blocks(
+        git_repo, commit, monkeypatch, capsys, isolated_config):
+    commit("init", {"pkg/a.py": "x\n"})
+    _agent_returning(monkeypatch, json.dumps([
+        {"name": "pkg", "title": "Pkg", "files": ["pkg", "pkg/a.py"]},
+    ]))
+    assert cmd_explore.cmd_explore(_args("-C", str(git_repo), "--dry-run")) == 0
+    out = capsys.readouterr()
+    assert [b["filename"] for b in json.loads(out.out)[0]["code_blocks"]] == ["pkg/a.py"]
+    assert "not quoted: pkg" in out.err
+
+
+@pytest.mark.parametrize("flag,value", [("--max-features", "0"), ("--max-block-lines", "0")])
+def test_nonsense_caps_fail_before_the_agent_runs(flag, value, git_repo, commit,
+                                                  monkeypatch, capsys, isolated_config):
+    commit("init", {"a.py": "x\n"})
+    monkeypatch.setattr(cmd_explore, "run_agent",
+                        lambda *a, **kw: pytest.fail("agent should not run"))
+    args = _args("-C", str(git_repo), flag, value, "--dry-run")
+    assert cmd_explore.cmd_explore(args) == 1
+    assert f"{flag} must be at least 1" in capsys.readouterr().err
 
 
 def test_dirty_tree_warns_that_blocks_come_from_the_commit(
