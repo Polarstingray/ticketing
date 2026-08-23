@@ -276,7 +276,8 @@ command ran — mirroring the `/ticket` directive above.
 
 - **One library, every project.** Commands live in `resolver/commands/*.md`, so a
   recurring cross-project task is defined once. The seeded set includes
-  `/security-audit`, `/dependency-audit`, `/test-coverage`, and `/scaffold`.
+  `/security-audit`, `/dependency-audit`, `/test-coverage`, `/codebase-review`,
+  and `/scaffold`.
 - **`type` controls routing.** A command's frontmatter `type: code_review` runs the
   read-only review lifecycle (findings posted, no PR) — even on a ticket whose own
   type is `task`. `type: task` (the default) runs plan → approve → implement.
@@ -292,6 +293,22 @@ command ran — mirroring the `/ticket` directive above.
 
 `/ticket`, `/approve`, `/revise`, and `/review` are reserved control verbs and are
 never treated as standard commands.
+
+### `/codebase-review` — a reading guide for a whole repo
+
+`/codebase-review` maps the target repo into its significant features and files one
+`code_review` child ticket per feature, each `--parent`-linked to the host ticket
+(so it inherits the repo/rev/branch pin and is self-driving). It answers "help me
+understand this codebase" rather than "review this change".
+
+Add the word **`teach`** to the ticket description and the child descriptions are
+written as a mentor explaining the system to a student — the *why* behind each
+design, how the feature wires into the rest of the system, patterns worth
+generalizing, and questions the reader should be able to answer afterwards.
+Naming a single feature in the description scopes the run to that one feature.
+
+The CLI counterpart is `stingray explore [--teach] [--feature NAME]`, which does
+the same discovery locally and POSTs the tickets itself; see `cli/README.md`.
 
 ### `/scaffold` — a guided exercise out of an existing repo
 
