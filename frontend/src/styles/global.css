@@ -13,6 +13,11 @@
   /* Height of the sticky topbar. Anything else that sticks must offset by this
      or it scrolls underneath the nav (see FilterPanel .panel). */
   --topbar-h: 57px;
+  /* The z-index scale. Stacking is a whole-app concern, so layers are named
+     here rather than being picked per component: anything that floats over the
+     page must use one of these, and new layers belong in this list. */
+  --z-sticky: 10; /* sticky chrome: topbar, filter panel */
+  --z-dropdown: 200; /* menus anchored to a control (StatusDropdown) */
 }
 
 * {
