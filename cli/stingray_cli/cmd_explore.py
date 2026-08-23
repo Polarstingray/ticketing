@@ -65,6 +65,11 @@ def cmd_explore(args) -> int:
     if args.max_features < 1:
         print("error: --max-features must be at least 1", file=sys.stderr)
         return 1
+    if args.max_block_lines < 1:
+        # A zero-length block is line_start=1, line_end=0, which the API rejects
+        # (line_end >= 1) — every ticket would 422 after the discovery run.
+        print("error: --max-block-lines must be at least 1", file=sys.stderr)
+        return 1
 
     root = gitctx.repo_root(args.root)
     files = explore.list_repo_files(root)
@@ -127,6 +132,7 @@ def cmd_explore(args) -> int:
     for feature in features:
         result = explore.build_code_blocks_for_feature(
             root, feature["files"], change.head_sha or None,
+            tracked=set(files),
             max_block_lines=args.max_block_lines,
         )
         if not result.blocks:
