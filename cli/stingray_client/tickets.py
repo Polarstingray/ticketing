@@ -72,22 +72,59 @@ def inherited_parent_tags(client, parent_id: int) -> list[str]:
     return tags
 
 
+def _git_line(root: Path, *args: str) -> str:
+    """One line of `git -C root <args>` stdout, or "" on any failure."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), *args],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def main_checkout(root: Path) -> Path | None:
+    """The checkout ``root`` belongs to, resolving a linked worktree to its parent.
+
+    Inside a worktree, ``--show-toplevel`` names the *worktree* directory, so naming a
+    repo after it produces something like ``ticket-42`` — a directory that exists only
+    under the resolver's work dir and resolves to nothing under PROJECTS_ROOT. The
+    common git dir is shared by every worktree and lives in the main checkout, so its
+    parent is the repo they all belong to.
+
+    Returns None when ``root`` is not an ordinary checkout (not a repo at all, or a
+    bare one), leaving the caller to fall back."""
+    common = _git_line(root, "rev-parse", "--git-common-dir")
+    if not common:
+        return None
+    path = Path(common)
+    if not path.is_absolute():
+        # git reports it relative to its own -C directory.
+        path = Path(root) / path
+    try:
+        path = path.resolve()
+    except OSError:
+        return None
+    # <main-checkout>/.git -> <main-checkout>. Anything else (a bare repo, an unusual
+    # layout) is not a name worth guessing from.
+    return path.parent if path.name == ".git" else None
+
+
 def derive_repo_tag(root: Path) -> str | None:
     """`repo:<name>` for the git checkout containing `root`, or None if it isn't one.
 
     The resolver can't check anything out without this tag (see resolve_tickets
     .repo_name_of), and agents filing tickets routinely forget it — so we default it
     from the working tree the ticket is being filed from, the same way a delegated
-    sub-task inherits its parent's repo tag."""
-    try:
-        out = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-                             capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
+    sub-task inherits its parent's repo tag.
+
+    Worktrees are resolved to the checkout they belong to. An agent filing a ticket
+    runs inside the resolver's worktree, and deriving the name from there produced
+    `repo:ticket-42` — a tag that resolves to nothing, so the ticket could never be
+    picked up. See main_checkout."""
+    top = _git_line(root, "rev-parse", "--show-toplevel")
+    if not top:
         return None
-    top = out.stdout.strip()
-    if out.returncode != 0 or not top:
-        return None
-    return f"{REPO_PREFIX}{Path(top).name}"
+    return f"{REPO_PREFIX}{(main_checkout(root) or Path(top)).name}"
 
 
 def has_repo_tag(tags: list[str]) -> bool:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,26 @@ def user_id(value: str) -> int:
         )
 
 
+def _repo_for(args: argparse.Namespace) -> "str | None":
+    """Which repo a ticket filed from this run should name.
+
+    Explicit ``--repo`` wins. Otherwise inherit the repo the resolver run is working
+    on, exported as ``STINGRAY_TICKET_REPO`` by resolve_tickets.process. Falling
+    straight through to cwd-based derivation is what mis-tagged tickets #42/#43: an
+    agent's cwd is the resolver's own checkout or its worktree, neither of which is
+    the project the ticket is about.
+
+    The inherited value is a *default*, so ``--no-repo`` suppresses it exactly as it
+    suppresses derivation — otherwise the opt-out would silently stop working inside
+    a sweep."""
+    explicit = getattr(args, "repo", None)
+    if explicit:
+        return explicit
+    if getattr(args, "no_repo", False):
+        return None
+    return os.environ.get("STINGRAY_TICKET_REPO", "").strip() or None
+
+
 def build_payload(args: argparse.Namespace) -> dict:
     """Validate args and assemble the POST body. Raises ValueError on bad input.
 
@@ -81,7 +102,7 @@ def build_payload(args: argparse.Namespace) -> dict:
         tags=list(args.tag or []),
         code_block_specs=args.code_block or [],
         root=args.root,
-        repo=getattr(args, "repo", None),
+        repo=_repo_for(args),
         no_repo=getattr(args, "no_repo", False),
         rev=getattr(args, "rev", None),
         branch=getattr(args, "branch", None),

@@ -2724,6 +2724,15 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
             fail(client, ticket, f"Cannot resolve target repo: {e}")
         return
 
+    # Any ticket the agent files during this run should name the repo we are working
+    # ON, not the directory the agent happens to be running IN. file_ticket.py reads
+    # this as the default for --repo. Without it, derive_repo_tag saw the resolver's
+    # own checkout (#42 -> `repo:resolver-ticketing`) or its worktree (#43 ->
+    # `repo:ticket-42`, which resolves to nothing), while the ticket they descended
+    # from was correctly tagged `repo:ticketing`.
+    os.environ["STINGRAY_TICKET_REPO"] = (
+        repo_name_of(ticket) or cfg.default_repo or "").strip()
+
     # Quota backoff: skip tickets that are waiting for an API quota window to reset.
     # Once the window expires, strip the tag and fall through to normal dispatch —
     # the preserved phase tag (planning/implementing/reviewing) tells the dispatcher
