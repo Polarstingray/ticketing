@@ -113,6 +113,14 @@ def fake_cfg(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_inherited_ticket_repo(monkeypatch):
+    """`process()` exports STINGRAY_TICKET_REPO so tickets the agent files name the
+    repo the run is working on. It is a real process env var, so without this a test
+    that drives process() leaks it into every later test that derives a repo tag."""
+    monkeypatch.delenv("STINGRAY_TICKET_REPO", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _stub_readonly_worktrees(monkeypatch, tmp_path):
     """do_plan and do_review each build a detached worktree at the ticket's pinned
     commit, so they read the code the ticket was filed against rather than whatever
