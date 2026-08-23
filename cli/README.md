@@ -63,6 +63,10 @@ stingray review --staged             # what you're about to commit
 stingray review --describe           # let a local agent write the prose
 stingray review --assign-bot -y      # file it straight at the resolver
 
+stingray explore                     # a review ticket per feature in this repo
+stingray explore --teach             # …written to teach a student the codebase
+stingray explore --feature auth      # just one named feature
+
 stingray file --type task --title "Flaky retry test" --priority low
 stingray scaffold python-cli ./newproj --intent "a log parser"
 stingray auth status
@@ -104,6 +108,47 @@ rather than sent.
 **It never blocks filing.** No agent installed, a non-zero exit, a timeout, or
 unparseable output all fall back to the commit-derived description with a warning.
 Pass `--require-describe` to make those hard failures instead.
+
+## `explore` — a reading guide for a codebase
+
+`review` files a ticket about a **change**. `explore` files tickets about what is
+already there: it lists the tracked files, hands them to a local agent (same
+`claude`/`opencode` wrapper `--describe` uses), asks it to carve the repo into
+significant features, and files one `code_review` ticket per feature. Each ticket
+quotes up to three representative files and inherits the usual `repo:` / `rev:` /
+`branch:` pin, so the resolver can pick any of them up and review it in place.
+
+- **`--teach`** switches the prose from reviewer-facing to student-facing: the
+  *why* behind the design, how the feature connects to the rest of the system,
+  patterns worth generalizing, the non-obvious details, and a couple of questions
+  the reader should be able to answer afterwards. This is the mode to use on a
+  codebase you are trying to learn rather than audit.
+- **`--feature NAME`** scopes the run to one feature and files a single ticket.
+- **`--max-features N`** caps how many tickets a run can file (default 10).
+
+Unlike `--describe`, there is **no deterministic fallback** here — there is no
+git-derived answer to "what are this codebase's features" — so an agent that is
+missing, times out, or returns unparseable output makes the command fail rather
+than file something invented. Features whose files can't be read (a hallucinated
+path, a deleted file) are dropped with a warning instead of becoming an empty
+ticket. A feature that names *some* unreadable files is still filed — the readable
+ones are worth a ticket — but the ones that got dropped are named on stderr, since
+otherwise the description references code the ticket does not quote. Paths that are
+absolute or traverse out of the repo are refused outright rather than read. `--dry-run`
+prints the payloads and makes no network call, so it is safe to run before you have
+credentials stored (including with `--assign-bot`, which warns rather than fails when
+no bot id is configured).
+
+Two things to know about **provenance**: the agent reads your *working tree*, but
+tickets quote each file as of the last commit, so `explore` warns when the tree is
+dirty — commit first if you want the prose and the quoted code to agree. And the
+agent, model and timeout defaults come from the profile's existing
+`[profile.<name>.describe]` stanza, shared with `review --describe`; override per-run
+with `--agent`, `--timeout`.
+
+The resolver has the same feature as a standard command: put `/codebase-review`
+(optionally with the word `teach`) in a bot-assigned ticket's description and it
+fans out one child ticket per feature. See `resolver/commands/codebase-review.md`.
 
 ## `scaffold` and the stub convention
 
