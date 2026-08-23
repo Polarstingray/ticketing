@@ -70,6 +70,11 @@ def cmd_explore(args) -> int:
         # (line_end >= 1) — every ticket would 422 after the discovery run.
         print("error: --max-block-lines must be at least 1", file=sys.stderr)
         return 1
+    if args.timeout is not None and args.timeout < 1:
+        # `--timeout 0` would otherwise fall through to the default (0 is falsy) and a
+        # negative one blows up inside subprocess, minutes into the run either way.
+        print("error: --timeout must be at least 1", file=sys.stderr)
+        return 1
 
     root = gitctx.repo_root(args.root)
     files = explore.list_repo_files(root)
@@ -122,6 +127,14 @@ def cmd_explore(args) -> int:
         print(f"error: the agent did not identify {what} in {root.name} "
               f"(no usable JSON in its output)", file=sys.stderr)
         return 1
+
+    if args.feature:
+        scoped = explore.select_scoped_feature(features, args.feature)
+        if len(scoped) < len(features):
+            print(f"note: the agent returned {len(features)} features for "
+                  f"--feature {args.feature!r}; filing only {scoped[0]['name']!r}",
+                  file=sys.stderr)
+        features = scoped
 
     if len(features) > args.max_features:
         print(f"note: {len(features)} features found, filing the first "

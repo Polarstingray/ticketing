@@ -103,6 +103,30 @@ def test_duplicate_names_are_deduped():
     assert [f["title"] for f in features] == ["one"]
 
 
+def test_a_bare_string_of_files_is_read_as_one_path():
+    text = '[{"name": "a", "title": "T", "files": "backend/auth.py"}]'
+    assert explore.parse_feature_tickets(text)[0]["files"] == ["backend/auth.py"]
+
+
+def test_a_non_list_non_string_files_value_drops_the_entry():
+    text = '[{"name": "a", "title": "T", "files": {"0": "a.py"}}]'
+    assert explore.parse_feature_tickets(text) == []
+
+
+def test_scoped_run_keeps_the_feature_that_was_asked_for():
+    features = explore.parse_feature_tickets(
+        '[{"name": "tickets", "title": "Ticket CRUD", "files": ["t.py"]},'
+        ' {"name": "auth", "title": "Sessions", "files": ["a.py"]}]')
+    assert [f["name"] for f in explore.select_scoped_feature(features, "AUTH")] == ["auth"]
+
+
+def test_scoped_run_with_no_match_keeps_the_first_feature():
+    features = explore.parse_feature_tickets(
+        '[{"name": "tickets", "title": "Ticket CRUD", "files": ["t.py"]},'
+        ' {"name": "sweep", "title": "Resolver sweep", "files": ["s.py"]}]')
+    assert [f["name"] for f in explore.select_scoped_feature(features, "auth")] == ["tickets"]
+
+
 def test_unknown_priority_is_dropped():
     text = '[{"name": "a", "title": "T", "priority": "urgent", "files": ["a.py"]}]'
     assert explore.parse_feature_tickets(text)[0]["priority"] == ""
@@ -312,7 +336,22 @@ def test_directory_paths_do_not_become_code_blocks(
     assert "not quoted: pkg" in out.err
 
 
-@pytest.mark.parametrize("flag,value", [("--max-features", "0"), ("--max-block-lines", "0")])
+def test_feature_flag_files_one_ticket_even_if_the_agent_maps_everything(
+        git_repo, commit, monkeypatch, capsys, isolated_config):
+    commit("init", {"auth.py": "x\n", "tickets.py": "y\n"})
+    _agent_returning(monkeypatch, json.dumps([
+        {"name": "tickets", "title": "Ticket CRUD", "files": ["tickets.py"]},
+        {"name": "auth", "title": "Sessions", "files": ["auth.py"]},
+    ]))
+    assert cmd_explore.cmd_explore(
+        _args("-C", str(git_repo), "--feature", "auth", "--dry-run")) == 0
+    out = capsys.readouterr()
+    assert [p["title"] for p in json.loads(out.out)] == ["Review: Sessions"]
+    assert "filing only 'auth'" in out.err
+
+
+@pytest.mark.parametrize("flag,value", [("--max-features", "0"), ("--max-block-lines", "0"),
+                                        ("--timeout", "0"), ("--timeout", "-5")])
 def test_nonsense_caps_fail_before_the_agent_runs(flag, value, git_repo, commit,
                                                   monkeypatch, capsys, isolated_config):
     commit("init", {"a.py": "x\n"})

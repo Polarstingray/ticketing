@@ -144,7 +144,7 @@ def parse_feature_tickets(text: str) -> list[dict]:
             continue
         name = str(entry.get("name") or "").strip()
         title = str(entry.get("title") or "").strip()
-        files = [str(f).strip() for f in (entry.get("files") or []) if str(f).strip()]
+        files = _file_list(entry.get("files"))
         if not name or not title or not files:
             continue
         if name in seen:
@@ -163,6 +163,39 @@ def parse_feature_tickets(text: str) -> list[dict]:
             "files": files,
         })
     return features
+
+
+def _file_list(value) -> list[str]:
+    """The entry's ``files``, however the agent chose to spell a one-file feature.
+
+    A single path is routinely returned bare rather than as a list; iterating that
+    string yields one character per "path", which reads as a feature whose every
+    file is unreadable and gets the whole feature dropped with a warning naming
+    ``b``, ``a``, ``c``. Treat a lone string as the list of one it meant.
+    """
+    if isinstance(value, str):
+        value = [value]
+    elif not isinstance(value, list):
+        return []
+    return [str(f).strip() for f in value if str(f).strip()]
+
+
+def select_scoped_feature(features: list[dict], wanted: str) -> list[dict]:
+    """Cut a ``--feature NAME`` run back to the one feature it asked for.
+
+    The prompt asks for exactly one entry, but a model that reads ``--feature auth``
+    as a starting point rather than a scope answers with the whole map — and filing
+    that map is the opposite of what was asked. Prefer a name/title that mentions
+    the requested feature, else keep the agent's first (most confident) entry.
+    """
+    if len(features) <= 1:
+        return features
+    needle = wanted.strip().lower()
+    for feature in features:
+        if needle and (needle in feature["name"].lower()
+                       or needle in feature["title"].lower()):
+            return [feature]
+    return features[:1]
 
 
 def _find_json_list(text: str) -> list | None:
