@@ -128,7 +128,16 @@
   flex-direction: column;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  /* Not `overflow: hidden` — the row's status menu is absolutely positioned and
+     would be clipped by it. The end rows round their own corners instead. */
+}
+.rowLink:first-child .row {
+  border-top-left-radius: var(--radius);
+  border-top-right-radius: var(--radius);
+}
+.rowLink:last-child .row {
+  border-bottom-left-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
 }
 
 .rowLink {
@@ -195,6 +204,29 @@
   gap: 12px;
   flex-shrink: 0;
 }
+/* Shortcut for the last step of a ticket's life, shown only once it's closed. */
+.archiveBtn {
+  width: auto;
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.archiveBtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.archiveBtn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .assignee {
   font-size: 12.5px;
   color: var(--text-dim);

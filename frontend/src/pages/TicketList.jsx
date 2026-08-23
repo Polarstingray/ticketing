@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { PriorityBadge, StatusBadge, TypeBadge } from "../components/Badges";
+import { PriorityBadge, StatusDropdown, TypeBadge } from "../components/Badges";
 import FilterPanel from "../components/FilterPanel";
 import Tag from "../components/Tag";
 import {
@@ -127,6 +127,45 @@ export default function TicketList() {
       localStorage.setItem(DENSITY_KEY, next);
     } catch {
       // Non-persistent is fine; the toggle still works for this session.
+    }
+  }
+
+  // Row-level status/archive edits, so a sweep through the list doesn't mean
+  // opening every ticket. `busyId` keeps a row from being double-submitted while
+  // its request is in flight.
+  const [busyId, setBusyId] = useState(null);
+
+  async function changeStatus(id, status) {
+    setBusyId(id);
+    try {
+      const updated = await api.updateTicket(id, { status });
+      setTickets((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)));
+      setError("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function archive(id) {
+    setBusyId(id);
+    try {
+      await api.archiveTicket(id);
+      if (filters.archived) {
+        // Archived tickets are in scope here, so keep the row and just re-badge it.
+        setTickets((prev) => prev.map((t) => (t.id === id ? { ...t, archived: true } : t)));
+      } else {
+        // It has left the current query — drop it, and keep the count honest so
+        // "Load more" doesn't offer a page that isn't there.
+        setTickets((prev) => prev.filter((t) => t.id !== id));
+        setTotal((n) => Math.max(0, n - 1));
+      }
+      setError("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId(null);
     }
   }
 
@@ -295,7 +334,26 @@ export default function TicketList() {
                   </div>
                   <div className={styles.rowSide}>
                     <PriorityBadge priority={t.priority} />
-                    <StatusBadge status={t.status} />
+                    <StatusDropdown
+                      status={t.status}
+                      disabled={busyId === t.id}
+                      onChange={(s) => changeStatus(t.id, s)}
+                    />
+                    {t.status === "closed" && !t.archived && (
+                      <button
+                        type="button"
+                        className={styles.archiveBtn}
+                        title="Archive ticket"
+                        disabled={busyId === t.id}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          archive(t.id);
+                        }}
+                      >
+                        Archive
+                      </button>
+                    )}
                     <span className={styles.assignee}>{userName(t.assigned_to)}</span>
                     {t.due_date && (
                       <span className={styles.date}>Due {formatDate(t.due_date)}</span>

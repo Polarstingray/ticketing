@@ -12,6 +12,8 @@ vi.mock("../api", () => ({
     listSavedViews: vi.fn(),
     createSavedView: vi.fn(),
     deleteSavedView: vi.fn(),
+    updateTicket: vi.fn(),
+    archiveTicket: vi.fn(),
   },
 }));
 
@@ -71,6 +73,8 @@ beforeEach(() => {
   api.listTickets.mockResolvedValue({ items: [ticket()], total: 1 });
   api.listTicketTags.mockResolvedValue({ items: [] });
   api.listSavedViews.mockResolvedValue([]);
+  api.updateTicket.mockImplementation((id, body) => Promise.resolve(ticket({ id, ...body })));
+  api.archiveTicket.mockResolvedValue({});
   localStorage.clear();
 });
 
@@ -351,6 +355,122 @@ describe("TicketList saved views", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
 
     expect(await screen.findByText(/already exists/i)).toBeInTheDocument();
+  });
+});
+
+describe("TicketList inline status editing", () => {
+  // The status control lives inside the row's <Link>; opening it or picking a
+  // status must edit in place rather than navigate to the ticket.
+  function statusTrigger() {
+    return screen.getByRole("button", { name: /Change status/i });
+  }
+
+  // Scoped to the dropdown: the filter rail's <select>s own options too.
+  function statusMenu() {
+    return screen.queryByRole("listbox");
+  }
+
+  it("opens a menu of every status, colour-coded, without navigating", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(statusTrigger());
+
+    const options = within(statusMenu()).getAllByRole("option");
+    expect(options.map((o) => o.textContent)).toEqual([
+      "Open",
+      "In Review",
+      "Changes Requested",
+      "Resolved",
+      "Closed",
+    ]);
+    // Each option keeps the shared badge palette (a `s_<status>` class).
+    options.forEach((o) => {
+      expect(o.querySelector("span").className).toMatch(/s_/);
+    });
+    expect(currentLocation.pathname).toBe("/tickets");
+  });
+
+  it("PATCHes the chosen status and re-badges the row in place", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(statusTrigger());
+    fireEvent.click(within(statusMenu()).getByRole("option", { name: "Resolved" }));
+
+    await waitFor(() => expect(api.updateTicket).toHaveBeenCalledWith(1, { status: "resolved" }));
+    expect(await screen.findByRole("button", { name: /Status: Resolved/i })).toBeInTheDocument();
+    // Edited in place — no refetch of the list, and no navigation.
+    expect(currentLocation.pathname).toBe("/tickets");
+    expect(statusMenu()).not.toBeInTheDocument();
+  });
+
+  it("closes the menu on an outside click", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(statusTrigger());
+    expect(within(statusMenu()).getAllByRole("option").length).toBe(5);
+
+    fireEvent.mouseDown(document.body);
+
+    expect(statusMenu()).not.toBeInTheDocument();
+  });
+
+  it("surfaces a failed status change instead of showing a stale badge", async () => {
+    api.updateTicket.mockRejectedValue(new Error("Forbidden"));
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(statusTrigger());
+    fireEvent.click(within(statusMenu()).getByRole("option", { name: "Closed" }));
+
+    expect(await screen.findByText("Forbidden")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Status: Open/i })).toBeInTheDocument();
+  });
+});
+
+describe("TicketList archive shortcut", () => {
+  it("offers Archive only on a closed, unarchived ticket", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+    expect(screen.queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+
+    api.listTickets.mockResolvedValue({
+      items: [ticket({ status: "closed", archived: true })],
+      total: 1,
+    });
+    renderList("/tickets?archived=true");
+    await screen.findAllByText("First ticket");
+    expect(screen.queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+  });
+
+  it("archives the ticket and drops it out of the unarchived view", async () => {
+    api.listTickets.mockResolvedValue({ items: [ticket({ status: "closed" })], total: 1 });
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => expect(api.archiveTicket).toHaveBeenCalledWith(1));
+    await waitFor(() => expect(screen.queryByText("First ticket")).not.toBeInTheDocument());
+    // The count follows the row out, so "Load more" isn't offered a phantom page.
+    expect(screen.getByText("(0)")).toBeInTheDocument();
+    expect(currentLocation.pathname).toBe("/tickets");
+  });
+
+  it("keeps the row, re-badged, when archived tickets are in scope", async () => {
+    api.listTickets.mockResolvedValue({ items: [ticket({ status: "closed" })], total: 1 });
+    renderList("/tickets?archived=true");
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => expect(api.archiveTicket).toHaveBeenCalledWith(1));
+    const row = screen.getByText("First ticket").closest("a");
+    await waitFor(() => expect(within(row).getByText("Archived")).toBeInTheDocument());
+    // The shortcut is gone now that it has been used.
+    expect(within(row).queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
   });
 });
 
