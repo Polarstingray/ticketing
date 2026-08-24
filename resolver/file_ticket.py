@@ -69,21 +69,32 @@ def user_id(value: str) -> int:
 def _repo_for(args: argparse.Namespace) -> "str | None":
     """Which repo a ticket filed from this run should name.
 
-    Explicit ``--repo`` wins. Otherwise inherit the repo the resolver run is working
-    on, exported as ``STINGRAY_TICKET_REPO`` by resolve_tickets.process. Falling
-    straight through to cwd-based derivation is what mis-tagged tickets #42/#43: an
-    agent's cwd is the resolver's own checkout or its worktree, neither of which is
-    the project the ticket is about.
+    Inside a sweep the run is authoritative: resolve_tickets.process exports the repo
+    it is working ON as ``STINGRAY_TICKET_REPO``, and that wins over anything the
+    agent passes. Outside a sweep (a human at a shell) the variable is unset and
+    explicit ``--repo`` wins as always.
 
-    The inherited value is a *default*, so ``--no-repo`` suppresses it exactly as it
-    suppresses derivation — otherwise the opt-out would silently stop working inside
-    a sweep."""
+    Deferring to ``--repo`` inside a sweep is what mis-tagged #46: the agent was told
+    to `cd` into the resolver's own checkout to run this script and duly passed
+    ``--repo resolver-ticketing``, so a $16 implement run happened in the resolver's
+    clone — whose origin has no push credentials — and the work was stranded on a
+    local branch. An agent's cwd is never authoritative about which project a ticket
+    is about; the run already knows, and it knew here. (#42/#43 were the same bug via
+    the fall-through to cwd-based derivation.)
+
+    The inherited value is still suppressible: ``--no-repo`` opts out inside a sweep
+    exactly as it opts out of derivation."""
+    inherited = os.environ.get("STINGRAY_TICKET_REPO", "").strip()
     explicit = getattr(args, "repo", None)
-    if explicit:
-        return explicit
     if getattr(args, "no_repo", False):
         return None
-    return os.environ.get("STINGRAY_TICKET_REPO", "").strip() or None
+    if inherited:
+        if explicit and explicit != inherited:
+            print(f"note: ignoring --repo {explicit!r}; this run is working on "
+                  f"{inherited!r} (pass --no-repo to file an untagged ticket)",
+                  file=sys.stderr)
+        return inherited
+    return explicit or None
 
 
 def build_payload(args: argparse.Namespace) -> dict:
@@ -125,7 +136,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--repo", metavar="NAME",
         help="target repo (stored as repo:<NAME>); the resolver needs it to check out "
-             "code. Defaults to the git checkout at --root",
+             "code. Defaults to the git checkout at --root. Ignored inside a resolver "
+             "sweep, which already knows the repo it is working on",
     )
     p.add_argument(
         "--no-repo", action="store_true",
