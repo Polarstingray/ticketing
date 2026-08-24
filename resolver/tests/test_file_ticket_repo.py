@@ -51,11 +51,34 @@ def test_inherits_the_repo_the_resolver_is_working_on(worktree, monkeypatch):
     assert _repo_tags(payload) == ["repo:ticketing"]
 
 
-def test_explicit_repo_still_wins(worktree, monkeypatch):
+def test_the_run_beats_an_agent_supplied_repo(worktree, monkeypatch):
+    """Inside a sweep the run is authoritative — an agent's --repo does NOT win.
+
+    This is #46: the agent was told to `cd` into the resolver's own checkout to run
+    the filer and passed `--repo resolver-ticketing`, so the ticket it filed pointed
+    at the resolver's clone. The whole implement run then happened there and could
+    not be pushed. The run knew it was working on `ticketing`; that has to win.
+    """
     _repo, wt = worktree
     monkeypatch.setenv("STINGRAY_TICKET_REPO", "ticketing")
+    payload = file_ticket.build_payload(_args(wt, repo="resolver-ticketing"))
+    assert _repo_tags(payload) == ["repo:ticketing"]
+
+
+def test_explicit_repo_wins_outside_a_sweep(worktree, monkeypatch):
+    """A human at a shell has no STINGRAY_TICKET_REPO, so --repo is authoritative."""
+    _repo, wt = worktree
+    monkeypatch.delenv("STINGRAY_TICKET_REPO", raising=False)
     payload = file_ticket.build_payload(_args(wt, repo="other"))
     assert _repo_tags(payload) == ["repo:other"]
+
+
+def test_no_repo_opts_out_even_with_an_explicit_repo(worktree, monkeypatch):
+    """--no-repo is the opt-out for both inputs; neither can resurrect a tag."""
+    _repo, wt = worktree
+    monkeypatch.setenv("STINGRAY_TICKET_REPO", "ticketing")
+    payload = file_ticket.build_payload(_args(wt, repo="other", no_repo=True))
+    assert _repo_tags(payload) == []
 
 
 def test_falls_back_to_derivation_when_unset(worktree, monkeypatch):
