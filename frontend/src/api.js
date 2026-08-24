@@ -113,6 +113,8 @@ export const api = {
   unreadCount: () => request("GET", "/notifications/unread_count"),
   markNotificationRead: (id) => request("POST", `/notifications/${id}/read`),
   markAllNotificationsRead: () => request("POST", "/notifications/read_all"),
+  markTicketNotificationsRead: (ticketId) =>
+    request("POST", `/notifications/read_by_ticket/${ticketId}`),
   deleteNotification: (id) => request("DELETE", `/notifications/${id}`),
   bulkDeleteNotifications: (ids) =>
     request("POST", "/notifications/bulk_delete", { ids }),

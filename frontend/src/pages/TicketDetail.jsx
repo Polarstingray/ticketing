@@ -23,12 +23,14 @@ import {
   isReservedTag,
   totalTokens,
 } from "../constants";
+import { useNotifications } from "../notifications/NotificationsContext";
 import styles from "../styles/TicketDetail.module.css";
 
 export default function TicketDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { refresh: refreshNotifications } = useNotifications();
 
   const [ticket, setTicket] = useState(null);
   const [users, setUsers] = useState([]);
@@ -67,6 +69,15 @@ export default function TicketDetail() {
       setActivity(a);
       setAgentRuns(runs);
       setRollup(roll);
+      // Opening the ticket is the "read" gesture: clear its unread notifications
+      // so the list-view dot goes away. Fired without awaiting — the page must
+      // not wait on it, and a failure must not surface as a page error.
+      Promise.resolve()
+        .then(() => api.markTicketNotificationsRead(id))
+        .then(refreshNotifications)
+        .catch(() => {
+          /* non-critical */
+        });
     } catch (e) {
       setError(e.message);
     } finally {

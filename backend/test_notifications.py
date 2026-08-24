@@ -227,6 +227,43 @@ def test_mark_read_and_read_all(client, admin_key, make_user):
     assert client.get("/notifications/unread_count", headers=_hdr(frank_key)).json()["unread_count"] == 0
 
 
+def test_read_by_ticket_clears_only_that_ticket(client, admin_key, make_user):
+    nora_id, nora_key = make_user("nora")
+    one = _create_ticket(client, admin_key, title="RBT one", assigned_to=nora_id)
+    _create_ticket(client, admin_key, title="RBT two", assigned_to=nora_id)
+    assert client.get("/notifications/unread_count", headers=_hdr(nora_key)).json()["unread_count"] == 2
+
+    r = client.post(f"/notifications/read_by_ticket/{one['id']}", headers=_hdr(nora_key))
+    assert r.status_code == 200, r.text
+    assert r.json()["unread_count"] == 1
+
+    unread = client.get("/notifications?unread=true", headers=_hdr(nora_key)).json()
+    assert [n["ticket_id"] for n in unread["items"]] != [one["id"]]
+    assert all(n["ticket_id"] != one["id"] for n in unread["items"])
+
+
+def test_read_by_ticket_leaves_other_users_alone(client, admin_key, make_user):
+    olly_id, olly_key = make_user("olly")
+    pia_id, pia_key = make_user("pia")
+    ticket = _create_ticket(client, admin_key, title="Shared", assigned_to=olly_id)
+    # Pia gets a notification about the same ticket by being assigned it next.
+    r = client.patch(
+        f"/tickets/{ticket['id']}", headers=_hdr(admin_key), json={"assigned_to": pia_id}
+    )
+    assert r.status_code == 200, r.text
+
+    client.post(f"/notifications/read_by_ticket/{ticket['id']}", headers=_hdr(olly_key))
+    assert client.get("/notifications/unread_count", headers=_hdr(pia_key)).json()["unread_count"] == 1
+
+
+def test_read_by_ticket_unknown_ticket_is_noop(client, admin_key, make_user):
+    quinn_id, quinn_key = make_user("quinn")
+    _create_ticket(client, admin_key, title="Keep", assigned_to=quinn_id)
+    r = client.post("/notifications/read_by_ticket/99999", headers=_hdr(quinn_key))
+    assert r.status_code == 200
+    assert r.json()["unread_count"] == 1
+
+
 def test_unread_filter(client, admin_key, make_user):
     gina_id, gina_key = make_user("gina")
     _create_ticket(client, admin_key, title="U1", assigned_to=gina_id)

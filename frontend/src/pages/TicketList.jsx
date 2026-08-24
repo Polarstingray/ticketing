@@ -19,6 +19,7 @@ import {
   filtersToQuery,
   paramsToFilters,
 } from "../filters";
+import { useNotifications } from "../notifications/NotificationsContext";
 import styles from "../styles/TicketList.module.css";
 
 const PAGE_SIZE = 50;
@@ -44,6 +45,10 @@ export default function TicketList() {
   // to keep in sync with it. Derive on every render; it's cheap.
   const filters = useMemo(() => paramsToFilters(searchParams), [searchParams]);
   const currentQuery = searchParams.toString();
+
+  // Rows whose ticket has an unread comment notification get a dot; the set is
+  // polled centrally by the notifications provider.
+  const { unreadTicketIds } = useNotifications();
 
   const [tickets, setTickets] = useState([]);
   const [total, setTotal] = useState(0);
@@ -336,6 +341,14 @@ export default function TicketList() {
                 >
                   <div className={styles.rowMain}>
                     <div className={styles.rowTitle}>
+                      {unreadTicketIds?.has(t.id) && (
+                        <span
+                          className={styles.notifDot}
+                          role="status"
+                          aria-label="Unread comment"
+                          title="Unread comment"
+                        />
+                      )}
                       <span className={styles.id}>#{t.id}</span>
                       {t.title}
                     </div>

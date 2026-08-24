@@ -173,6 +173,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Unread-comment marker on a row, cleared when the ticket is opened. */
+.notifDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex-shrink: 0;
+}
 .id {
   color: var(--text-dim);
   font-size: 12.5px;

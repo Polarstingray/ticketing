@@ -17,6 +17,18 @@ vi.mock("../api", () => ({
   },
 }));
 
+// The unread-comment dots come from the notifications provider; the tests drive
+// that set directly rather than standing up polling + auth.
+const notifications = vi.hoisted(() => ({ unreadTicketIds: new Set() }));
+
+vi.mock("../notifications/NotificationsContext", () => ({
+  useNotifications: () => ({
+    unreadCount: notifications.unreadTicketIds.size,
+    unreadTicketIds: notifications.unreadTicketIds,
+    refresh: vi.fn(),
+  }),
+}));
+
 function ticket(overrides = {}) {
   return {
     id: 1,
@@ -75,6 +87,7 @@ beforeEach(() => {
   api.listSavedViews.mockResolvedValue([]);
   api.updateTicket.mockImplementation((id, body) => Promise.resolve(ticket({ id, ...body })));
   api.archiveTicket.mockResolvedValue(null);
+  notifications.unreadTicketIds = new Set();
   localStorage.clear();
 });
 
@@ -468,6 +481,28 @@ describe("TicketList row edits", () => {
 
     resolveUpdate(ticket({ status: "resolved" }));
     await waitFor(() => expect(screen.getByRole("button", { name: /Change status/i })).toBeEnabled());
+  });
+});
+
+describe("TicketList unread-comment dot", () => {
+  it("marks only the rows with an unread notification", async () => {
+    notifications.unreadTicketIds = new Set([2]);
+    api.listTickets.mockResolvedValue({
+      items: [ticket({ id: 1 }), ticket({ id: 2, title: "Second ticket" })],
+      total: 2,
+    });
+    renderList();
+
+    const unread = (await screen.findByText("Second ticket")).closest("a");
+    const read = screen.getByText("First ticket").closest("a");
+    expect(within(unread).getByLabelText("Unread comment")).toBeInTheDocument();
+    expect(within(read).queryByLabelText("Unread comment")).toBeNull();
+  });
+
+  it("shows no dots when nothing is unread", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+    expect(screen.queryByLabelText("Unread comment")).toBeNull();
   });
 });
 

@@ -92,6 +92,33 @@ def mark_all_read(
     return UnreadCount(unread_count=0)
 
 
+@router.post("/read_by_ticket/{ticket_id}", response_model=UnreadCount)
+def mark_read_by_ticket(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Clear the caller's unread notifications for one ticket.
+
+    Called when a ticket detail page is opened, so the list-view dot for that
+    ticket goes away without the client having to enumerate notification ids.
+    Scoped to the caller like every other route here; an unknown ticket id is
+    simply a no-op rather than a 404, since ``ticket_id`` is a snapshot and may
+    point at a deleted ticket.
+    """
+    (
+        db.query(Notification)
+        .filter(
+            Notification.user_id == user.id,
+            Notification.ticket_id == ticket_id,
+            Notification.read == False,  # noqa: E712
+        )
+        .update({Notification.read: True}, synchronize_session=False)
+    )
+    db.commit()
+    return UnreadCount(unread_count=_unread_count(db, user.id))
+
+
 @router.post("/bulk_delete")
 def bulk_delete(
     payload: BulkDeleteRequest,

@@ -11,8 +11,20 @@ vi.mock("../auth/AuthContext", () => ({
   useAuth: () => ({ user: authState.user }),
 }));
 
+// The page marks its notifications read on load; the context is stubbed so the
+// test doesn't need the polling provider.
+const notifications = vi.hoisted(() => ({ refresh: vi.fn() }));
+vi.mock("../notifications/NotificationsContext", () => ({
+  useNotifications: () => ({
+    unreadCount: 0,
+    unreadTicketIds: new Set(),
+    refresh: notifications.refresh,
+  }),
+}));
+
 vi.mock("../api", () => ({
   api: {
+    markTicketNotificationsRead: vi.fn(),
     listUsers: vi.fn(),
     getTicket: vi.fn(),
     listComments: vi.fn(),
@@ -70,6 +82,7 @@ beforeEach(() => {
   api.listActivity.mockResolvedValue([]);
   api.listAgentRuns.mockResolvedValue([]);
   api.costRollup.mockResolvedValue(null);
+  api.markTicketNotificationsRead.mockResolvedValue({ unread_count: 0 });
 });
 
 afterEach(() => {
@@ -276,5 +289,27 @@ describe("TicketDetail markdown rendering", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Write" }));
     expect(screen.getByPlaceholderText("Add a comment…")).toHaveValue("a **bold** draft");
+  });
+});
+
+describe("TicketDetail notifications", () => {
+  it("clears the ticket's unread notifications once it loads", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    renderDetail();
+    await waitForLoaded();
+
+    await waitFor(() =>
+      expect(api.markTicketNotificationsRead).toHaveBeenCalledWith("42")
+    );
+    expect(notifications.refresh).toHaveBeenCalled();
+  });
+
+  it("still renders the ticket when marking read fails", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.markTicketNotificationsRead.mockRejectedValue(new Error("nope"));
+    renderDetail();
+
+    await waitForLoaded();
+    expect(screen.queryByText("nope")).toBeNull();
   });
 });
