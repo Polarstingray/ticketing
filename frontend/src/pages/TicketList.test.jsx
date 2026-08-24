@@ -12,6 +12,8 @@ vi.mock("../api", () => ({
     listSavedViews: vi.fn(),
     createSavedView: vi.fn(),
     deleteSavedView: vi.fn(),
+    updateTicket: vi.fn(),
+    archiveTicket: vi.fn(),
   },
 }));
 
@@ -71,6 +73,8 @@ beforeEach(() => {
   api.listTickets.mockResolvedValue({ items: [ticket()], total: 1 });
   api.listTicketTags.mockResolvedValue({ items: [] });
   api.listSavedViews.mockResolvedValue([]);
+  api.updateTicket.mockImplementation((id, body) => Promise.resolve(ticket({ id, ...body })));
+  api.archiveTicket.mockResolvedValue(null);
   localStorage.clear();
 });
 
@@ -351,6 +355,119 @@ describe("TicketList saved views", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
 
     expect(await screen.findByText(/already exists/i)).toBeInTheDocument();
+  });
+});
+
+describe("TicketList row edits", () => {
+  function statusTrigger(name = /Change status/i) {
+    return screen.getByRole("button", { name });
+  }
+
+  // Scoped to the open menu: the filter panel's <select>s are full of <option>s
+  // too, so an unscoped role="option" query matches those as well.
+  function menuOption(name) {
+    return within(screen.getByRole("listbox")).getByRole("option", { name });
+  }
+
+  it("changes a status from the row and merges the response without refetching", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+    const listCalls = api.listTickets.mock.calls.length;
+
+    fireEvent.click(statusTrigger());
+    fireEvent.click(menuOption("Resolved"));
+
+    await waitFor(() => expect(api.updateTicket).toHaveBeenCalledWith(1, { status: "resolved" }));
+    // The row re-badges itself off the response; the list is not re-queried.
+    expect(await screen.findByRole("button", { name: /Status: Resolved/i })).toBeInTheDocument();
+    expect(api.listTickets.mock.calls.length).toBe(listCalls);
+  });
+
+  it("shows a failed status change in the error banner and leaves the badge alone", async () => {
+    api.updateTicket.mockRejectedValue(new Error("Status change rejected"));
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(statusTrigger());
+    fireEvent.click(menuOption("Closed"));
+
+    expect(await screen.findByText("Status change rejected")).toBeInTheDocument();
+    expect(statusTrigger(/Status: Open/i)).toBeInTheDocument();
+  });
+
+  it("offers Archive only on a closed ticket that isn't archived yet", async () => {
+    api.listTickets.mockResolvedValue({ items: [ticket({ status: "open" })], total: 1 });
+    const { unmount } = renderList();
+    await screen.findByText("First ticket");
+    expect(screen.queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+    unmount();
+
+    api.listTickets.mockResolvedValue({
+      items: [ticket({ status: "closed", archived: true })],
+      total: 1,
+    });
+    renderList();
+    await screen.findByText("First ticket");
+    expect(screen.queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+  });
+
+  it("drops an archived row and keeps the total honest when archived is out of scope", async () => {
+    api.listTickets.mockResolvedValue({
+      items: [ticket({ status: "closed" }), ticket({ id: 2, title: "Second ticket" })],
+      total: 2,
+    });
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => expect(api.archiveTicket).toHaveBeenCalledWith(1));
+    await waitFor(() => expect(screen.queryByText("First ticket")).not.toBeInTheDocument());
+    expect(screen.getByText("(1)")).toBeInTheDocument();
+    expect(screen.getByText("Second ticket")).toBeInTheDocument();
+  });
+
+  it("keeps the row and re-badges it when archived tickets are in scope", async () => {
+    api.listTickets.mockResolvedValue({ items: [ticket({ status: "closed" })], total: 1 });
+    renderList("/tickets?archived=true");
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => expect(api.archiveTicket).toHaveBeenCalledWith(1));
+    const row = screen.getByText("First ticket").closest("a");
+    expect(within(row).getByText("Archived")).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+    expect(screen.getByText("(1)")).toBeInTheDocument();
+  });
+
+  it("surfaces a failed archive instead of dropping the row", async () => {
+    api.archiveTicket.mockRejectedValue(new Error("Archive failed"));
+    api.listTickets.mockResolvedValue({ items: [ticket({ status: "closed" })], total: 1 });
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    expect(await screen.findByText("Archive failed")).toBeInTheDocument();
+    expect(screen.getByText("First ticket")).toBeInTheDocument();
+  });
+
+  it("disables the row's controls while its request is in flight", async () => {
+    let resolveUpdate;
+    api.updateTicket.mockReturnValue(new Promise((r) => { resolveUpdate = r; }));
+    api.listTickets.mockResolvedValue({ items: [ticket({ status: "closed" })], total: 1 });
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(statusTrigger());
+    fireEvent.click(menuOption("Resolved"));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Archive" })).toBeDisabled());
+    expect(statusTrigger()).toBeDisabled();
+
+    resolveUpdate(ticket({ status: "resolved" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Change status/i })).toBeEnabled());
   });
 });
 
