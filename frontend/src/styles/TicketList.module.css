@@ -123,12 +123,14 @@
   color: var(--text);
 }
 
+/* No `overflow: hidden` here: it would clip the StatusDropdown menu, which is
+   absolutely positioned out of its row. The end rows round their own corners
+   instead, which is all the clipping was doing for us. */
 .list {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
 }
 
 .rowLink {
@@ -136,6 +138,14 @@
 }
 .rowLink:last-child {
   border-bottom: none;
+}
+.rowLink:first-child .row {
+  border-top-left-radius: var(--radius);
+  border-top-right-radius: var(--radius);
+}
+.rowLink:last-child .row {
+  border-bottom-left-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
 }
 
 .row {
@@ -195,6 +205,25 @@
   gap: 12px;
   flex-shrink: 0;
 }
+.archiveBtn {
+  width: auto;
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.archiveBtn:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--text);
+}
+.archiveBtn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .assignee {
   font-size: 12.5px;
   color: var(--text-dim);

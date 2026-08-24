@@ -15,7 +15,8 @@
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
-  z-index: 10;
+  /* Named layer rather than a bare number — see the z-index scale in global.css. */
+  z-index: var(--z-sticky);
 }
 
 .brand {
