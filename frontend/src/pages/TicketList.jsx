@@ -19,6 +19,7 @@ import {
   filtersToQuery,
   paramsToFilters,
 } from "../filters";
+import { useNotifications } from "../notifications/NotificationsContext";
 import styles from "../styles/TicketList.module.css";
 
 const PAGE_SIZE = 50;
@@ -40,6 +41,9 @@ function loadDensity() {
 
 export default function TicketList() {
   const [searchParams, setSearchParams] = useSearchParams();
+  // Tickets someone else has commented on that the current user hasn't read yet;
+  // the provider polls this, so the list just reads it.
+  const { unreadTicketIds } = useNotifications();
   // The URL is the source of truth for filters, so there is no filter useState
   // to keep in sync with it. Derive on every render; it's cheap.
   const filters = useMemo(() => paramsToFilters(searchParams), [searchParams]);
@@ -336,6 +340,14 @@ export default function TicketList() {
                 >
                   <div className={styles.rowMain}>
                     <div className={styles.rowTitle}>
+                      {unreadTicketIds?.has(t.id) && (
+                        <span
+                          className={styles.notifDot}
+                          role="img"
+                          aria-label="Unread comment"
+                          title="Unread comment"
+                        />
+                      )}
                       <span className={styles.id}>#{t.id}</span>
                       {t.title}
                     </div>
