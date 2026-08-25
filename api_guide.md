@@ -395,6 +395,93 @@ Response `204`.
 
 ---
 
+### Webhooks
+
+Register an HTTPS endpoint that receives ticket events, and read the log of what was
+delivered to it. **Delivery execution ships separately** — these endpoints store
+subscriptions and the delivery log; nothing is sent yet.
+
+Every route is scoped to the authenticated user (an admin may reach any webhook);
+someone else's id returns `404`, not `403`.
+
+**The signing secret is shown exactly once.** It is returned by `POST /webhooks` and by
+`POST /webhooks/{id}/rotate-secret`, and by nothing else — every read path carries only
+`secret_prefix` (its first 8 characters) as a label. Unlike an API key it is stored in
+plaintext, because the delivery worker must be able to *sign* with it; the protection is
+that it is never readable back. Lose it and you rotate.
+
+#### URL rules (SSRF)
+
+A webhook is an outbound request the server makes to an address you chose, so the URL is
+checked at creation, at update, and again immediately before each delivery (DNS can
+change in between). A rejection is a `422` whose `detail` begins `webhook URL rejected:`
+and names the reason. Rejected:
+
+- any scheme but `https` (plain `http` only when the server sets `ALLOW_INSECURE_WEBHOOKS=1`);
+- userinfo (`https://user:pass@…`), a fragment, a URL over 2000 chars;
+- any port other than 80, 443, 8080, 8443;
+- a host that **is**, or **resolves to**, a loopback, private, link-local (including the
+  cloud metadata addresses `169.254.169.254` / `fd00:ec2::254`), unique-local, multicast,
+  reserved or unspecified address — *every* resolved address must pass, not just the
+  first, which is what closes DNS rebinding;
+- hosts named `localhost`, `metadata.google.internal`, or ending `.internal` / `.local`;
+- a host that does not resolve at all.
+
+#### `GET /webhooks`
+Your webhooks, newest first. Admins may pass `?user_id=` to scope to another user.
+
+#### `POST /webhooks`
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | yes | 1–60 chars |
+| `url` | string | yes | see [URL rules](#url-rules-ssrf) |
+| `event_types` | string[] | no | subset of the [webhook event types](#enumerations); `[]` (default) = all |
+| `tag_filter` | string[] | no | max 20; the ticket must carry **any** of them. `[]` = every ticket |
+| `active` | bool | no | defaults `true` |
+
+```bash
+curl -s -X POST "$BASE/webhooks" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"ci","url":"https://example.com/hooks/stingray",
+       "event_types":["ticket.created"],"tag_filter":["repo:my-app"]}'
+```
+Response `201`: the webhook **plus** a one-time `secret`. `422` past 20 webhooks, or on a
+rejected URL.
+
+#### `GET /webhooks/{id}` · `PATCH /webhooks/{id}` · `DELETE /webhooks/{id}`
+`PATCH` is partial (`name`, `url`, `event_types`, `tag_filter`, `active`); a new `url` is
+re-validated. Re-activating a paused webhook resets `consecutive_failures` to 0. `DELETE`
+returns `204` and removes its delivery log with it.
+
+#### `POST /webhooks/{id}/rotate-secret`
+Response `200`: `{ "id": 1, "secret": "…", "secret_prefix": "…" }` — the new secret,
+shown once. The old one stops signing immediately.
+
+#### `GET /webhooks/{id}/deliveries`
+The delivery log, newest first. Params: `state` (a [delivery state](#enumerations)),
+`ticket_id`, `limit` (default 50, max 200), `offset`.
+
+**Visibility:** rows are filtered against what the webhook's **owner** may see — the same
+boundary as `GET /tickets` — so a member's webhook can never surface a ticket they could
+not open. This is keyed on the owner deliberately: an admin reading a member's log sees
+only what the member could.
+
+Response `200`: `{ items, total, limit, offset }`, each item:
+```json
+{ "id": 11, "webhook_id": 1, "event_id": 340, "event_type": "ticket.created",
+  "ticket_id": 42, "attempt_count": 2, "next_attempt_at": null, "status_code": 500,
+  "response_snippet": "upstream error", "error": "", "state": "failed",
+  "created_at": "...", "updated_at": "..." }
+```
+
+#### `POST /webhooks/{id}/deliveries/{delivery_id}/redeliver`
+Re-arms a delivery for another attempt: `state` back to `pending`, `next_attempt_at` to
+now, `status_code`/`error` cleared. `attempt_count` is **kept** — it is history. The URL
+is re-validated first (`422` if it no longer passes). Returns the delivery. Nothing is
+sent by this call; the delivery worker does that.
+
+---
+
 ### Users
 
 #### `GET /users` — **admin only**
@@ -600,3 +687,7 @@ The **self** shape (returned from `/auth/me`, `/auth/login`, user create/update)
 - **status:** `open`, `in_review`, `changes_requested`, `resolved`, `closed`
 - **priority:** `low`, `medium`, `high`, `critical`
 - **role:** `admin`, `member`
+- **webhook event type:** `ticket.created`, `ticket.assigned`, `ticket.status_changed`,
+  `ticket.tagged`, `comment.created`, `agent_run.finished`
+- **delivery state:** `pending`, `delivering`, `succeeded`, `failed` (retries exhausted),
+  `skipped` (never sent — e.g. the URL failed re-validation)
