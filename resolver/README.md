@@ -410,6 +410,48 @@ See [`stingray-resolver.service`](./stingray-resolver.service) and
 Bound a busy sweep with `--max-tickets N` (or `MAX_TICKETS_PER_SWEEP`) so one
 tick does a fixed amount of work under the lock and the next tick continues.
 
+## Push wakeup (optional)
+
+With only the timer, worst-case pickup latency is the whole interval — a ticket
+assigned one second after a sweep waits out the next one. `listen.py` closes that
+to about a second: it holds an SSE connection to `GET /api/events/stream` and runs
+`systemctl start --no-block stingray-resolver.service` when a ticket is assigned
+to the bot.
+
+The **resolver dials out**, rather than Stingray posting a webhook in. The
+documented topology is Stingray on a server and the resolver on a dev station,
+which is behind NAT and cannot receive an inbound request; an outbound connection
+needs no open port and no tunnel.
+
+It **pokes the unit instead of calling `sweep()`**. systemd already serializes
+starts of a unit and merges a start into a job already queued, so this gets
+no-overlap and burst debouncing for free — and `resolve_tickets.py` needs no
+changes at all. The listener additionally holds a 2-second window so a bulk
+reassignment becomes one start rather than one per ticket.
+
+```bash
+sed "s#/opt/ticketing/resolver#$(pwd)#" stingray-resolver-listen.service \
+  | sudo tee /etc/systemd/system/stingray-resolver-listen.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now stingray-resolver-listen.service
+journalctl -u stingray-resolver-listen -f
+
+.venv/bin/python listen.py --dry-run   # follow the stream, log pokes, start nothing
+.venv/bin/python listen.py --once      # exit after the first poke (smoke test)
+```
+
+**Keep the timer.** This is an optimisation, not a replacement: push covers only
+what emits an event, so the timer still has to catch a missed event, a listener
+that is down, and tickets that become actionable with no event at all (a due date
+passing). `stingray-resolver.timer` ships at `OnUnitActiveSec=30min` for that
+role — if you are *not* running the listener, drop it back to `10min`, since then
+the interval is the pickup latency. A redundant wakeup is free either way; the
+sweep is idempotent.
+
+A dropped stream reconnects with backoff (2s, doubling, capped at 5min) and
+resumes from the last event id it saw, so an outage degrades to the timer's
+cadence rather than to a stalled resolver.
+
 ## Daily digest (optional)
 
 Everything above is **reactive**: the resolver works whatever was assigned to its
