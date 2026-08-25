@@ -21,7 +21,15 @@ vi.mock("../api", () => ({
     costRollup: vi.fn(),
     updateTicket: vi.fn(),
     addComment: vi.fn(),
+    markTicketNotificationsRead: vi.fn(),
   },
+}));
+
+// Opening a ticket clears its unread notifications; the refresh spy lets the
+// tests assert the badge/dot state is re-pulled afterwards.
+const notifState = vi.hoisted(() => ({ refresh: vi.fn() }));
+vi.mock("../notifications/NotificationsContext", () => ({
+  useNotifications: () => ({ unreadCount: 0, unreadTicketIds: new Set(), refresh: notifState.refresh }),
 }));
 
 const CREATOR = { id: 10 };
@@ -70,6 +78,7 @@ beforeEach(() => {
   api.listActivity.mockResolvedValue([]);
   api.listAgentRuns.mockResolvedValue([]);
   api.costRollup.mockResolvedValue(null);
+  api.markTicketNotificationsRead.mockResolvedValue({ unread_count: 0 });
 });
 
 afterEach(() => {
@@ -276,5 +285,26 @@ describe("TicketDetail markdown rendering", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Write" }));
     expect(screen.getByPlaceholderText("Add a comment…")).toHaveValue("a **bold** draft");
+  });
+});
+
+describe("TicketDetail unread notifications", () => {
+  it("marks the ticket's notifications read on load and refreshes the badge", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    renderDetail();
+    await waitForLoaded();
+
+    await waitFor(() => expect(api.markTicketNotificationsRead).toHaveBeenCalledWith("42"));
+    await waitFor(() => expect(notifState.refresh).toHaveBeenCalled());
+  });
+
+  it("still renders the page when the mark-read call fails", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.markTicketNotificationsRead.mockRejectedValue(new Error("boom"));
+    renderDetail();
+    await waitForLoaded();
+
+    expect(screen.queryByText(/boom/i)).not.toBeInTheDocument();
+    expect(notifState.refresh).not.toHaveBeenCalled();
   });
 });
