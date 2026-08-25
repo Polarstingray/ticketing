@@ -128,6 +128,18 @@ def _migrate_outbox(engine: Engine) -> None:
     Outbox.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_webhooks(engine: Engine) -> None:
+    """webhooks + webhook_deliveries tables — added with webhook subscriptions.
+
+    Brand-new tables, so `create_all` builds them on a fresh DB; this backfills
+    them on databases that predate the models. `checkfirst=True` no-ops when a
+    table already exists (idempotent). Order matters: webhook_deliveries carries
+    a foreign key onto webhooks."""
+    from models import Webhook, WebhookDelivery
+    Webhook.__table__.create(bind=engine, checkfirst=True)
+    WebhookDelivery.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
@@ -140,6 +152,7 @@ MIGRATIONS = [
     _migrate_resolver_instances,
     _migrate_saved_views,
     _migrate_outbox,
+    _migrate_webhooks,
 ]
 
 

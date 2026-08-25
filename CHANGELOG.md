@@ -10,6 +10,24 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 ## [Unreleased]
 
 ### Added
+- **Webhook subscriptions, with a delivery log.** An operator can register an HTTPS
+  endpoint (`/webhooks` CRUD, plus a settings panel at `/settings/webhooks`) that receives
+  ticket events, optionally narrowed to specific event types and to tickets carrying given
+  tags. Each webhook gets an HMAC signing secret shown **exactly once** at creation or
+  rotation — unlike an API key it is stored in plaintext, because the sender has to sign
+  with it, so the protection is that no read path returns it (reads carry only an 8-char
+  `secret_prefix`). The per-webhook delivery log (`GET /webhooks/{id}/deliveries`, with a
+  manual redeliver action that re-arms a row without discarding its attempt history) is
+  most of the value: debugging somebody else's agent without it is guesswork. Two
+  boundaries are load-bearing. The target URL is refused if it is — or resolves to — a
+  loopback, private, link-local (cloud metadata), unique-local, multicast or reserved
+  address, and *every* resolved address must pass, which is what closes DNS rebinding; the
+  same check runs again immediately before each send, since DNS can move in between.
+  Deliveries are listed through the webhook **owner's** ticket visibility, not the
+  caller's, so a member's webhook cannot become an exfiltration path for tickets they
+  can't open — and an admin reading that log sees no more than the member would. Delivery
+  execution (the outbound request, retries, signing) ships separately; `attempt_count`,
+  `next_attempt_at` and the secret exist for it to consume.
 - **Unread-comment dot on ticket rows.** A ticket row in the list carries a small red dot
   while the current user has an unread *comment* notification for it, so a reply lands
   where you are already looking instead of only in the bell. Opening the ticket is the

@@ -10,6 +10,7 @@ import ResolverSettings from "./pages/ResolverSettings";
 import Notifications from "./pages/Notifications";
 import Profile from "./pages/Profile";
 import Settings from "./pages/Settings";
+import Webhooks from "./pages/Webhooks";
 import Guide from "./pages/Guide";
 
 function Protected({ children, adminOnly = false }) {
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="/guide" element={<Guide />} />
         <Route path="/profile" element={<Profile />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/settings/webhooks" element={<Webhooks />} />
         <Route
           path="/admin/users"
           element={
