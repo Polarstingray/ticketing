@@ -9,6 +9,18 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 
 ## [Unreleased]
 
+### Added
+- **Unread-comment dot on ticket rows.** A ticket row in the list carries a small red dot
+  while the current user has an unread *comment* notification for it, so a reply lands
+  where you are already looking instead of only in the bell. Opening the ticket is the
+  read gesture: the detail page clears that ticket's unread notifications via the new
+  `POST /notifications/read_by_ticket/{ticket_id}` (caller-scoped, an unknown id is a
+  no-op) and refreshes the badge. The call is fire-and-forget, so it can never delay or
+  fail the page. The notifications provider polls the unread listing only when the
+  unread count is non-zero, keeping an empty inbox at one request per 30s poll.
+  Assignment notifications intentionally get no dot — the ticket already lands in the
+  assignee's queue.
+
 ### Fixed
 - **Pulls now keep the Python venvs in step with the checkout.** `resolver/requirements.txt`
   gained `-e ../cli` (the shared client package); a pull brought the code that imports it

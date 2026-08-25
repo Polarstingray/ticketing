@@ -113,6 +113,10 @@ export const api = {
   unreadCount: () => request("GET", "/notifications/unread_count"),
   markNotificationRead: (id) => request("POST", `/notifications/${id}/read`),
   markAllNotificationsRead: () => request("POST", "/notifications/read_all"),
+  // Clears the caller's unread notifications for one ticket (the "opening the
+  // ticket is the read gesture" path). Returns the new { unread_count }.
+  markTicketNotificationsRead: (id) =>
+    request("POST", `/notifications/read_by_ticket/${id}`),
   deleteNotification: (id) => request("DELETE", `/notifications/${id}`),
   bulkDeleteNotifications: (ids) =>
     request("POST", "/notifications/bulk_delete", { ids }),

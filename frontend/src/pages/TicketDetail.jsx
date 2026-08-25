@@ -23,12 +23,14 @@ import {
   isReservedTag,
   totalTokens,
 } from "../constants";
+import { useNotifications } from "../notifications/NotificationsContext";
 import styles from "../styles/TicketDetail.module.css";
 
 export default function TicketDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { refresh: refreshNotifications } = useNotifications();
 
   const [ticket, setTicket] = useState(null);
   const [users, setUsers] = useState([]);
@@ -74,6 +76,21 @@ export default function TicketDetail() {
     }
   }
 
+  // Opening the ticket is the "read" gesture: clear its unread notifications so
+  // the list-view dot goes away. Deliberately outside load()'s try/catch and not
+  // awaited — it must never delay the page or surface as a page error.
+  //
+  // Best-effort in one more way: a comment that arrives between the fetch and
+  // this call keeps its dot until the next 30s poll.
+  async function markNotificationsRead() {
+    try {
+      await api.markTicketNotificationsRead(id);
+      refreshNotifications();
+    } catch {
+      /* non-critical */
+    }
+  }
+
   async function reloadActivity() {
     try {
       setActivity(await api.listActivity(id));
@@ -91,6 +108,9 @@ export default function TicketDetail() {
 
   useEffect(() => {
     load();
+    markNotificationsRead();
+    // Both callbacks close over `id` (refreshNotifications is stable from the
+    // notifications context), so `id` really is the only dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
