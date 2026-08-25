@@ -19,6 +19,7 @@ from routers import resolver_settings as resolver_settings_router
 from routers import saved_views as saved_views_router
 from routers import tickets as tickets_router
 from routers import users as users_router
+from routers import webhooks as webhooks_router
 from seed import seed_admin, seed_digest_admin_key, seed_resolver_bot
 from startup import check_startup_security
 
@@ -69,6 +70,7 @@ app.include_router(resolver_settings_router.router)
 app.include_router(resolver_settings_router.registry_router)
 app.include_router(saved_views_router.router)
 app.include_router(users_router.router)
+app.include_router(webhooks_router.router)
 
 
 @app.get("/health", tags=["meta"])
