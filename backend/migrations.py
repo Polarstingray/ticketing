@@ -118,6 +118,16 @@ def _migrate_saved_views(engine: Engine) -> None:
     SavedView.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_outbox(engine: Engine) -> None:
+    """outbox table — added with the transactional event bus.
+
+    A brand-new table, so `create_all` builds it on a fresh DB; this backfills
+    it on databases that predate the model. `checkfirst=True` no-ops when the
+    table already exists (idempotent)."""
+    from models import Outbox
+    Outbox.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
@@ -129,6 +139,7 @@ MIGRATIONS = [
     _migrate_resolver_settings,
     _migrate_resolver_instances,
     _migrate_saved_views,
+    _migrate_outbox,
 ]
 
 

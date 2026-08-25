@@ -338,6 +338,38 @@ class Activity(Base):
     actor = relationship("User", foreign_keys=[actor_id])
 
 
+class Outbox(Base):
+    """One staged event of the transactional outbox (see ``events.emit``).
+
+    Rows are written on the *caller's* session, so an event and the change it
+    describes commit or roll back together — that is what buys at-least-once
+    delivery without a message broker. Nothing reads this table yet; a
+    dispatcher ships separately.
+
+    `id` is monotonic and doubles as the sequence consumers order on. There are
+    no foreign keys on `ticket_id`/`actor_id` (same choice as `Notification`) so
+    a queued event survives deletion of the ticket or actor it names.
+
+    `payload` is a *hint, not truth*: delivery retries reorder, so a consumer
+    must re-fetch the ticket before acting on it.
+
+    The dispatcher columns are NULL until a dispatcher touches the row.
+    `claimed_at` is stamped when a batch is claimed and `delivered_at` when it
+    lands, which is what lets the dispatcher claim / commit / send / commit —
+    never holding SQLite's single write transaction open across network I/O.
+    """
+    __tablename__ = "outbox"
+
+    id = Column(Integer, primary_key=True, index=True)
+    type = Column(String, nullable=False, index=True)
+    ticket_id = Column(Integer, nullable=True, index=True)
+    actor_id = Column(Integer, nullable=True)
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    claimed_at = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+
+
 class SavedView(Base):
     """A named, reusable ticket-list filter belonging to one user.
 
