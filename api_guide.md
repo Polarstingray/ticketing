@@ -298,6 +298,59 @@ Response `200`: array of [activity objects](#activity-object).
 
 ---
 
+### Events
+
+#### `GET /events/stream`
+A [Server-Sent Events](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
+tail of the ticket event log, so a client can react to a change in about a second
+instead of polling for it. The connection is long-lived and the client dials out, which
+means an automation behind NAT needs no open port.
+
+**Visibility is the same rule as `GET /tickets`**: a non-admin sees only events on
+tickets they created or are assigned to, and admins see everything. The rule is applied
+against the ticket as it is *now*, not as it was when the event was recorded, so a ticket
+reassigned away stops appearing.
+
+| Param | Meaning |
+|---|---|
+| `last_event_id` | Resume *after* this event id. Omit to start at the current head. |
+
+A fresh connection starts at the head and does **not** replay history — replaying to
+every client that connects turns a reconnect storm into a stampede. To cover a gap, pass
+back the `id:` of the last event you processed, either as `last_event_id` or as the
+standard `Last-Event-ID` header (which `EventSource` resends automatically).
+
+```bash
+curl -sN -H "X-API-Key: $KEY" "$BASE/events/stream?last_event_id=41"
+```
+
+```
+: connected at 41
+
+id: 42
+event: ticket.assigned
+data: {"ticket_id": 7, "ticket_title": "Fix the thing", "ticket_status": "open",
+       "ticket_priority": "high", "ticket_type": "task", "ticket_tags": ["repo:ticketing"],
+       "assigned_to": 2, "actor_id": 1, "actor_name": "Alice",
+       "delta": {"to": 2, "name": "claude-bot"}, "event_id": 42, "type": "ticket.assigned"}
+```
+
+(`data` is one line on the wire; it is wrapped here for readability. `delta` carries the
+before/after of a change event and is absent on creation events.)
+
+Event types: `ticket.created`, `ticket.assigned`, `ticket.status_changed`,
+`ticket.tagged`, `comment.created`, `agent_run.finished`. A `:` line is a comment — the
+15-second keepalive that holds the connection open through proxies — and carries no data.
+
+**`data` is a hint, not truth.** It is a snapshot from the moment the change committed,
+and a consumer may see it well after the fact, so re-fetch the ticket before acting on
+it. Treat delivery as at-least-once: handle a repeat of an event you have already seen.
+
+`resolver/listen.py` is a worked example — it follows this stream and wakes the ticket
+resolver on assignment.
+
+---
+
 ### Saved views
 
 Named, reusable dashboard filters. A view stores the ticket list's **raw query string**
