@@ -295,3 +295,43 @@ def test_other_users_notifications_excluded_from_list(client, admin_key, make_us
     _create_ticket(client, admin_key, title="MaryOnly", assigned_to=mary_id)
     nina_data = client.get("/notifications", headers=_hdr(nina_key)).json()
     assert all(n["ticket_title"] != "MaryOnly" for n in nina_data["items"])
+
+
+# --- Per-ticket read (the list-view dot) -------------------------------------
+
+def test_read_by_ticket_only_clears_that_ticket(client, admin_key, make_user):
+    olly_id, olly_key = make_user("olly")
+    one = _create_ticket(client, admin_key, title="RBT one", assigned_to=olly_id)
+    two = _create_ticket(client, admin_key, title="RBT two", assigned_to=olly_id)
+    assert client.get("/notifications/unread_count", headers=_hdr(olly_key)).json()["unread_count"] == 2
+
+    r = client.post(f"/notifications/read_by_ticket/{one['id']}", headers=_hdr(olly_key))
+    assert r.status_code == 200, r.text
+    assert r.json()["unread_count"] == 1
+
+    unread = client.get("/notifications?unread=true", headers=_hdr(olly_key)).json()
+    assert [n["ticket_id"] for n in unread["items"]] == [two["id"]]
+
+
+def test_read_by_ticket_does_not_touch_other_users(client, admin_key, make_user):
+    pete_id, pete_key = make_user("pete")
+    quin_id, quin_key = make_user("quin")
+    # One ticket both of them are notified about: quin creates it, pete is the
+    # assignee, and a third party (admin) comments.
+    ticket = _create_ticket(client, quin_key, title="RBT shared", assigned_to=pete_id)
+    client.post(f"/tickets/{ticket['id']}/comments", headers=_hdr(admin_key), json={"body": "hi"})
+    before = client.get("/notifications/unread_count", headers=_hdr(quin_key)).json()["unread_count"]
+    assert before > 0
+
+    client.post(f"/notifications/read_by_ticket/{ticket['id']}", headers=_hdr(pete_key))
+
+    assert client.get("/notifications/unread_count", headers=_hdr(pete_key)).json()["unread_count"] == 0
+    assert client.get("/notifications/unread_count", headers=_hdr(quin_key)).json()["unread_count"] == before
+
+
+def test_read_by_ticket_unknown_id_is_a_noop(client, admin_key, make_user):
+    rita_id, rita_key = make_user("rita")
+    _create_ticket(client, admin_key, title="RBT keep", assigned_to=rita_id)
+    r = client.post("/notifications/read_by_ticket/99999999", headers=_hdr(rita_key))
+    assert r.status_code == 200, r.text
+    assert r.json()["unread_count"] == 1

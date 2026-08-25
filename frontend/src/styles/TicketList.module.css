@@ -173,6 +173,16 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Unread-comment marker in a row title. Sits before the ticket id and never
+   shrinks, so an ellipsized long title can't squash it away. */
+.notifDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex-shrink: 0;
+}
 .id {
   color: var(--text-dim);
   font-size: 12.5px;

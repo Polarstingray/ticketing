@@ -17,6 +17,17 @@ vi.mock("../api", () => ({
   },
 }));
 
+// The unread-comment dots come from the notifications provider; swap the set
+// per test rather than standing up a real provider + polling.
+const notifState = vi.hoisted(() => ({ unreadTicketIds: new Set() }));
+vi.mock("../notifications/NotificationsContext", () => ({
+  useNotifications: () => ({
+    unreadCount: 0,
+    unreadTicketIds: notifState.unreadTicketIds,
+    refresh: vi.fn(),
+  }),
+}));
+
 function ticket(overrides = {}) {
   return {
     id: 1,
@@ -75,6 +86,7 @@ beforeEach(() => {
   api.listSavedViews.mockResolvedValue([]);
   api.updateTicket.mockImplementation((id, body) => Promise.resolve(ticket({ id, ...body })));
   api.archiveTicket.mockResolvedValue(null);
+  notifState.unreadTicketIds = new Set();
   localStorage.clear();
 });
 
@@ -482,5 +494,28 @@ describe("TicketList assignee labels", () => {
 
     const row = (await screen.findByText("First ticket")).closest("a");
     expect(within(row).getByText("Ada Lovelace")).toBeInTheDocument();
+  });
+});
+
+describe("TicketList unread-comment dot", () => {
+  it("dots only the rows with an unread comment", async () => {
+    api.listTickets.mockResolvedValue({
+      items: [ticket({ id: 1, title: "Has unread" }), ticket({ id: 2, title: "All read" })],
+      total: 2,
+    });
+    notifState.unreadTicketIds = new Set([1]);
+    renderList();
+    await screen.findByText("Has unread");
+
+    const dots = screen.getAllByLabelText("Unread comment");
+    expect(dots).toHaveLength(1);
+    // The dot lives in the row it belongs to, not just anywhere in the list.
+    expect(dots[0].closest("a")).toHaveAttribute("href", "/tickets/1");
+  });
+
+  it("renders no dots when nothing is unread", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+    expect(screen.queryByLabelText("Unread comment")).not.toBeInTheDocument();
   });
 });
