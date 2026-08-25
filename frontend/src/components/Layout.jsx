@@ -51,8 +51,11 @@ export default function Layout() {
           <NavLink to="/profile" className={linkClass}>
             Profile
           </NavLink>
-          <NavLink to="/settings" className={linkClass}>
+          <NavLink to="/settings" className={linkClass} end>
             Settings
+          </NavLink>
+          <NavLink to="/settings/webhooks" className={linkClass}>
+            Webhooks
           </NavLink>
           <NavLink to="/guide" className={linkClass}>
             Guide

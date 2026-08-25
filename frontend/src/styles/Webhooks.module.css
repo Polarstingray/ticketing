@@ -1,0 +1,215 @@
+.wrap {
+  max-width: 900px;
+}
+.wrap h1 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+.h2 {
+  font-size: 15px;
+  margin: 0 0 10px;
+}
+
+/* --- the one-time secret --------------------------------------------------- */
+.secretPanel {
+  border-color: #f59e0b;
+}
+.warn {
+  font-size: 13px;
+  margin: 0 0 10px;
+  color: #fbbf24;
+}
+.secretRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.secret {
+  flex: 1 1 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  word-break: break-all;
+  background: var(--bg-elev, rgba(255, 255, 255, 0.04));
+}
+
+/* --- create form ----------------------------------------------------------- */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.form input[type="text"],
+.form input:not([type]) {
+  width: 100%;
+}
+.events {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}
+.events legend {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+.check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px !important;
+}
+.check input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+/* --- webhook rows ---------------------------------------------------------- */
+.hook {
+  border-top: 1px solid var(--border);
+  padding: 14px 0;
+}
+.hook:first-of-type {
+  border-top: none;
+}
+.hookHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.hookActions {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+.hookActions button {
+  width: auto;
+}
+.url {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  word-break: break-all;
+  margin-top: 2px;
+}
+.meta {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.off {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.failures {
+  margin-left: 8px;
+  font-size: 11.5px;
+  color: #f87171;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.chip {
+  font-size: 11.5px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+/* --- delivery log ---------------------------------------------------------- */
+.linkBtn {
+  background: none;
+  border: none;
+  padding: 0 0 0 6px;
+  width: auto;
+  color: var(--accent, #60a5fa);
+  cursor: pointer;
+  font-size: 12px;
+}
+.log {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.logHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  margin-bottom: 8px;
+}
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.table button {
+  width: auto;
+}
+.state {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.succeeded {
+  color: #4ade80;
+}
+.failed {
+  color: #f87171;
+}
+.skipped {
+  color: #fbbf24;
+}
+.snippet {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-width: 340px;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.pager {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.pager button {
+  width: auto;
+}

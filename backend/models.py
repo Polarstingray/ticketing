@@ -85,6 +85,33 @@ class AgentRunStatus(str, enum.Enum):
     failed = "failed"
 
 
+class WebhookEventType(str, enum.Enum):
+    """Event types a webhook may subscribe to.
+
+    These are exactly the ``type`` values ``events.emit`` writes to the outbox —
+    a subscription to something that is never emitted would silently never fire,
+    so the two lists must stay in step.
+    """
+    ticket_created = "ticket.created"
+    ticket_assigned = "ticket.assigned"
+    ticket_status_changed = "ticket.status_changed"
+    ticket_tagged = "ticket.tagged"
+    comment_created = "comment.created"
+    agent_run_finished = "agent_run.finished"
+
+
+class DeliveryState(str, enum.Enum):
+    pending = "pending"        # queued, awaiting its (first or next) attempt
+    delivering = "delivering"  # claimed by the delivery worker
+    succeeded = "succeeded"
+    failed = "failed"          # retries exhausted
+    skipped = "skipped"        # never sent, e.g. the URL failed re-validation
+
+# Response bodies are recorded for debugging, not stored wholesale: a receiver
+# that answers with a megabyte of HTML would otherwise fill the log.
+MAX_RESPONSE_SNIPPET = 2000
+
+
 # --- Models ------------------------------------------------------------------
 
 class User(Base):
@@ -392,5 +419,77 @@ class SavedView(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     name = Column(String, nullable=False)
     query = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class Webhook(Base):
+    """An HTTP endpoint subscribed to ticket events, owned by one user.
+
+    ``user_id`` is the *owner*, and it is more than a label: deliveries are
+    filtered against what that user can see (see ``routers.webhooks``), so a
+    member's webhook can never carry a ticket they could not open in the UI.
+
+    **On the secret.** This deliberately departs from :class:`ApiKey`, which
+    stores only a sha256 hash. A signing secret has to be *recoverable* — the
+    delivery worker computes an HMAC of each outbound body with it, and a hash
+    cannot sign. So it is stored in plaintext and instead protected by never
+    being readable: it is returned exactly once by create and once by rotate,
+    and no read schema contains it (``WebhookOut`` has no ``secret`` field).
+    ``secret_prefix`` is the non-secret label the UI shows in its place.
+    """
+    __tablename__ = "webhooks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False, default="")
+    url = Column(String, nullable=False)
+    # Empty list = every event type. Values are WebhookEventType strings.
+    event_types = Column(JSON, nullable=False, default=list)
+    # Empty list = no tag restriction; otherwise the ticket must carry ANY of
+    # these tags (e.g. ["repo:foo"] to follow one repository).
+    tag_filter = Column(JSON, nullable=False, default=list)
+    secret = Column(String, nullable=False)        # plaintext; see the docstring
+    secret_prefix = Column(String, nullable=False, default="")
+    active = Column(Boolean, nullable=False, default=True)
+    # Bumped by the delivery worker; a run of failures is what an operator needs
+    # to see (and what an auto-disable policy would key on).
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    deliveries = relationship("WebhookDelivery", cascade="all, delete-orphan")
+
+
+class WebhookDelivery(Base):
+    """One attempt-tracked delivery of one event to one webhook.
+
+    This log is most of the feature's value: debugging somebody else's agent
+    without it is guesswork, so a row is kept whether the send succeeded, failed
+    or was never made.
+
+    ``event_id`` points at the ``outbox`` row the delivery came from but is
+    **not** an enforced foreign key — the outbox is prunable, and a pruned event
+    must not cascade-delete its delivery history. ``event_type``, ``ticket_id``
+    and ``payload`` are snapshots for the same reason (the same choice
+    :class:`Notification` makes), and ``ticket_id`` is what the owner-visibility
+    filter joins on.
+    """
+    __tablename__ = "webhook_deliveries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    webhook_id = Column(Integer, ForeignKey("webhooks.id"), nullable=False, index=True)
+    event_id = Column(Integer, nullable=True)     # outbox.id; not FK-enforced
+    event_type = Column(String, nullable=False, default="")
+    ticket_id = Column(Integer, nullable=True, index=True)  # snapshot, not FK
+    payload = Column(JSON, nullable=True)         # what was (or will be) sent
+
+    attempt_count = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=True)
+    status_code = Column(Integer, nullable=True)
+    response_snippet = Column(Text, nullable=False, default="")  # MAX_RESPONSE_SNIPPET
+    error = Column(String, nullable=False, default="")
+    state = Column(String, nullable=False, default=DeliveryState.pending.value)
+
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
