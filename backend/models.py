@@ -65,6 +65,10 @@ PRIORITY_ORDER: dict[str, int] = {
 class NotificationType(str, enum.Enum):
     assigned = "assigned"
     commented = "commented"
+    # Not caused by another user: the dispatcher raises this against a webhook's
+    # owner when a run of failures auto-disables it (see dispatcher.py). It is
+    # the one notification type that names no ticket and no actor.
+    webhook_disabled = "webhook_disabled"
 
 
 class NotificationChannel(str, enum.Enum):
