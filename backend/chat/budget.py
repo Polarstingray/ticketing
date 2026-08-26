@@ -21,18 +21,28 @@ TRUNCATION_NOTE = "\n\n… [truncated to fit the context budget]"
 def clip(text: str, limit: int) -> str:
     """``text`` cut to ``limit`` characters, marked when anything was removed.
 
+    The return value never exceeds ``limit``: the truncation note is paid for out
+    of the limit, not added on top of it, so a pack made of clipped sections does
+    not drift over budget by one note per section.
+
     Cuts at the last newline before the limit when there is one reasonably close,
     so a truncated code block or comment ends at a line boundary instead of
-    mid-token. A non-positive limit yields the empty string.
+    mid-token. A non-positive limit yields the empty string. An allowance too
+    small to hold the note *and* any content spends all of it on content: a
+    section that is nothing but a truncation marker says nothing.
     """
     if limit <= 0:
         return ""
     if len(text) <= limit:
         return text
-    cut = text[:limit]
+    if limit <= len(TRUNCATION_NOTE):
+        return text[:limit]
+    room = limit - len(TRUNCATION_NOTE)
+    cut = text[:room]
     nl = cut.rfind("\n")
-    # Only honor the line boundary if it isn't throwing away most of the budget.
-    if nl > limit // 2:
+    # Only honor the line boundary if it isn't throwing away most of the room we
+    # have — strictly more than half of it must survive the retreat to the newline.
+    if nl > room // 2:
         cut = cut[:nl]
     return cut.rstrip() + TRUNCATION_NOTE
 
