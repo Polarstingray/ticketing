@@ -144,7 +144,11 @@ describe("streaming a turn", () => {
     fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Why?" } });
     fireEvent.click(screen.getByText("Send"));
 
-    expect(await screen.findByText("Why?")).toBeInTheDocument();
+    // "Why?" legitimately appears twice once the done frame lands: as the user's
+    // turn in the transcript, and again in the header, because a thread's title
+    // is derived from its first question. Assert both rather than picking one —
+    // that duplication is the derived-title behaviour, not an accident.
+    await waitFor(() => expect(screen.getAllByText("Why?")).toHaveLength(2));
     expect(
       await screen.findByText("Because the verify step failed.")
     ).toBeInTheDocument();
