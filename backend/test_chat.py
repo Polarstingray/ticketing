@@ -86,12 +86,21 @@ def _ask(client, key, **body):
 def test_config_reports_disabled_when_unconfigured(client, admin_key, disabled):
     r = client.get("/chat/config", headers={"X-API-Key": admin_key})
     assert r.status_code == 200
-    assert r.json() == {"enabled": False, "model": ""}
+    assert r.json() == {
+        "enabled": False, "model": "",
+        "daily_usd_limit": 0.0, "spent_today_usd": 0.0,
+    }
 
 
 def test_config_reports_model_when_configured(client, admin_key, enabled):
     r = client.get("/chat/config", headers={"X-API-Key": admin_key})
-    assert r.json() == {"enabled": True, "model": "test-model"}
+    body = r.json()
+    assert body["enabled"] is True
+    assert body["model"] == "test-model"
+    assert body["daily_usd_limit"] == 0.0
+    # Shared-database suite: other tests bank real spend, so assert the field is
+    # present and sane rather than exactly zero.
+    assert body["spent_today_usd"] >= 0.0
 
 
 def test_config_never_exposes_url_or_key(client, admin_key, enabled):
@@ -357,6 +366,7 @@ def _cfg(**overrides):
         api_url="https://provider.example/v1/chat/completions",
         api_key="sk-test", model="test-model", timeout=5, context_budget=1000,
         price_in_per_mtok=0.0, price_out_per_mtok=0.0, rate_limit="20/minute",
+        daily_usd_limit=0.0, history_turns=10, stream_usage=True,
     )
     base.update(overrides)
     return chat_config.ChatConfig(**base)
@@ -460,3 +470,550 @@ def test_provider_transport_errors_hide_the_endpoint(monkeypatch):
         chat_provider.complete(_cfg(), "sys", "user")
     assert exc.value.status == 502
     assert "provider.example" not in str(exc.value)
+
+
+# --- Conversations -----------------------------------------------------------
+# Phase 2: persisted threads, a per-user daily cap, and SSE-streamed answers.
+
+def _sse_events(response):
+    """Parse an SSE body into [(event, data), ...].
+
+    A tiny parser rather than a dependency: the wire format is two known field
+    names and a blank-line separator, and asserting on the *frames* (not on the
+    concatenated text) is what catches a malformed one.
+    """
+    import json as _json
+
+    events = []
+    for block in response.text.split("\n\n"):
+        name, data = None, None
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                name = line[len("event: "):]
+            elif line.startswith("data: "):
+                data = _json.loads(line[len("data: "):])
+        if name is not None:
+            events.append((name, data))
+    return events
+
+
+@pytest.fixture
+def streamer(monkeypatch):
+    """Stand in for the streaming provider, yielding canned fragments.
+
+    Returns the recorded calls; assign to ``fragments``/``usage`` on the returned
+    object to change what the next stream produces.
+    """
+    class Streamer:
+        fragments = ["Hello", ", ", "world."]
+        usage = {"input_tokens": 900, "output_tokens": 100, "model": "streamed-model"}
+        error = None
+        calls = []
+
+    def fake_stream(cfg, system, messages, result):
+        Streamer.calls.append({"system": system, "messages": messages})
+        if Streamer.error is not None:
+            raise Streamer.error
+        for fragment in Streamer.fragments:
+            result.text += fragment
+            yield fragment
+        result.model = Streamer.usage["model"]
+        result.input_tokens = Streamer.usage["input_tokens"]
+        result.output_tokens = Streamer.usage["output_tokens"]
+
+    Streamer.calls = []
+    Streamer.fragments = ["Hello", ", ", "world."]
+    Streamer.error = None
+    monkeypatch.setattr(chat_router.provider, "stream", fake_stream)
+    return Streamer
+
+
+def _new_convo(client, key, **body):
+    r = client.post("/chat/conversations", json=body, headers={"X-API-Key": key})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def _send(client, key, convo_id, content, **extra):
+    return client.post(
+        f"/chat/conversations/{convo_id}/messages",
+        json={"content": content, **extra},
+        headers={"X-API-Key": key},
+    )
+
+
+def test_create_and_fetch_a_conversation(client, make_user, enabled):
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    assert convo["title"] == ""
+    assert convo["ticket_id"] is None
+    assert convo["messages"] == []
+
+    r = client.get(f"/chat/conversations/{convo['id']}", headers={"X-API-Key": user.key})
+    assert r.status_code == 200
+    assert r.json()["id"] == convo["id"]
+
+
+def test_conversations_are_private_even_from_admins(
+    client, admin_key, make_user, enabled
+):
+    """No admin override — unlike tickets. A thread quotes ticket content, and a
+    second, weaker path to that data is not worth having."""
+    owner = make_user()
+    stranger = make_user()
+    convo = _new_convo(client, owner.key)
+
+    for key in (stranger.key, admin_key):
+        assert client.get(f"/chat/conversations/{convo['id']}",
+                          headers={"X-API-Key": key}).status_code == 404
+        assert client.delete(f"/chat/conversations/{convo['id']}",
+                             headers={"X-API-Key": key}).status_code == 404
+        assert _send(client, key, convo["id"], "hello").status_code == 404
+
+
+def test_listing_shows_only_your_own_threads(client, make_user, enabled):
+    owner = make_user()
+    stranger = make_user()
+    mine = _new_convo(client, owner.key)
+    theirs = _new_convo(client, stranger.key)
+
+    r = client.get("/chat/conversations", headers={"X-API-Key": owner.key})
+    ids = [c["id"] for c in r.json()]
+    assert mine["id"] in ids
+    assert theirs["id"] not in ids
+
+
+def test_creating_with_an_unreadable_ticket_is_404(client, make_user, enabled):
+    """The anchor is validated at creation, not just on the first question."""
+    owner = make_user()
+    stranger = make_user()
+    t = _create(client, owner.key)
+    r = client.post("/chat/conversations", json={"ticket_id": t["id"]},
+                    headers={"X-API-Key": stranger.key})
+    assert r.status_code == 404
+
+
+def test_deleting_removes_the_messages_too(client, make_user, enabled, streamer):
+    """Deleting a thread is how a user makes its quoted ticket content go away."""
+    from database import SessionLocal
+    from models import ChatMessage
+
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    assert _send(client, user.key, convo["id"], "hi").status_code == 200
+
+    db = SessionLocal()
+    try:
+        assert db.query(ChatMessage).filter(
+            ChatMessage.conversation_id == convo["id"]).count() == 2
+    finally:
+        db.close()
+
+    assert client.delete(f"/chat/conversations/{convo['id']}",
+                         headers={"X-API-Key": user.key}).status_code == 204
+
+    db = SessionLocal()
+    try:
+        assert db.query(ChatMessage).filter(
+            ChatMessage.conversation_id == convo["id"]).count() == 0
+    finally:
+        db.close()
+
+
+# --- Streaming a turn --------------------------------------------------------
+
+def test_a_turn_streams_tokens_then_done(client, make_user, enabled, streamer):
+    user = make_user()
+    convo = _new_convo(client, user.key)
+
+    r = _send(client, user.key, convo["id"], "What is a resolver?")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    # nginx buffers proxied responses by default, which would defeat streaming.
+    assert r.headers["x-accel-buffering"] == "no"
+
+    events = _sse_events(r)
+    assert [name for name, _ in events] == ["token", "token", "token", "done"]
+    assert "".join(d["text"] for name, d in events if name == "token") == "Hello, world."
+
+    done = events[-1][1]
+    assert done["conversation_id"] == convo["id"]
+    # 900 in @ $3/Mtok + 100 out @ $15/Mtok = 0.0027 + 0.0015
+    assert done["usage"]["cost_usd"] == 0.0042
+    assert done["usage"]["model"] == "streamed-model"
+    assert done["spent_today_usd"] >= 0.0042
+
+
+def test_both_turns_are_persisted_with_the_cost_on_the_answer(
+    client, make_user, enabled, streamer
+):
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    _send(client, user.key, convo["id"], "What is a resolver?")
+
+    r = client.get(f"/chat/conversations/{convo['id']}", headers={"X-API-Key": user.key})
+    messages = r.json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    # What the user typed is stored — never the assembled prompt.
+    assert messages[0]["content"] == "What is a resolver?"
+    assert messages[0]["cost_usd"] == 0.0
+    assert messages[1]["content"] == "Hello, world."
+    assert messages[1]["cost_usd"] == 0.0042
+
+
+def test_the_title_is_derived_from_the_first_question(
+    client, make_user, enabled, streamer
+):
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    _send(client, user.key, convo["id"], "Why did the verify step fail?\nMore detail.")
+
+    r = client.get(f"/chat/conversations/{convo['id']}", headers={"X-API-Key": user.key})
+    # First line only, so a pasted stack trace doesn't become the title.
+    assert r.json()["title"] == "Why did the verify step fail?"
+
+    _send(client, user.key, convo["id"], "A later question.")
+    r = client.get(f"/chat/conversations/{convo['id']}", headers={"X-API-Key": user.key})
+    assert r.json()["title"] == "Why did the verify step fail?"
+
+
+def test_prior_turns_are_replayed_but_context_is_not(
+    client, make_user, enabled, streamer
+):
+    """History carries the conversation; the pack is rebuilt fresh each turn.
+
+    Replaying old packs would multiply the cost and feed the model stale copies
+    of a ticket that has since changed.
+    """
+    user = make_user()
+    t = _create(client, user.key, title="Anchored ticket")
+    convo = _new_convo(client, user.key, ticket_id=t["id"])
+
+    _send(client, user.key, convo["id"], "First question")
+    _send(client, user.key, convo["id"], "Second question")
+
+    messages = streamer.calls[-1]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    # The replayed first turn is the raw question, with no context pack attached.
+    assert messages[0]["content"] == "First question"
+    assert prompts.CONTEXT_OPEN not in messages[0]["content"]
+    # Only the live turn carries the pack.
+    assert prompts.CONTEXT_OPEN in messages[-1]["content"]
+    assert "Anchored ticket" in messages[-1]["content"]
+
+
+def test_history_is_bounded(client, make_user, enabled, streamer, monkeypatch):
+    monkeypatch.setenv("CHAT_HISTORY_TURNS", "1")
+    chat_config.load.cache_clear()
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    for i in range(4):
+        _send(client, user.key, convo["id"], f"Question {i}")
+
+    # One turn of history (2 messages) plus the live question.
+    assert len(streamer.calls[-1]["messages"]) == 3
+
+
+def test_the_turns_ticket_overrides_the_threads_anchor(
+    client, make_user, enabled, streamer
+):
+    """The popup sends whatever ticket the user is currently looking at."""
+    user = make_user()
+    anchor = _create(client, user.key, title="Anchor ticket")
+    other = _create(client, user.key, title="Currently viewing")
+    convo = _new_convo(client, user.key, ticket_id=anchor["id"])
+
+    _send(client, user.key, convo["id"], "About this one?", ticket_id=other["id"])
+    assert "Currently viewing" in streamer.calls[-1]["messages"][-1]["content"]
+    assert "Anchor ticket" not in streamer.calls[-1]["messages"][-1]["content"]
+
+
+def test_a_stored_anchor_grants_no_access(client, make_user, enabled, streamer):
+    """Re-resolved on every turn: losing access to the anchor stops the thread.
+
+    The ticket is reassigned away from its creator, who is a member and so can
+    only see tickets they created or are assigned to.
+    """
+    from database import SessionLocal
+    from models import Ticket
+
+    owner = make_user()
+    other = make_user()
+    t = _create(client, owner.key)
+    convo = _new_convo(client, owner.key, ticket_id=t["id"])
+    assert _send(client, owner.key, convo["id"], "First").status_code == 200
+
+    db = SessionLocal()
+    try:
+        row = db.query(Ticket).filter(Ticket.id == t["id"]).one()
+        row.created_by = other.id
+        row.assigned_to = other.id
+        db.commit()
+    finally:
+        db.close()
+
+    assert _send(client, owner.key, convo["id"], "Second").status_code == 404
+
+
+def test_a_pre_stream_provider_failure_is_an_error_frame(
+    client, make_user, enabled, streamer
+):
+    """The status line is already sent, so the failure arrives in-band."""
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    streamer.error = chat_provider.ProviderError("upstream is down", status=502)
+
+    r = _send(client, user.key, convo["id"], "Hello?")
+    assert r.status_code == 200  # the stream opened before the provider failed
+    events = _sse_events(r)
+    assert events[-1][0] == "error"
+    assert events[-1][1] == {"detail": "upstream is down", "status": 502}
+
+    # The question is still recorded — it did happen — but no answer is invented.
+    r = client.get(f"/chat/conversations/{convo['id']}", headers={"X-API-Key": user.key})
+    assert [m["role"] for m in r.json()["messages"]] == ["user"]
+
+
+def test_an_empty_stream_stores_no_assistant_turn(
+    client, make_user, enabled, streamer
+):
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    streamer.fragments = []
+
+    events = _sse_events(_send(client, user.key, convo["id"], "Hello?"))
+    assert events[-1][0] == "error"
+
+    r = client.get(f"/chat/conversations/{convo['id']}", headers={"X-API-Key": user.key})
+    assert [m["role"] for m in r.json()["messages"]] == ["user"]
+
+
+def test_send_is_rejected_before_streaming_when_disabled(
+    client, make_user, enabled, streamer
+):
+    """Gates run synchronously, so refusals keep real HTTP statuses."""
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    for key in CONFIGURED:
+        import os
+        os.environ.pop(key, None)
+    chat_config.load.cache_clear()
+
+    r = _send(client, user.key, convo["id"], "Hello?")
+    assert r.status_code == 503
+    assert "text/event-stream" not in r.headers.get("content-type", "")
+
+
+@pytest.mark.parametrize("content", ["", "   ", "x" * 4001])
+def test_bad_message_bodies_are_rejected(
+    client, make_user, enabled, streamer, content
+):
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    assert _send(client, user.key, convo["id"], content).status_code == 422
+    assert streamer.calls == []
+
+
+# --- The daily spend cap -----------------------------------------------------
+
+def test_spend_is_summed_per_user_since_utc_midnight(client, make_user, enabled, streamer):
+    from datetime import datetime, timedelta, timezone
+
+    from chat import spend
+    from database import SessionLocal
+    from models import ChatMessage
+
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    _send(client, user.key, convo["id"], "One question")
+
+    db = SessionLocal()
+    try:
+        assert spend.spent_today(db, user.id) == pytest.approx(0.0042)
+        # A turn from before midnight must not count against today.
+        db.add(ChatMessage(
+            conversation_id=convo["id"], role="assistant", content="old",
+            cost_usd=99.0,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=2),
+        ))
+        db.commit()
+        assert spend.spent_today(db, user.id) == pytest.approx(0.0042)
+    finally:
+        db.close()
+
+
+def test_one_users_spend_does_not_count_against_another(client, make_user, enabled, streamer):
+    from chat import spend
+    from database import SessionLocal
+
+    spender = make_user()
+    bystander = make_user()
+    convo = _new_convo(client, spender.key)
+    _send(client, spender.key, convo["id"], "A question")
+
+    db = SessionLocal()
+    try:
+        assert spend.spent_today(db, spender.id) > 0
+        assert spend.spent_today(db, bystander.id) == 0.0
+    finally:
+        db.close()
+
+
+def test_the_cap_blocks_a_turn_with_a_429_naming_the_numbers(
+    client, make_user, enabled, streamer, monkeypatch
+):
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    _send(client, user.key, convo["id"], "This one is affordable")
+
+    monkeypatch.setenv("CHAT_DAILY_USD_LIMIT", "0.001")  # already exceeded
+    chat_config.load.cache_clear()
+
+    r = _send(client, user.key, convo["id"], "This one is not")
+    assert r.status_code == 429
+    assert "0.0042" in r.json()["detail"]
+    assert "00:00 UTC" in r.json()["detail"]
+    # /chat/ask is capped by the same gate.
+    assert _ask(client, user.key, question="?").status_code == 429
+
+
+def test_no_cap_configured_means_no_limit(client, make_user, enabled, streamer):
+    from chat import spend
+    from database import SessionLocal
+
+    user = make_user()
+    db = SessionLocal()
+    try:
+        # 0 disables the cap; the call must not raise however much was spent.
+        assert spend.check_daily_cap(db, user.id, 0.0) == 0.0
+        assert spend.check_daily_cap(db, user.id, -1.0) == 0.0
+    finally:
+        db.close()
+
+
+def test_config_reports_this_callers_spend(client, make_user, enabled, streamer):
+    user = make_user()
+    convo = _new_convo(client, user.key)
+    _send(client, user.key, convo["id"], "A question")
+
+    r = client.get("/chat/config", headers={"X-API-Key": user.key})
+    assert r.json()["spent_today_usd"] == pytest.approx(0.0042)
+
+
+# --- Provider streaming ------------------------------------------------------
+
+def _sse_body(*frames):
+    return "".join(f"data: {f}\n\n" for f in frames)
+
+
+class _StreamCtx:
+    """`httpx.stream` is a context manager, not a plain call — the fakes here
+    have to be one too, or the provider's `with` block fails before it parses
+    anything."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def __enter__(self):
+        return self._response
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _stream_response(monkeypatch, body: str, status_code: int = 200):
+    import httpx
+
+    def fake_stream(method, url, **kwargs):
+        request = httpx.Request(method, url)
+        return _StreamCtx(httpx.Response(status_code, text=body, request=request))
+
+    monkeypatch.setattr(chat_provider.httpx, "stream", fake_stream)
+
+
+def test_stream_parses_deltas_and_usage(monkeypatch):
+    _stream_response(monkeypatch, _sse_body(
+        '{"model": "m1", "choices": [{"delta": {"content": "Hel"}}]}',
+        '{"choices": [{"delta": {"content": "lo"}}]}',
+        '{"choices": [], "usage": {"prompt_tokens": 40, "completion_tokens": 9}}',
+        "[DONE]",
+    ))
+    result = chat_provider.StreamResult()
+    out = list(chat_provider.stream(_cfg(), "sys", [{"role": "user", "content": "hi"}], result))
+    assert out == ["Hel", "lo"]
+    assert result.text == "Hello"
+    assert result.model == "m1"
+    assert (result.input_tokens, result.output_tokens) == (40, 9)
+
+
+def test_stream_survives_a_malformed_frame(monkeypatch):
+    """One bad frame loses a delta, not the whole answer."""
+    _stream_response(monkeypatch, _sse_body(
+        '{"choices": [{"delta": {"content": "a"}}]}',
+        "{not json",
+        '{"choices": [{"delta": {"content": "b"}}]}',
+        "[DONE]",
+    ))
+    result = chat_provider.StreamResult()
+    assert list(chat_provider.stream(_cfg(), "s", [], result)) == ["a", "b"]
+
+
+def test_stream_ignores_keepalives_and_role_only_chunks(monkeypatch):
+    _stream_response(monkeypatch, (
+        ": keep-alive\n\n"
+        + _sse_body(
+            '{"choices": [{"delta": {"role": "assistant"}}]}',
+            '{"choices": [{"delta": {"content": "x"}}]}',
+            "[DONE]",
+        )
+    ))
+    result = chat_provider.StreamResult()
+    assert list(chat_provider.stream(_cfg(), "s", [], result)) == ["x"]
+
+
+def test_stream_falls_back_to_the_configured_model(monkeypatch):
+    _stream_response(monkeypatch, _sse_body(
+        '{"choices": [{"delta": {"content": "x"}}]}', "[DONE]"))
+    result = chat_provider.StreamResult()
+    list(chat_provider.stream(_cfg(), "s", [], result))
+    assert result.model == "test-model"
+
+
+def test_stream_stops_at_done_and_ignores_trailing_frames(monkeypatch):
+    _stream_response(monkeypatch, _sse_body(
+        '{"choices": [{"delta": {"content": "kept"}}]}',
+        "[DONE]",
+        '{"choices": [{"delta": {"content": "dropped"}}]}',
+    ))
+    result = chat_provider.StreamResult()
+    assert list(chat_provider.stream(_cfg(), "s", [], result)) == ["kept"]
+
+
+@pytest.mark.parametrize("status_code,expected", [(429, 429), (401, 502), (500, 502)])
+def test_stream_maps_upstream_status_codes(monkeypatch, status_code, expected):
+    """The same mapper as the non-streaming path, so the two can't drift."""
+    _stream_response(monkeypatch, "nope", status_code=status_code)
+    result = chat_provider.StreamResult()
+    with pytest.raises(chat_provider.ProviderError) as exc:
+        list(chat_provider.stream(_cfg(), "s", [], result))
+    assert exc.value.status == expected
+
+
+def test_stream_usage_option_can_be_switched_off(monkeypatch):
+    """A strict gateway rejects the unknown `stream_options` field outright."""
+    sent = {}
+
+    def fake_stream(method, url, **kwargs):
+        import httpx
+        sent.update(kwargs.get("json") or {})
+        return _StreamCtx(httpx.Response(200, text=_sse_body("[DONE]"),
+                                         request=httpx.Request(method, url)))
+
+    monkeypatch.setattr(chat_provider.httpx, "stream", fake_stream)
+    list(chat_provider.stream(_cfg(stream_usage=True), "s", [], chat_provider.StreamResult()))
+    assert sent["stream_options"] == {"include_usage": True}
+
+    sent.clear()
+    list(chat_provider.stream(_cfg(stream_usage=False), "s", [], chat_provider.StreamResult()))
+    assert "stream_options" not in sent
+    assert sent["stream"] is True

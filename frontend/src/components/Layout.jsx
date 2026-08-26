@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useNotifications } from "../notifications/NotificationsContext";
+import ChatWidget from "./ChatWidget";
 import styles from "../styles/Layout.module.css";
 
 export default function Layout() {
@@ -66,6 +67,9 @@ export default function Layout() {
       <main className={styles.content}>
         <Outlet />
       </main>
+      {/* Present on every authenticated page; renders nothing when the
+          deployment has no model configured. */}
+      <ChatWidget />
     </div>
   );
 }

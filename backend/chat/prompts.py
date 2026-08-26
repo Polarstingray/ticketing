@@ -63,3 +63,32 @@ def build_user_message(question: str, pack: str | None) -> str:
     """
     body = f"{CONTEXT_OPEN}\n{pack}\n{CONTEXT_CLOSE}" if pack else NO_CONTEXT
     return f"{body}\n\nQuestion from the user:\n\n{question}"
+
+
+def build_messages(history: list[tuple[str, str]], question: str,
+                   pack: str | None) -> list[dict]:
+    """Assemble the message list for one turn of a conversation.
+
+    ``history`` is ``(role, content)`` oldest-first for the prior turns to
+    replay. Only the *current* question carries the context pack: the pack is
+    rebuilt from live ticket data every turn, so replaying old ones would both
+    multiply the cost and feed the model stale copies of a ticket that has since
+    changed. What the earlier turns contribute is the conversation itself —
+    what was asked and what was answered.
+    """
+    messages = [{"role": role, "content": content} for role, content in history]
+    messages.append({"role": "user", "content": build_user_message(question, pack)})
+    return messages
+
+
+def derive_title(question: str, *, limit: int = 60) -> str:
+    """A thread title from its first question.
+
+    Derived rather than asked for: naming a chat thread is a chore, and the
+    opening question is almost always what the user would have typed anyway. The
+    first line only, so a pasted stack trace doesn't become the title.
+    """
+    first_line = (question or "").strip().splitlines()[0].strip() if question.strip() else ""
+    if len(first_line) <= limit:
+        return first_line
+    return first_line[:limit].rstrip() + "…"
