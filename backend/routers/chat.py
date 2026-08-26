@@ -1,35 +1,49 @@
-"""Chat assistant routes — ask a question about a ticket.
+"""Chat assistant routes — configuration, conversations, and streamed answers.
 
-Two endpoints in this phase: a capability probe the SPA calls on load, and a
-single question-and-answer turn. There is no conversation state yet (the next
-phase adds it, along with streaming) and there are no tools, so this router can
-only ever read one ticket the caller already has access to and forward it to the
-configured model.
-
-Three boundaries are worth stating explicitly, because they are what make the
-feature safe to add rather than a new attack surface:
+The assistant reads only what the calling user may already read, has no tools,
+and performs no writes. Three boundaries make it safe to add rather than a new
+attack surface:
 
 * **Authorization is delegated, not reimplemented.** ``chat.context.ticket_pack``
-  goes through ``can_view_ticket``; a ticket the caller may not see returns 404,
-  the same probe-resistant answer ``GET /tickets/{id}`` gives.
-* **No writes.** The assistant has no path to modify anything. Ticket text is
-  attacker-controllable, so the mitigation for prompt injection is structural —
-  there is nothing here for an injected instruction to reach.
-* **Metered calls are rate limited.** Each request costs the operator money at a
-  third-party provider, so it carries a per-IP budget like ``POST /auth/login``.
+  goes through ``can_view_ticket``; a ticket the caller may not see yields 404,
+  the same probe-resistant answer ``GET /tickets/{id}`` gives. A conversation's
+  stored ``ticket_id`` is re-resolved this way on *every* turn, so it is an anchor
+  and never a stored grant.
+* **Conversations are strictly per-owner — including from admins.** Unlike
+  tickets, there is no admin override: a thread quotes ticket content, and a
+  second, weaker path to that data is not worth having.
+* **Metered calls are bounded twice.** A per-IP rate limit caps bursts; a
+  per-user daily USD cap (``chat/spend.py``) caps the bill.
+
+Answers stream as Server-Sent Events. ``EventSource`` cannot issue a POST or
+carry a body, so the browser reads the stream with ``fetch`` + a reader instead
+(see ``frontend/src/api.js``).
 """
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+import json
+from collections.abc import Iterator
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from chat import config as chat_config
 from chat import context as chat_context
-from chat import prompts, provider
+from chat import prompts, provider, spend
 from chat.budget import estimate_cost
-from database import get_db
-from models import User
+from database import SessionLocal, get_db
+from models import ChatConversation, ChatMessage, ChatRole, User, utcnow
 from ratelimit import limiter
-from schemas import ChatAskRequest, ChatAskResponse, ChatConfigOut, ChatUsage
+from schemas import (
+    ChatAskRequest,
+    ChatAskResponse,
+    ChatConfigOut,
+    ChatConversationCreate,
+    ChatConversationOut,
+    ChatConversationSummary,
+    ChatSendRequest,
+    ChatUsage,
+)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -37,26 +51,12 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 # argument once when the route is registered.
 _RATE_LIMIT = chat_config.load().rate_limit
 
-
-@router.get("/config", response_model=ChatConfigOut)
-def get_chat_config(user: User = Depends(get_current_user)):
-    """Whether the assistant is available, and which model answers.
-
-    Authenticated rather than public: an unauthenticated caller has no use for
-    it, and it needn't advertise the deployment's model to the internet.
-    """
-    return ChatConfigOut(**chat_config.load().public())
+# How many threads the popup's list shows. Threads are cheap and never expire, so
+# the list is bounded rather than paginated — the popup is not an archive browser.
+MAX_CONVERSATIONS = 50
 
 
-@router.post("/ask", response_model=ChatAskResponse)
-@limiter.limit(_RATE_LIMIT)
-def ask(
-    request: Request,  # required by slowapi's limiter, like POST /auth/login
-    payload: ChatAskRequest,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    cfg = chat_config.load()
+def _require_enabled(cfg) -> None:
     if not cfg.enabled:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -66,16 +66,315 @@ def ask(
             ),
         )
 
-    pack = None
-    if payload.ticket_id is not None:
-        pack = chat_context.ticket_pack(
-            db, user, payload.ticket_id, budget=cfg.context_budget
+
+def _owned_or_404(db: Session, user: User, conversation_id: int) -> ChatConversation:
+    """The caller's conversation, or 404.
+
+    404 rather than 403 for someone else's thread, and no admin override — see
+    the module docstring.
+    """
+    convo = (
+        db.query(ChatConversation)
+        .filter(
+            ChatConversation.id == conversation_id,
+            ChatConversation.user_id == user.id,
         )
-        if pack is None:
-            # 404 for both "no such ticket" and "not yours" — see get_ticket.
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found"
-            )
+        .one_or_none()
+    )
+    if convo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
+        )
+    return convo
+
+
+def _pack_or_404(db: Session, user: User, ticket_id: int | None, cfg) -> str | None:
+    """Context for ``ticket_id`` under this caller's permissions, or None if no
+    ticket was asked for. Raises 404 when the ticket is unreadable or absent."""
+    if ticket_id is None:
+        return None
+    pack = chat_context.ticket_pack(db, user, ticket_id, budget=cfg.context_budget)
+    if pack is None:
+        # 404 for both "no such ticket" and "not yours" — see get_ticket.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found"
+        )
+    return pack
+
+
+def _check_budget(db: Session, user: User, cfg) -> None:
+    try:
+        spend.check_daily_cap(db, user.id, cfg.daily_usd_limit)
+    except spend.DailyCapExceeded as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
+        ) from None
+
+
+# --- Configuration -----------------------------------------------------------
+
+@router.get("/config", response_model=ChatConfigOut)
+def get_chat_config(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Whether the assistant is available, which model answers, and what this
+    caller has spent today.
+
+    Authenticated rather than public: an unauthenticated caller has no use for
+    it, and it needn't advertise the deployment's model to the internet.
+    """
+    cfg = chat_config.load()
+    return ChatConfigOut(
+        **cfg.public(),
+        # Reported even when no cap is configured, so the popup can show a
+        # running total without a second endpoint.
+        spent_today_usd=spend.spent_today(db, user.id) if cfg.enabled else 0.0,
+    )
+
+
+# --- Conversations -----------------------------------------------------------
+
+@router.get("/conversations", response_model=list[ChatConversationSummary])
+def list_conversations(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """This caller's threads, most recently active first. Never anyone else's."""
+    return (
+        db.query(ChatConversation)
+        .filter(ChatConversation.user_id == user.id)
+        .order_by(ChatConversation.updated_at.desc(), ChatConversation.id.desc())
+        .limit(MAX_CONVERSATIONS)
+        .all()
+    )
+
+
+@router.post("/conversations", response_model=ChatConversationOut,
+             status_code=status.HTTP_201_CREATED)
+def create_conversation(
+    payload: ChatConversationCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    cfg = chat_config.load()
+    _require_enabled(cfg)
+    # Validate the anchor now so an unreadable ticket fails at creation rather
+    # than on the first question — even though every turn re-checks it anyway.
+    if payload.ticket_id is not None:
+        _pack_or_404(db, user, payload.ticket_id, cfg)
+
+    convo = ChatConversation(user_id=user.id, ticket_id=payload.ticket_id, title="")
+    db.add(convo)
+    db.commit()
+    db.refresh(convo)
+    return convo
+
+
+@router.get("/conversations/{conversation_id}", response_model=ChatConversationOut)
+def get_conversation(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    convo = _owned_or_404(db, user, conversation_id)
+    convo.messages.sort(key=lambda m: (m.created_at, m.id))
+    return convo
+
+
+@router.delete("/conversations/{conversation_id}",
+               status_code=status.HTTP_204_NO_CONTENT)
+def delete_conversation(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Delete a thread and its messages.
+
+    The cascade matters: a thread is the only place quoted ticket content
+    persists, so deleting it is how a user makes that copy go away.
+    """
+    convo = _owned_or_404(db, user, conversation_id)
+    db.delete(convo)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Streaming a turn --------------------------------------------------------
+
+def _sse(event: str, data: dict) -> str:
+    """One Server-Sent Event frame.
+
+    ``json.dumps`` guarantees the payload is single-line, which the SSE framing
+    requires — an unescaped newline inside `data:` would split one event into two.
+    """
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _history(convo: ChatConversation, turns: int) -> list[tuple[str, str]]:
+    """The last ``turns`` exchanges of a thread, oldest-first.
+
+    Counted in messages rather than exchanges, then trimmed from the front: a
+    thread whose first turn failed can have an odd number of messages, and
+    starting the replay on an assistant turn is harmless where dropping the most
+    recent question would not be.
+    """
+    ordered = sorted(convo.messages, key=lambda m: (m.created_at, m.id))
+    recent = ordered[-(turns * 2):] if turns > 0 else []
+    return [(m.role, m.content) for m in recent if m.content]
+
+
+def _stream_turn(conversation_id: int, user_id: int, question: str,
+                 pack: str | None, ticket_id: int | None, cfg) -> Iterator[str]:
+    """Generate the SSE frames for one turn, persisting both messages around it.
+
+    This opens its **own** database session. The request-scoped session from
+    ``get_db`` is closed when the endpoint returns, which for a StreamingResponse
+    is *before* the body has been produced — so writing the assistant's turn
+    through it would use a closed session.
+
+    The user's message is written first and committed, so a question is recorded
+    even if the provider then fails. The assistant's message is written only when
+    there is text to store; a stream that died before its first token leaves the
+    question standing alone, which is what actually happened.
+    """
+    db = SessionLocal()
+    try:
+        convo = (
+            db.query(ChatConversation)
+            .filter(ChatConversation.id == conversation_id)
+            .one_or_none()
+        )
+        if convo is None:  # deleted between the request and the stream starting
+            yield _sse("error", {"detail": "Conversation not found"})
+            return
+
+        history = _history(convo, cfg.history_turns)
+        db.add(ChatMessage(
+            conversation_id=convo.id,
+            role=ChatRole.user.value,
+            content=question,
+            meta={"ticket_id": ticket_id, "context_chars": len(pack or "")},
+        ))
+        if not convo.title:
+            convo.title = prompts.derive_title(question)
+        convo.updated_at = utcnow()
+        db.commit()
+
+        result = provider.StreamResult()
+        try:
+            for fragment in provider.stream(
+                cfg,
+                prompts.SYSTEM_PROMPT,
+                prompts.build_messages(history, question, pack),
+                result,
+            ):
+                yield _sse("token", {"text": fragment})
+        except provider.ProviderError as exc:
+            # Pre-stream failures only; a mid-stream fault ends the iteration
+            # instead, leaving the partial text in `result`.
+            yield _sse("error", {"detail": str(exc), "status": exc.status})
+            return
+
+        if not result.text:
+            yield _sse("error", {"detail": "The model returned an empty response."})
+            return
+
+        cost = estimate_cost(
+            result.input_tokens, result.output_tokens,
+            cfg.price_in_per_mtok, cfg.price_out_per_mtok,
+        )
+        message = ChatMessage(
+            conversation_id=convo.id,
+            role=ChatRole.assistant.value,
+            content=result.text,
+            model=result.model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost_usd=cost,
+            meta={"ticket_id": ticket_id, "context_chars": len(pack or "")},
+        )
+        db.add(message)
+        convo.updated_at = utcnow()
+        db.commit()
+        db.refresh(message)
+
+        yield _sse("done", {
+            "message_id": message.id,
+            "conversation_id": convo.id,
+            "title": convo.title,
+            "usage": {
+                "model": result.model,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "cost_usd": cost,
+            },
+            "spent_today_usd": spend.spent_today(db, user_id),
+        })
+    finally:
+        db.close()
+
+
+@router.post("/conversations/{conversation_id}/messages")
+@limiter.limit(_RATE_LIMIT)
+def send_message(
+    request: Request,  # required by slowapi's limiter, like POST /auth/login
+    conversation_id: int,
+    payload: ChatSendRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Ask a question in a thread; the answer streams back as SSE.
+
+    Every gate — ownership, the ticket's readability, the daily budget — is
+    checked here, synchronously, *before* the response starts. Once the stream is
+    open the status line is already sent, so a refusal at that point could only be
+    an error frame in a 200 response; failing early keeps real HTTP statuses.
+    """
+    cfg = chat_config.load()
+    _require_enabled(cfg)
+    convo = _owned_or_404(db, user, conversation_id)
+    _check_budget(db, user, cfg)
+
+    # The turn's ticket overrides the thread's anchor, and is re-resolved against
+    # this caller's permissions every time — a stored anchor grants nothing.
+    ticket_id = payload.ticket_id if payload.ticket_id is not None else convo.ticket_id
+    pack = _pack_or_404(db, user, ticket_id, cfg)
+
+    return StreamingResponse(
+        _stream_turn(convo.id, user.id, payload.content, pack, ticket_id, cfg),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # nginx buffers proxied responses by default, which would hold the
+            # whole answer until it completed and defeat streaming entirely.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# --- Stateless one-shot ------------------------------------------------------
+
+@router.post("/ask", response_model=ChatAskResponse)
+@limiter.limit(_RATE_LIMIT)
+def ask(
+    request: Request,  # required by slowapi's limiter, like POST /auth/login
+    payload: ChatAskRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """One question, one answer, no thread — for API clients and scripts.
+
+    Kept alongside the conversation endpoints rather than replaced by them: it is
+    the whole surface a non-browser caller needs, and it does not stream, so it
+    needs no SSE parser on the other end. Its turns are not stored, and so do not
+    count toward the daily cap — the cap is enforced on it, but only from spend
+    the conversation endpoints recorded.
+    """
+    cfg = chat_config.load()
+    _require_enabled(cfg)
+    _check_budget(db, user, cfg)
+    pack = _pack_or_404(db, user, payload.ticket_id, cfg)
 
     try:
         completion = provider.complete(
