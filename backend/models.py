@@ -320,6 +320,75 @@ class ResolverInstance(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class ChatRole(str, enum.Enum):
+    user = "user"
+    assistant = "assistant"
+
+
+class ChatConversation(Base):
+    """One chat thread with the in-app assistant, owned by exactly one user.
+
+    Strictly per-user, with **no admin override** — unlike tickets, where an admin
+    may read anything. A thread embeds ticket content quoted at the time it was
+    asked about, so letting an admin read someone's threads would be a second,
+    weaker path to data the ticket ACL governs directly.
+
+    ``ticket_id`` is the ticket the thread was opened from: an anchor for the
+    context pack, not a hard scope. It is deliberately nullable — a thread started
+    from the dashboard has no ticket — and re-resolved against the asker's own
+    permissions on every turn, so it confers no access by itself.
+    """
+    __tablename__ = "chat_conversations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=True, index=True)
+    # Derived from the first question rather than asked for, so a thread is
+    # identifiable in the list without making the user name it.
+    title = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    messages = relationship(
+        "ChatMessage", back_populates="conversation", cascade="all, delete-orphan"
+    )
+
+
+class ChatMessage(Base):
+    """One turn in a thread. Assistant turns carry their own cost accounting.
+
+    The accounting fields mirror :class:`AgentRun`'s on purpose: resolver work and
+    chat work are both metered AI spend, and the app's rule is that AI spend is
+    visible. Summing ``cost_usd`` over a user's turns since UTC midnight is also
+    what enforces the daily cap.
+
+    ``content`` stores what the *user* actually typed — never the assembled
+    prompt. The context pack is rebuilt from live ticket data on every turn, so a
+    stored thread can't serve stale ticket state back to the model, and can't
+    become a durable copy of a ticket the user has since lost access to.
+
+    ``meta`` is the open-ended per-turn extra (context ticket id, packed size,
+    and later the tool calls and proposed actions), kept as a JSON blob — the same
+    convention as ``Ticket.code_blocks`` — so a new field needs no migration.
+    """
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(
+        Integer, ForeignKey("chat_conversations.id"), nullable=False, index=True
+    )
+    role = Column(String, nullable=False)  # ChatRole value
+    content = Column(Text, nullable=False, default="")
+    model = Column(String, nullable=False, default="")
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd = Column(Float, nullable=False, default=0.0)
+    meta = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    conversation = relationship("ChatConversation", back_populates="messages")
+
+
 class Activity(Base):
     """An immutable audit entry describing something that happened to a ticket.
 

@@ -637,13 +637,18 @@ MAX_QUESTION_LENGTH = 4000
 class ChatConfigOut(BaseModel):
     """What the browser is told about the assistant's configuration.
 
-    Deliberately just the switch and the model name: the endpoint URL and key
-    live in the backend's environment and are never exposed (see
-    ``chat/config.py``). The UI renders no trace of the feature when
-    ``enabled`` is false.
+    Deliberately excludes the endpoint URL and key, which live in the backend's
+    environment and are never exposed (see ``chat/config.py``). The UI renders no
+    trace of the feature when ``enabled`` is false.
+
+    The spend fields are per-caller, not deployment-wide: they let the popup show
+    "$0.12 of $0.50 today" without a second request. ``daily_usd_limit`` is 0.0
+    when no cap is configured.
     """
     enabled: bool
     model: str = ""
+    daily_usd_limit: float = 0.0
+    spent_today_usd: float = 0.0
 
 
 class ChatAskRequest(BaseModel):
@@ -686,3 +691,60 @@ class ChatAskResponse(BaseModel):
     # is visible rather than silent.
     context_ticket_id: Optional[int] = None
     context_chars: int = 0
+
+
+class ChatMessageOut(BaseModel):
+    """One stored turn. Assistant turns carry the accounting; user turns don't."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    role: str
+    content: str
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    meta: Dict = Field(default_factory=dict)
+    created_at: UTCDateTime
+
+
+class ChatConversationSummary(BaseModel):
+    """A thread as it appears in the popup's thread list — no message bodies."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    ticket_id: Optional[int] = None
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
+
+
+class ChatConversationOut(ChatConversationSummary):
+    """A thread with its full transcript, oldest first."""
+    messages: List[ChatMessageOut] = Field(default_factory=list)
+
+
+class ChatConversationCreate(BaseModel):
+    """``ticket_id`` anchors the thread to a ticket. It is validated against the
+    caller's own read permission at creation *and* re-checked on every turn, so
+    it never becomes a stored grant of access."""
+    ticket_id: Optional[int] = None
+
+
+class ChatSendRequest(BaseModel):
+    """One question in an existing thread.
+
+    ``ticket_id`` overrides the thread's anchor for this turn only — the popup
+    sends the ticket the user is currently looking at, which may differ from the
+    one the thread started on.
+    """
+    content: str = Field(min_length=1, max_length=MAX_QUESTION_LENGTH)
+    ticket_id: Optional[int] = None
+
+    @field_validator("content")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("content must not be blank")
+        return v
