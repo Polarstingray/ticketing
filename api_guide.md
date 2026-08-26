@@ -298,6 +298,58 @@ Response `200`: array of [activity objects](#activity-object).
 
 ---
 
+### Chat assistant
+
+An AI assistant that answers questions about a ticket. **Optional**: it is off unless the
+deployment sets `CHAT_API_URL`, `CHAT_API_KEY` and `CHAT_API_MODEL` (see `.env.example`),
+and `GET /chat/config` is how a client discovers that.
+
+It is strictly read-only and has no tools. Ticket context is resolved against **the
+caller's own** read permissions, so a ticket you may not view returns `404` — the same
+answer `GET /tickets/{id}` gives, so the endpoint can't be used to probe ticket ids.
+
+#### `GET /chat/config`
+Whether the assistant is available, and which model answers. The endpoint URL and API key
+are never exposed.
+```bash
+curl -s -H "X-API-Key: $KEY" "$BASE/chat/config"
+```
+Response `200`: `{ "enabled": true, "model": "claude-sonnet-5" }`
+
+#### `POST /chat/ask`
+Ask one question, optionally anchored to a ticket. There is no conversation state — each
+call stands alone.
+
+| Field | Type | Notes |
+|---|---|---|
+| `question` | string | required, 1–4000 chars |
+| `ticket_id` | int | optional; attaches that ticket's context |
+
+```bash
+curl -s -X POST "$BASE/chat/ask" \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"question": "Why did the resolver stop on this?", "ticket_id": 42}'
+```
+Response `200`:
+```json
+{
+  "answer": "The implement run failed before it opened a PR ...",
+  "usage": {"model": "claude-sonnet-5", "input_tokens": 4210,
+            "output_tokens": 180, "cost_usd": 0.015330},
+  "context_ticket_id": 42,
+  "context_chars": 18442
+}
+```
+`usage.cost_usd` is priced from the deployment's configured per-1M-token rates, and reads
+`0.0` when those are unset. `context_chars` is how much ticket context was actually sent —
+a large ticket is truncated to the configured budget rather than rejected.
+
+Errors: `404` ticket not found or not yours · `422` blank/oversized question ·
+`429` rate limited (per-IP, or the provider's own quota) · `503` assistant not configured ·
+`502`/`504` the model provider failed or timed out.
+
+---
+
 ### Saved views
 
 Named, reusable dashboard filters. A view stores the ticket list's **raw query string**

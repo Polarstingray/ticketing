@@ -624,3 +624,65 @@ class ResolverRosterEntry(BaseModel):
     model: Optional[str] = None
     last_seen_at: Optional[UTCDateTime] = None
     effective_config: Optional[ResolverSettingsValues] = None
+
+
+# --- Chat assistant ----------------------------------------------------------
+
+# Bounds on the question. Unbounded free text here is both a cost problem (it is
+# forwarded to a metered provider) and a context problem (it competes with the
+# ticket context for room), so it is capped well below the context budget.
+MAX_QUESTION_LENGTH = 4000
+
+
+class ChatConfigOut(BaseModel):
+    """What the browser is told about the assistant's configuration.
+
+    Deliberately just the switch and the model name: the endpoint URL and key
+    live in the backend's environment and are never exposed (see
+    ``chat/config.py``). The UI renders no trace of the feature when
+    ``enabled`` is false.
+    """
+    enabled: bool
+    model: str = ""
+
+
+class ChatAskRequest(BaseModel):
+    """One question, optionally anchored to a ticket.
+
+    ``ticket_id`` is a *request* for context, not an authorization claim: the
+    router resolves it against the caller's own read permissions and 404s when
+    they may not see it.
+    """
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_LENGTH)
+    ticket_id: Optional[int] = None
+
+    @field_validator("question")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("question must not be blank")
+        return v
+
+
+class ChatUsage(BaseModel):
+    """Token usage and cost for one answer.
+
+    Mirrors ``AgentRunOut``'s accounting fields on purpose: resolver work and
+    chat work are both metered AI spend, and the UI should be able to render
+    them the same way.
+    """
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+class ChatAskResponse(BaseModel):
+    answer: str
+    usage: ChatUsage
+    # Which ticket's context actually went into the answer, and how much of it —
+    # so the UI can show what the assistant was looking at, and a truncated pack
+    # is visible rather than silent.
+    context_ticket_id: Optional[int] = None
+    context_chars: int = 0
