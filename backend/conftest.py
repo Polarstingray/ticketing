@@ -17,6 +17,12 @@ os.environ["DATABASE_PATH"] = os.path.join(_tmpdir, "test.db")
 os.environ.setdefault("ADMIN_USERNAME", "admin")
 os.environ.setdefault("ADMIN_PASSWORD", "admin")
 os.environ.setdefault("APP_ENV", "dev")
+# Keep the webhook dispatcher out of the suite. The `client` fixture runs the
+# app's lifespan, which would otherwise start a task polling this database every
+# second and making real outbound requests for any webhook a test creates.
+# test_dispatcher.py drives `drain_once` directly instead, which is
+# deterministic where a background task would be a race.
+os.environ["DISPATCHER_ENABLED"] = "0"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
