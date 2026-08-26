@@ -1,4 +1,5 @@
 """Stingray Tickets — FastAPI application entrypoint."""
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+import dispatcher
 from database import Base, SessionLocal, engine
 from migrations import run_migrations
 from ratelimit import limiter
@@ -38,7 +40,24 @@ async def lifespan(app: FastAPI):
         seed_digest_admin_key(db)
     finally:
         db.close()
-    yield
+
+    # The webhook dispatcher runs in-process. That is sound *because the Fly
+    # demo is pinned to one machine*: two of these against one SQLite file would
+    # double-deliver, since claiming a batch is not fenced against another
+    # process. Scaling out means a real broker, and there is no demand for one.
+    task = asyncio.create_task(dispatcher.run_dispatcher()) if dispatcher.enabled() else None
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            # Awaiting the cancellation is what makes shutdown orderly: it lets
+            # the in-flight pass unwind and close its sessions before the
+            # process exits.
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="Stingray Tickets", version="1.1.0", lifespan=lifespan)
