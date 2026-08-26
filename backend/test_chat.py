@@ -285,6 +285,57 @@ def test_pack_keeps_the_header_and_truncates_the_tail(client, make_user, enabled
     assert len(pack) < 1000
 
 
+def test_pack_stays_within_a_budget_the_header_fits_in(client, admin_key, enabled):
+    """Every section — headings, code fences and all — is paid for out of the budget."""
+    from database import SessionLocal
+    from models import User, UserRole
+
+    t = _create(
+        client, admin_key, type="code_review", title="Everything at once",
+        description="d" * 9000,
+        code_blocks=[
+            {"filename": f"f{i}.py", "language": "python",
+             "line_start": 1, "line_end": 200, "content": "c" * 3000}
+            for i in range(6)
+        ],
+    )
+    for i in range(5):
+        r = client.post(f"/tickets/{t['id']}/comments", json={"body": f"comment {i} " * 200},
+                        headers={"X-API-Key": admin_key})
+        assert r.status_code == 201, r.text
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.role == UserRole.admin.value).first()
+        for budget in (2_000, 6_000, 20_000):
+            pack = chat_context.ticket_pack(db, user, t["id"], budget=budget)
+            assert len(pack) <= budget, f"budget {budget} overshot by {len(pack) - budget}"
+    finally:
+        db.close()
+
+
+def test_header_overshoot_is_bounded_by_a_runaway_title(client, admin_key, enabled):
+    """An undersized budget yields a slightly-over pack — and "slightly" is enforced."""
+    from database import SessionLocal
+    from models import User, UserRole
+
+    t = _create(client, admin_key, title="T" * 20_000, description="d" * 20_000,
+                tags=[f"tag{i}-" + "g" * 40 for i in range(20)])
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.role == UserRole.admin.value).first()
+        pack = chat_context.ticket_pack(db, user, t["id"], budget=50)
+    finally:
+        db.close()
+
+    assert pack.startswith(f"# Ticket #{t['id']}: TTT")
+    # The header is never clipped, but its unbounded fields bound themselves, so
+    # the overshoot is a header's worth of characters and not a ticket's worth.
+    assert len(pack) < 1_200
+    assert "T" * (chat_context.TITLE_CAP + 1) not in pack
+
+
 def test_pack_is_none_for_an_unviewable_ticket(client, make_user, enabled):
     from database import SessionLocal
     from models import User
@@ -347,7 +398,20 @@ def test_clip_marks_only_what_it_cut():
     assert chat_budget.clip("", 0) == ""
     clipped = chat_budget.clip("x" * 500, 100)
     assert clipped.endswith(chat_budget.TRUNCATION_NOTE)
-    assert len(clipped) <= 100 + len(chat_budget.TRUNCATION_NOTE)
+
+
+@pytest.mark.parametrize("limit", [1, 10, 44, 45, 100, 999])
+def test_clip_pays_for_its_own_truncation_note(limit):
+    """The note comes out of the limit, so clipped sections don't drift over budget."""
+    assert len(chat_budget.clip("x" * 5_000, limit)) <= limit
+    assert len(chat_budget.clip("line\n" * 1_000, limit)) <= limit
+
+
+def test_clip_spends_a_tiny_allowance_on_content_not_on_the_marker():
+    """Below the note's own length there is no room to mark the cut; keep the text."""
+    small = len(chat_budget.TRUNCATION_NOTE) - 1
+    out = chat_budget.clip("x" * 500, small)
+    assert out == "x" * small
 
 
 def test_budget_drops_sections_once_exhausted():
