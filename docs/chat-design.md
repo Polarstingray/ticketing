@@ -117,13 +117,14 @@ New package `backend/chat/`:
 | `config.py` | Env-driven provider settings; the feature's on/off switch | 1 ✅ |
 | `context.py` | Build the permission-scoped context pack | 1 ✅ |
 | `budget.py` | Character budget for the pack; cost estimation | 1 ✅ |
+| `spend.py` | Per-user daily USD cap (a query, so kept out of `budget.py`) | 2 ✅ |
 | `prompts.py` | System prompt and the untrusted-context fence | 1 ✅ |
-| `provider.py` | OpenAI-compatible chat completion | 1 ✅ (streaming: 2) |
+| `provider.py` | OpenAI-compatible chat completion, streaming | 1–2 ✅ |
 | `tools.py` | The read-only tool schema + dispatch, bound to `(db, user)` | 3 |
 
-The per-user daily USD cap named under *Threats and limits* lands in phase 2 with
-`ChatMessage`: it is computed by summing persisted turn costs, and there is nothing to sum
-until turns are stored.
+The daily USD cap landed in phase 2 as `chat/spend.py` rather than inside `budget.py`:
+the cap is a *query* (it sums persisted turn costs), and `budget.py` is pure arithmetic
+with no database imports, which is what makes it trivially testable.
 
 ```python
 # backend/chat/context.py
@@ -317,12 +318,40 @@ Four PRs, each independently mergeable and useful:
    prompts, provider), `backend/routers/chat.py`, `httpx` promoted from a dev to a runtime
    dependency, `GET /chat/config` + non-streaming `POST /chat/ask`. No tables, no UI.
    45 tests in `backend/test_chat.py`; endpoints documented in `api_guide.md`.
-2. **Persistence + streaming + popup** — the two tables and migrations, conversation
-   CRUD, SSE, `api.stream`, `ChatContext`, `ChatWidget`. The feature becomes usable.
+2. **Persistence + streaming + popup** — ✅ **shipped.** `ChatConversation` /
+   `ChatMessage` + `_migrate_chat_tables`, conversation CRUD, `provider.stream`,
+   `chat/spend.py`'s daily cap, SSE from `POST /chat/conversations/{id}/messages`,
+   `api.stream` + the chat client in `api.js`, `chat/ChatContext.jsx`, `ChatWidget`,
+   `ChatMessageView`, mounted in `Layout`. 77 backend tests; `ChatWidget.test.jsx`
+   covers the popup.
 3. **Tool loop + proposed actions** — `tools.py`, the hop cap, the action cards.
 4. **Resolver debugging** — `AgentRun.log_tail` + migration, resolver-side upload with
    redaction, `get_agent_runs`/`get_resolver_status` tools, the resolver-aware system
    prompt, and a seeded example thread in `seed_demo.py` for the hosted demo.
+
+## What phase 2 settled that the plan hadn't
+
+- **The stream writes through its own database session.** The request-scoped session from
+  `get_db` is closed when the endpoint *returns*, which for a `StreamingResponse` is
+  before the body is produced — so the generator opens its own `SessionLocal` and closes
+  it in a `finally`.
+- **Gates run synchronously, before the response starts.** Once the stream is open the
+  status line is already sent, so a late refusal could only be an error frame inside a
+  200. Ownership, ticket readability and the budget are therefore all checked in the
+  endpoint body, and only provider failures can arrive in-band.
+- **Only the live turn carries a context pack.** Replaying old packs would multiply the
+  cost and feed the model stale copies of a ticket that has since changed; what history
+  contributes is the conversation, not the context.
+- **`ChatMessage.content` stores what the user typed, never the assembled prompt.** A
+  stored thread therefore can't serve stale ticket state back to the model, and can't
+  become a durable copy of a ticket the user has since lost access to.
+- **A per-turn `ticket_id` overrides the thread's anchor.** The popup sends whatever
+  ticket the user is currently looking at, which is often not the one the thread started
+  on. The anchor is re-resolved against the caller's permissions either way.
+- **`CHAT_STREAM_USAGE` exists because `stream_options` is not universal.** Most
+  OpenAI-compatible gateways accept or ignore the field; a strict one rejects it and
+  would break the feature outright, so it has an escape hatch. With it off, streamed
+  answers record $0.00 — no usage is reported to price.
 
 ## Deferred, deliberately
 
