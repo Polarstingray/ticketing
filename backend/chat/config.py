@@ -46,6 +46,15 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    """A boolean from the environment. Unset ⇒ ``default``; anything else is
+    read leniently, since operators write ``1``, ``yes`` and ``on`` too."""
+    raw = _env(name).lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class ChatConfig:
     api_url: str
@@ -60,6 +69,17 @@ class ChatConfig:
     price_in_per_mtok: float
     price_out_per_mtok: float
     rate_limit: str
+    # Per-user USD ceiling per UTC day, summed over stored turns. 0 disables it.
+    # A per-IP rate limit bounds *bursts*; this bounds the bill.
+    daily_usd_limit: float
+    # How many prior turns of a thread to replay to the model. Threads are
+    # unbounded, provider context windows are not, and every replayed turn is
+    # re-billed on each new question.
+    history_turns: int
+    # Ask the provider to report token usage on the final streaming chunk
+    # (OpenAI's `stream_options`). Most compatible gateways accept or ignore it;
+    # a strict one rejects the unknown field outright, hence the escape hatch.
+    stream_usage: bool
 
     @property
     def enabled(self) -> bool:
@@ -78,7 +98,11 @@ class ChatConfig:
         but on a self-hosted provider it is internal topology, and the client has
         no use for it.
         """
-        return {"enabled": self.enabled, "model": self.model if self.enabled else ""}
+        return {
+            "enabled": self.enabled,
+            "model": self.model if self.enabled else "",
+            "daily_usd_limit": self.daily_usd_limit,
+        }
 
 
 @lru_cache(maxsize=1)
@@ -92,4 +116,7 @@ def load() -> ChatConfig:
         price_in_per_mtok=_float_env("CHAT_PRICE_IN", 0.0),
         price_out_per_mtok=_float_env("CHAT_PRICE_OUT", 0.0),
         rate_limit=_env("CHAT_RATE_LIMIT") or "20/minute",
+        daily_usd_limit=_float_env("CHAT_DAILY_USD_LIMIT", 0.0),
+        history_turns=_int_env("CHAT_HISTORY_TURNS", 10),
+        stream_usage=_bool_env("CHAT_STREAM_USAGE", True),
     )

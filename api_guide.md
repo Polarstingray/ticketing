@@ -348,6 +348,64 @@ Errors: `404` ticket not found or not yours · `422` blank/oversized question ·
 `429` rate limited (per-IP, or the provider's own quota) · `503` assistant not configured ·
 `502`/`504` the model provider failed or timed out.
 
+#### Conversations
+
+Threads persist per user and are **strictly private — admins included**. Every route
+answers `404` for a thread you don't own.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/chat/conversations` | your threads, most recently active first |
+| `POST` | `/chat/conversations` | `{ "ticket_id": 42 }` (optional) → `201` |
+| `GET` | `/chat/conversations/{id}` | the thread with its full transcript |
+| `DELETE` | `/chat/conversations/{id}` | `204`; cascades to the messages |
+
+A thread's `ticket_id` is an *anchor*, not a grant: it is re-resolved against the
+caller's own read permissions on every turn, so losing access to the ticket stops the
+thread with a `404`.
+
+#### `POST /chat/conversations/{id}/messages`
+
+Ask a question in a thread. The answer streams back as **Server-Sent Events**.
+
+| Field | Type | Notes |
+|---|---|---|
+| `content` | string | required, 1–4000 chars |
+| `ticket_id` | int | optional; overrides the thread's anchor for this turn |
+
+Every gate — ownership, the ticket's readability, the daily budget — is checked before
+the stream opens, so refusals are real HTTP statuses rather than error frames.
+
+```bash
+curl -N -X POST "$BASE/chat/conversations/3/messages" \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"content": "Why did the implement run fail?"}'
+```
+
+```
+event: token
+data: {"text": "The implement run "}
+
+event: token
+data: {"text": "failed before opening a PR."}
+
+event: done
+data: {"message_id": 91, "conversation_id": 3, "title": "Why did the implement run fail?",
+       "usage": {"model": "claude-sonnet-5", "input_tokens": 4210,
+                 "output_tokens": 180, "cost_usd": 0.015330},
+       "spent_today_usd": 0.0421}
+```
+
+An `error` frame (`{"detail": "...", "status": 502}`) means the failure happened after
+the stream opened. The question is still recorded; no answer is invented.
+
+Note `EventSource` cannot be used here — it is GET-only and cannot carry a body. Read the
+stream with `fetch` and a reader (see `frontend/src/api.js`).
+
+Errors: `404` thread or ticket not found or not yours · `422` blank/oversized content ·
+`429` rate limited **or the daily USD cap reached** (the detail names the numbers) ·
+`503` assistant not configured.
+
 ---
 
 ### Saved views

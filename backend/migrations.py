@@ -118,6 +118,18 @@ def _migrate_saved_views(engine: Engine) -> None:
     SavedView.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_chat_tables(engine: Engine) -> None:
+    """chat_conversations + chat_messages — added with the chat assistant.
+
+    Brand-new tables, so `create_all` builds them on a fresh DB; this backfills
+    them on databases that predate the models. Created parent-first so the
+    child's foreign key has something to point at, and `checkfirst=True` no-ops
+    when they already exist (idempotent)."""
+    from models import ChatConversation, ChatMessage
+    ChatConversation.__table__.create(bind=engine, checkfirst=True)
+    ChatMessage.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
@@ -129,6 +141,7 @@ MIGRATIONS = [
     _migrate_resolver_settings,
     _migrate_resolver_instances,
     _migrate_saved_views,
+    _migrate_chat_tables,
 ]
 
 
