@@ -28,6 +28,18 @@ CODE_SECTION_CAP = 20_000  # all blocks together
 COMMENTS_CAP = 20_000
 DESCRIPTION_CAP = 12_000
 
+# A section is only worth its heading if some of its content survives, so a
+# section is dropped rather than rendered as a title over two words of text.
+MIN_SECTION_CONTENT = 80
+MIN_CODE_CONTENT = 200
+
+# The header is charged against the budget but never clipped (see ``ticket_pack``),
+# so the header fields that are unbounded in the schema bound themselves here.
+# Without these, a ticket with a 20KB title produces a 20KB overshoot.
+TITLE_CAP = 200
+TAGS_CAP = 400
+NAME_CAP = 80
+
 # Row limits for the naturally-unbounded sections. Newest-first at the source,
 # re-sorted oldest-first for the pack so the model reads them chronologically.
 MAX_COMMENTS = 40
@@ -52,12 +64,24 @@ def _names(db: Session, ids: set[int]) -> dict[int, str]:
     return {uid: name for uid, name in rows}
 
 
+def _field(value, limit: int) -> str:
+    """One header field, collapsed onto a single line and bounded.
+
+    A marked truncation would be worse than useless inside a Markdown heading —
+    the note is multi-line — so an over-long field ends in an ellipsis instead.
+    """
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
 def _header(ticket: Ticket, names: dict[int, str]) -> str:
     def who(uid):
-        return names.get(uid, f"#{uid}") if uid else "unassigned"
+        if not uid:
+            return "unassigned"
+        return _field(names.get(uid, f"#{uid}"), NAME_CAP)
 
     lines = [
-        f"# Ticket #{ticket.id}: {ticket.title}",
+        f"# Ticket #{ticket.id}: {_field(ticket.title, TITLE_CAP)}",
         "",
         f"- type: {ticket.type}",
         f"- status: {ticket.status}",
@@ -68,17 +92,29 @@ def _header(ticket: Ticket, names: dict[int, str]) -> str:
         f"- updated: {_fmt_date(ticket.updated_at)}",
         f"- due: {_fmt_date(ticket.due_date)}",
         f"- archived: {bool(ticket.archived)}",
-        f"- tags: {', '.join(ticket.tags or []) or 'none'}",
+        f"- tags: {_field(', '.join(ticket.tags or []), TAGS_CAP) or 'none'}",
     ]
     return "\n".join(lines)
+
+
+def _section(budget: Budget, heading: str, body: str, *, cap: int | None = None) -> str:
+    """One ``## heading`` plus its body, both charged against the budget.
+
+    The heading is part of what the model is sent, so it is paid for like the
+    body is; a section that can't afford its heading and a useful amount of text
+    is dropped whole rather than rendered as a title over two words.
+    """
+    if budget.remaining < len(heading) + MIN_SECTION_CONTENT:
+        return ""
+    budget.used += len(heading)
+    return heading + budget.take(body, cap=cap)
 
 
 def _description(ticket: Ticket, budget: Budget) -> str:
     body = (ticket.description or "").strip()
     if not body:
         return ""
-    text = budget.take(body, cap=DESCRIPTION_CAP)
-    return f"\n\n## Description\n\n{text}" if text else ""
+    return _section(budget, "\n\n## Description\n\n", body, cap=DESCRIPTION_CAP)
 
 
 def _agent_runs(db: Session, ticket: Ticket, budget: Budget) -> str:
@@ -106,32 +142,49 @@ def _agent_runs(db: Session, ticket: Ticket, budget: Budget) -> str:
             f"| {r.phase} | {r.agent} | {r.model or '—'} | {r.status} | "
             f"{r.input_tokens} | {r.output_tokens} | ${r.cost_usd:.4f} |"
         )
-    text = budget.take("\n".join(lines))
-    return f"\n\n## Resolver agent runs\n\n{text}" if text else ""
+    return _section(budget, "\n\n## Resolver agent runs\n\n", "\n".join(lines))
 
 
 def _code_blocks(ticket: Ticket, budget: Budget) -> str:
+    """Code blocks under a nested budget, so the section total is capped too.
+
+    The nested ``Budget`` is charged for everything this section emits — heading,
+    per-block titles, fences and separators, not just the code inside them — and
+    its total is then charged to the parent. Charging only the content would let
+    a ticket with many small blocks overrun the pack in Markdown chrome.
+    """
     blocks = ticket.code_blocks or []
     if not blocks:
         return ""
+    heading = "\n\n## Code\n\n"
+    separator = "\n\n"
     section = Budget(min(budget.remaining, CODE_SECTION_CAP))
+    if section.remaining < len(heading) + MIN_CODE_CONTENT:
+        return ""
+    section.used += len(heading)
+
     parts = []
     for block in blocks:
         if not isinstance(block, dict):
             continue
-        content = section.take(str(block.get("content") or ""), cap=CODE_BLOCK_CAP)
-        if not content:
-            break  # section budget exhausted; further blocks would render empty
-        lang = block.get("language") or ""
-        parts.append(
+        content = str(block.get("content") or "")
+        if not content.strip():
+            continue
+        prefix = (
             f"### {block.get('filename') or 'unknown'} "
             f"(lines {block.get('line_start')}–{block.get('line_end')})\n\n"
-            f"```{lang}\n{content}\n```"
+            f"```{block.get('language') or ''}\n"
         )
+        suffix = "\n```"
+        reserve = len(prefix) + len(suffix) + (len(separator) if parts else 0)
+        if section.remaining < reserve + MIN_CODE_CONTENT:
+            break  # no room left for a header and a useful amount of code
+        section.used += reserve
+        parts.append(prefix + section.take(content, cap=CODE_BLOCK_CAP) + suffix)
     if not parts:
         return ""
     budget.used += section.used
-    return "\n\n## Code\n\n" + "\n\n".join(parts)
+    return heading + separator.join(parts)
 
 
 def _comments(db: Session, ticket: Ticket, names: dict[int, str], budget: Budget) -> str:
@@ -151,8 +204,8 @@ def _comments(db: Session, ticket: Ticket, names: dict[int, str], budget: Budget
         f"{(c.body or '').strip()}"
         for c in reversed(rows)
     ]
-    text = budget.take("\n\n---\n\n".join(parts), cap=COMMENTS_CAP)
-    return f"\n\n## Comments\n\n{text}" if text else ""
+    return _section(budget, "\n\n## Comments\n\n", "\n\n---\n\n".join(parts),
+                    cap=COMMENTS_CAP)
 
 
 def _activity(db: Session, ticket: Ticket, names: dict[int, str], budget: Budget) -> str:
@@ -165,13 +218,14 @@ def _activity(db: Session, ticket: Ticket, names: dict[int, str], budget: Budget
     )
     if not rows:
         return ""
+    # Newest-first from SQL then reversed, exactly as _comments does: the LIMIT
+    # keeps the *recent* rows, the pack reads in the order things happened.
     lines = [
         f"- {_fmt_date(a.created_at)} — {names.get(a.actor_id, f'#{a.actor_id}')} "
         f"{a.action} {a.detail if a.detail else ''}".rstrip()
         for a in reversed(rows)
     ]
-    text = budget.take("\n".join(lines))
-    return f"\n\n## Activity\n\n{text}" if text else ""
+    return _section(budget, "\n\n## Activity\n\n", "\n".join(lines))
 
 
 def ticket_pack(db: Session, user: User, ticket_id: int, *, budget: int) -> str | None:
@@ -195,7 +249,10 @@ def ticket_pack(db: Session, user: User, ticket_id: int, *, budget: int) -> str 
 
     allowance = Budget(budget)
     # The header is charged against the budget but never clipped: a pack that has
-    # lost its own ticket id would be worse than useless.
+    # lost its own ticket id would be worse than useless. The overshoot that buys
+    # is bounded, not open-ended — every header field that is unbounded in the
+    # schema (title, tags, display names) is bounded by ``_field``, so the header
+    # is a few hundred characters however large the ticket is.
     header = _header(ticket, names)
     allowance.used += len(header)
 
