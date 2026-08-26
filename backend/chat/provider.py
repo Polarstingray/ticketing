@@ -32,7 +32,9 @@ class ProviderError(Exception):
 
     ``status`` is the HTTP status the router should return. Provider faults map
     to 502 (the app is fine; its upstream is not) and quota exhaustion to 429, so
-    a client can distinguish "try again later" from "this is broken".
+    a client can distinguish "try again later" from "this is broken". Rejected
+    credentials are the exception: they map to 500, because a key the provider
+    will not accept is this deployment's misconfiguration, not an upstream fault.
     """
 
     def __init__(self, message: str, status: int = 502):
@@ -93,10 +95,14 @@ def complete(cfg: ChatConfig, system: str, user_message: str) -> Completion:
             status=429,
         )
     if resp.status_code in (401, 403):
+        # 500, not 502: the upstream answered fine, it just refused *our* key. The
+        # fault is this deployment's configuration, and 502 would send an operator
+        # hunting through the provider's logs for an outage that isn't there.
+        #
         # Never echo the provider's body here — misconfigured gateways have been
         # known to reflect the submitted credential back in the error.
         raise ProviderError(
-            "The model provider rejected this deployment's credentials.", status=502
+            "The model provider rejected this deployment's credentials.", status=500
         )
     if resp.status_code != 200:
         raise ProviderError(
