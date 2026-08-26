@@ -15,9 +15,12 @@ all-or-nothing check the resolver uses for its single-shot review path. With any
 of them missing the router reports itself disabled and refuses to answer, so a
 stock deployment carries no trace of the feature.
 """
+import logging
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
 
 # Read once per process (``lru_cache`` below). Tests that need a different
 # configuration call ``load.cache_clear()`` after patching the environment.
@@ -27,22 +30,38 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _warn_unparseable(name: str, raw: str, default) -> None:
+    """Say so when a tunable was ignored — the value is a number, never a secret.
+
+    Only the numeric tunables are logged this way. ``CHAT_API_KEY`` and
+    ``CHAT_API_URL`` never pass through here.
+    """
+    logger.warning(
+        "%s=%r is not a number; falling back to %r", name, raw, default
+    )
+
+
 def _float_env(name: str, default: float) -> float:
     """A float from the environment, falling back on anything unparseable.
 
     Pricing and limits are operator-typed; a typo should degrade the cost column
-    to zero, not stop the app from booting.
+    to zero, not stop the app from booting — but it warns, so the zero is not
+    mistaken for a deliberate setting.
     """
+    raw = _env(name)
     try:
-        return float(_env(name) or default)
+        return float(raw or default)
     except ValueError:
+        _warn_unparseable(name, raw, default)
         return default
 
 
 def _int_env(name: str, default: int) -> int:
+    raw = _env(name)
     try:
-        return int(_env(name) or default)
+        return int(raw or default)
     except ValueError:
+        _warn_unparseable(name, raw, default)
         return default
 
 

@@ -34,7 +34,9 @@ class ProviderError(Exception):
 
     ``status`` is the HTTP status the router should return. Provider faults map
     to 502 (the app is fine; its upstream is not) and quota exhaustion to 429, so
-    a client can distinguish "try again later" from "this is broken".
+    a client can distinguish "try again later" from "this is broken". Rejected
+    credentials are the exception: they map to 500, because a key the provider
+    will not accept is this deployment's misconfiguration, not an upstream fault.
     """
 
     def __init__(self, message: str, status: int = 502):
@@ -237,15 +239,19 @@ def stream(cfg: ChatConfig, system: str, messages: list[dict],
 
 def _status_error(status_code: int) -> ProviderError:
     """Map an upstream status to a ProviderError. Shared by both call paths so
-    the streaming and non-streaming routes can't drift in what a 429 means."""
+    the streaming and non-streaming routes can't drift on what a given upstream
+    status means — a rejected key is a 500 on both, a quota a 429 on both."""
     if status_code == 429:
         return ProviderError(
             "The model provider is rate-limiting requests. Try again shortly.",
             status=429,
         )
     if status_code in (401, 403):
+        # 500, not 502: the upstream answered fine, it just refused *our* key. The
+        # fault is this deployment's configuration, and 502 would send an operator
+        # hunting through the provider's logs for an outage that isn't there.
         return ProviderError(
-            "The model provider rejected this deployment's credentials.", status=502
+            "The model provider rejected this deployment's credentials.", status=500
         )
     return ProviderError(
         f"The model provider returned HTTP {status_code}.", status=502

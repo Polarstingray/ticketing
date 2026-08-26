@@ -8,6 +8,8 @@ model would have said about them.
 Shares one database with the rest of the suite, so assertions check membership
 by id rather than absolute counts.
 """
+import logging
+
 import pytest
 
 from chat import budget as chat_budget
@@ -120,6 +122,21 @@ def test_partial_configuration_is_off(client, admin_key, enabled, monkeypatch, m
     monkeypatch.delenv(missing, raising=False)
     chat_config.load.cache_clear()
     assert client.get("/chat/config", headers={"X-API-Key": admin_key}).json()["enabled"] is False
+
+
+def test_unparseable_numeric_settings_fall_back_and_warn(monkeypatch, caplog):
+    """A mistyped price still boots, but it says so instead of silently reading $0."""
+    monkeypatch.setenv("CHAT_PRICE_IN", "abc")
+    monkeypatch.setenv("CHAT_TIMEOUT", "soon")
+    chat_config.load.cache_clear()
+    with caplog.at_level(logging.WARNING, logger=chat_config.__name__):
+        cfg = chat_config.load()
+    chat_config.load.cache_clear()
+
+    assert cfg.price_in_per_mtok == 0.0
+    assert cfg.timeout == 120
+    warned = " ".join(r.getMessage() for r in caplog.records)
+    assert "CHAT_PRICE_IN" in warned and "CHAT_TIMEOUT" in warned
 
 
 def test_ask_when_unconfigured_is_503(client, admin_key, disabled):
@@ -248,7 +265,7 @@ def test_unparseable_price_falls_back_instead_of_breaking(monkeypatch):
 
 # --- Provider failures -------------------------------------------------------
 
-@pytest.mark.parametrize("status_code", [429, 502, 504])
+@pytest.mark.parametrize("status_code", [429, 500, 502, 504])
 def test_provider_errors_keep_their_status(
     client, admin_key, enabled, monkeypatch, status_code
 ):
@@ -482,7 +499,9 @@ def test_provider_tolerates_a_missing_usage_block(monkeypatch):
 
 @pytest.mark.parametrize(
     "status_code,expected",
-    [(429, 429), (401, 502), (403, 502), (500, 502), (418, 502)],
+    # Rejected credentials are ours to fix, so 500 — not 502, which would point
+    # an operator at an upstream outage that isn't happening.
+    [(429, 429), (401, 500), (403, 500), (500, 502), (418, 502)],
 )
 def test_provider_maps_upstream_status_codes(monkeypatch, status_code, expected):
     _respond(monkeypatch, status_code=status_code, json_body={"error": "nope"})
@@ -1053,9 +1072,13 @@ def test_stream_stops_at_done_and_ignores_trailing_frames(monkeypatch):
     assert list(chat_provider.stream(_cfg(), "s", [], result)) == ["kept"]
 
 
-@pytest.mark.parametrize("status_code,expected", [(429, 429), (401, 502), (500, 502)])
+@pytest.mark.parametrize("status_code,expected", [(429, 429), (401, 500), (500, 502)])
 def test_stream_maps_upstream_status_codes(monkeypatch, status_code, expected):
-    """The same mapper as the non-streaming path, so the two can't drift."""
+    """The same mapper as the non-streaming path, so the two can't drift.
+
+    401 -> 500 is inherited rather than reimplemented: rejected credentials are
+    this deployment's misconfiguration, and routing both paths through
+    ``_status_error`` is what makes that true of streamed turns too."""
     _stream_response(monkeypatch, "nope", status_code=status_code)
     result = chat_provider.StreamResult()
     with pytest.raises(chat_provider.ProviderError) as exc:
