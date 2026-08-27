@@ -136,6 +136,28 @@ def _migrate_agent_run_log_tail(engine: Engine) -> None:
     _add_column(engine, "agent_runs", "log_tail", "TEXT NOT NULL DEFAULT ''")
 
 
+def _migrate_outbox(engine: Engine) -> None:
+    """outbox table — added with the transactional event bus.
+
+    A brand-new table, so `create_all` builds it on a fresh DB; this backfills
+    it on databases that predate the model. `checkfirst=True` no-ops when the
+    table already exists (idempotent)."""
+    from models import Outbox
+    Outbox.__table__.create(bind=engine, checkfirst=True)
+
+
+def _migrate_webhooks(engine: Engine) -> None:
+    """webhooks + webhook_deliveries tables — added with webhook subscriptions.
+
+    Brand-new tables, so `create_all` builds them on a fresh DB; this backfills
+    them on databases that predate the models. `checkfirst=True` no-ops when a
+    table already exists (idempotent). Order matters: webhook_deliveries carries
+    a foreign key onto webhooks."""
+    from models import Webhook, WebhookDelivery
+    Webhook.__table__.create(bind=engine, checkfirst=True)
+    WebhookDelivery.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
@@ -149,6 +171,8 @@ MIGRATIONS = [
     _migrate_saved_views,
     _migrate_chat_tables,
     _migrate_agent_run_log_tail,
+    _migrate_outbox,
+    _migrate_webhooks,
 ]
 
 

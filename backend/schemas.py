@@ -13,7 +13,9 @@ from models import (
     TicketStatus,
     TicketType,
     UserRole,
+    WebhookEventType,
 )
+from webhook_urls import validate_webhook_url
 
 # --- Tag validation ----------------------------------------------------------
 # Defense in depth, applied to ALL callers (including the resolver bot). Tag
@@ -461,6 +463,142 @@ class SavedViewOut(BaseModel):
     query: str
     created_at: UTCDateTime
     updated_at: UTCDateTime
+
+
+# --- Webhooks ----------------------------------------------------------------
+# A webhook is an outbound request the server makes to a user-supplied URL, so
+# the URL is validated *here*, at the schema layer: a rejected URL is a 422 with
+# the specific reason, and the router cannot forget to call the check. See
+# webhook_urls for the SSRF rules themselves.
+
+MAX_WEBHOOKS_PER_USER = 20
+MAX_WEBHOOK_NAME_LENGTH = 60
+MAX_TAG_FILTERS = 20
+
+
+def _clean_webhook_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise ValueError("name must not be empty")
+    if len(name) > MAX_WEBHOOK_NAME_LENGTH:
+        raise ValueError(f"name too long (max {MAX_WEBHOOK_NAME_LENGTH} chars)")
+    if any(ord(c) < 32 for c in name):
+        raise ValueError("name must not contain control characters")
+    return name
+
+
+def _clean_tag_filter(tags: List[str]) -> List[str]:
+    """Reuse the ticket tag rules — a filter only ever matches real tags."""
+    cleaned = _clean_tags(tags) or []
+    if len(cleaned) > MAX_TAG_FILTERS:
+        raise ValueError(f"too many tag filters (max {MAX_TAG_FILTERS})")
+    return cleaned
+
+
+class WebhookCreate(BaseModel):
+    name: str
+    url: str
+    # Empty list = subscribe to every event type.
+    event_types: List[WebhookEventType] = Field(default_factory=list)
+    tag_filter: List[str] = Field(default_factory=list)
+    active: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def _v_name(cls, v: str) -> str:
+        return _clean_webhook_name(v)
+
+    @field_validator("url")
+    @classmethod
+    def _v_url(cls, v: str) -> str:
+        return validate_webhook_url(v)
+
+    @field_validator("tag_filter")
+    @classmethod
+    def _v_tags(cls, v: List[str]) -> List[str]:
+        return _clean_tag_filter(v)
+
+
+class WebhookUpdate(BaseModel):
+    """Partial update: omit a field to leave it alone."""
+    name: Optional[str] = None
+    url: Optional[str] = None
+    event_types: Optional[List[WebhookEventType]] = None
+    tag_filter: Optional[List[str]] = None
+    active: Optional[bool] = None
+
+    @field_validator("name")
+    @classmethod
+    def _v_name(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _clean_webhook_name(v)
+
+    @field_validator("url")
+    @classmethod
+    def _v_url(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else validate_webhook_url(v)
+
+    @field_validator("tag_filter")
+    @classmethod
+    def _v_tags(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        return None if v is None else _clean_tag_filter(v)
+
+
+class WebhookOut(BaseModel):
+    """The webhook as every read path returns it — **no `secret` field.**
+
+    Adding one here is the whole bug this feature has to avoid; the plaintext
+    secret is exposed only by WebhookCreated / WebhookSecretRotated.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    name: str
+    url: str
+    event_types: List[str] = []
+    tag_filter: List[str] = []
+    active: bool
+    consecutive_failures: int
+    secret_prefix: str
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
+
+
+class WebhookCreated(WebhookOut):
+    """Returned exactly once on creation — includes the plaintext secret."""
+    secret: str
+
+
+class WebhookSecretRotated(BaseModel):
+    """Returned exactly once on rotation — includes the new plaintext secret."""
+    id: int
+    secret: str
+    secret_prefix: str
+
+
+class WebhookDeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    webhook_id: int
+    event_id: Optional[int] = None
+    event_type: str
+    ticket_id: Optional[int] = None
+    attempt_count: int
+    next_attempt_at: Optional[UTCDateTime] = None
+    status_code: Optional[int] = None
+    response_snippet: str
+    error: str
+    state: str
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
+
+
+class PaginatedDeliveries(BaseModel):
+    items: List[WebhookDeliveryOut]
+    total: int
+    limit: int
+    offset: int
 
 
 # --- API keys ----------------------------------------------------------------

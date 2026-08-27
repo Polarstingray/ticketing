@@ -73,6 +73,26 @@ def test_creates_agent_runs_table():
         os.unlink(path)
 
 
+def test_creates_webhook_tables():
+    """On a DB predating the webhook models, run_migrations creates both tables
+    and is idempotent on a second call."""
+    engine, path = _legacy_engine()
+    try:
+        assert "webhooks" not in _tables(engine)
+        run_migrations(engine)
+        assert {"webhooks", "webhook_deliveries"} <= _tables(engine)
+        assert {"url", "secret", "secret_prefix", "active", "consecutive_failures"} <= _columns(
+            engine, "webhooks"
+        )
+        assert {"webhook_id", "event_id", "ticket_id", "state", "attempt_count"} <= _columns(
+            engine, "webhook_deliveries"
+        )
+        run_migrations(engine)  # idempotent
+        assert {"webhooks", "webhook_deliveries"} <= _tables(engine)
+    finally:
+        os.unlink(path)
+
+
 def test_skips_absent_tables():
     """With no tables at all, migrations are a no-op (create_all makes new
     tables; there's nothing to ALTER)."""

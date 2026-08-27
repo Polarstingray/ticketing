@@ -1045,8 +1045,85 @@ def test_run_opencode_once_classifies_retryable():
     # errors are retryable; auth errors are not. Drive _run_opencode_once directly.
     assert rt._RETRYABLE_ERR.search("model overloaded, 503")
     assert rt._RETRYABLE_ERR.search("RESOURCE_EXHAUSTED")
+    assert rt._RETRYABLE_ERR.search("Unexpected server error")
+    assert rt._RETRYABLE_ERR.search("Internal error")
     assert not rt._RETRYABLE_ERR.search("AuthError")
     assert not rt._RETRYABLE_ERR.search("permission denied")
+    # Non-retryable patterns should not match generic server errors
+    assert not rt._NON_RETRYABLE_ERR.search("UnknownError")
+    assert not rt._NON_RETRYABLE_ERR.search("Unexpected server error")
+    # Non-retryable patterns should match auth errors
+    assert rt._NON_RETRYABLE_ERR.search("AuthError")
+    assert rt._NON_RETRYABLE_ERR.search("unauthorized")
+
+
+def test_run_opencode_once_full_error_dict_matching(tmp_path, fake_cfg, monkeypatch):
+    # Error dict with nested data.message and ref should be matched against the
+    # full serialized dict, catching generic server errors. The failure text should
+    # include the message and ref.
+    _set_opencode_cfg(fake_cfg)
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        # Mimic the shape from ticket #101: UnknownError with nested message and ref
+        on_line(json.dumps({
+            "type": "error",
+            "error": {
+                "name": "UnknownError",
+                "data": {
+                    "message": "Unexpected server error. Check server logs for details.",
+                    "ref": "err_69e24c6f"
+                }
+            }
+        }))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, text, retryable, _ = rt._run_opencode_once(
+        fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log", "m")
+    # Should be retryable because the full dict matches _RETRYABLE_ERR (via "Unexpected server error")
+    assert ok is False
+    assert retryable is True
+    # Failure text should include both message and ref
+    assert "UnknownError" in text
+    assert "Unexpected server error" in text
+    assert "err_69e24c6f" in text
+
+
+def test_run_opencode_once_unrecognized_error_defaults_retryable(tmp_path, fake_cfg, monkeypatch):
+    # An error that doesn't match either _RETRYABLE_ERR or _NON_RETRYABLE_ERR should
+    # default to retryable (cost-benefit favors retry).
+    _set_opencode_cfg(fake_cfg)
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        on_line(json.dumps({
+            "type": "error",
+            "error": {"name": "SomeFutureUnknownError"}
+        }))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, text, retryable, _ = rt._run_opencode_once(
+        fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log", "m")
+    assert ok is False
+    assert retryable is True  # Unrecognized error should default to retryable
+
+
+def test_run_opencode_once_auth_error_not_retryable(tmp_path, fake_cfg, monkeypatch):
+    # Auth/permission errors should not be retryable.
+    _set_opencode_cfg(fake_cfg)
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        on_line(json.dumps({
+            "type": "error",
+            "error": {"name": "AuthError", "data": {"message": "Invalid API key"}}
+        }))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, text, retryable, _ = rt._run_opencode_once(
+        fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log", "m")
+    assert ok is False
+    assert retryable is False
 
 
 def test_filed_tickets_in_log_parses_created_lines(tmp_path):

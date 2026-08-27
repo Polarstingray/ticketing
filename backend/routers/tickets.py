@@ -22,6 +22,7 @@ from control_tags import (
     unauthorized_tags,
 )
 from database import get_db
+from events import emit
 from inbox import create_notification
 from models import (
     PRIORITY_ORDER,
@@ -279,6 +280,7 @@ def create_ticket(
     db.flush()  # assign ticket.id for the activity rows
 
     record_activity(db, ticket.id, user.id, "created")
+    emit(db, type="ticket.created", ticket=ticket, actor=user)
     if assignee is not None:
         record_activity(
             db, ticket.id, user.id, "assigned",
@@ -287,6 +289,8 @@ def create_ticket(
         create_notification(
             db, user_id=assignee.id, type="assigned", ticket=ticket, actor=user,
         )
+        emit(db, type="ticket.assigned", ticket=ticket, actor=user,
+             delta={"to": assignee.id, "name": assignee.display_name})
     db.commit()
     db.refresh(ticket)
 
@@ -361,6 +365,8 @@ def update_ticket(
     if "status" in data and ticket.status != old_status:
         record_activity(db, ticket.id, user.id, "status_changed",
                         {"from": old_status, "to": ticket.status})
+        emit(db, type="ticket.status_changed", ticket=ticket, actor=user,
+             delta={"from": old_status, "to": ticket.status})
     if "priority" in data and ticket.priority != old_priority:
         record_activity(db, ticket.id, user.id, "priority_changed",
                         {"from": old_priority, "to": ticket.priority})
@@ -373,6 +379,8 @@ def update_ticket(
             create_notification(
                 db, user_id=new_assignee.id, type="assigned", ticket=ticket, actor=user,
             )
+            emit(db, type="ticket.assigned", ticket=ticket, actor=user,
+                 delta={"to": new_assignee.id, "name": new_assignee.display_name})
     if "tags" in data and data["tags"] is not None:
         new_tags = list(ticket.tags or [])
         if new_tags != old_tags:
@@ -380,6 +388,8 @@ def update_ticket(
             removed = [t for t in old_tags if t not in new_tags]
             record_activity(db, ticket.id, user.id, "tags_changed",
                             {"added": added, "removed": removed})
+            emit(db, type="ticket.tagged", ticket=ticket, actor=user,
+                 delta={"added": added, "removed": removed})
 
     ticket.updated_at = utcnow()
     db.commit()
@@ -464,6 +474,8 @@ def create_agent_run(
         finished_at=payload.finished_at or utcnow(),
     )
     db.add(run)
+    emit(db, type="agent_run.finished", ticket=ticket, actor=user,
+         delta={"agent": run.agent, "phase": run.phase, "status": run.status})
     db.commit()
     db.refresh(run)
     return run

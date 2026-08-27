@@ -176,6 +176,23 @@ export const api = {
   updateSavedView: (id, body) => request("PATCH", `/saved-views/${id}`, body),
   deleteSavedView: (id) => request("DELETE", `/saved-views/${id}`),
 
+  // Webhooks. The signing `secret` comes back ONLY from createWebhook and
+  // rotateWebhookSecret — every read path returns `secret_prefix` instead, so
+  // there is nowhere to re-fetch it from if the user misses it.
+  listWebhooks: (params = {}) => request("GET", "/webhooks" + qs(params)),
+  createWebhook: (body) => request("POST", "/webhooks", body),
+  getWebhook: (id) => request("GET", `/webhooks/${id}`),
+  updateWebhook: (id, body) => request("PATCH", `/webhooks/${id}`, body),
+  deleteWebhook: (id) => request("DELETE", `/webhooks/${id}`),
+  rotateWebhookSecret: (id) => request("POST", `/webhooks/${id}/rotate-secret`),
+  // Paginated envelope { items, total, limit, offset }; params: state, ticket_id,
+  // limit, offset.
+  listWebhookDeliveries: (id, params = {}) =>
+    request("GET", `/webhooks/${id}/deliveries` + qs(params)),
+  // Re-arms a delivery row for another attempt; the worker does the sending.
+  redeliverWebhookDelivery: (id, deliveryId) =>
+    request("POST", `/webhooks/${id}/deliveries/${deliveryId}/redeliver`),
+
   listComments: (id) => request("GET", `/tickets/${id}/comments`),
   addComment: (id, body) => request("POST", `/tickets/${id}/comments`, { body }),
   editComment: (id, commentId, body) =>
@@ -196,6 +213,10 @@ export const api = {
   unreadCount: () => request("GET", "/notifications/unread_count"),
   markNotificationRead: (id) => request("POST", `/notifications/${id}/read`),
   markAllNotificationsRead: () => request("POST", "/notifications/read_all"),
+  // Clears the caller's unread notifications for one ticket (the "opening the
+  // ticket is the read gesture" path). Returns the new { unread_count }.
+  markTicketNotificationsRead: (id) =>
+    request("POST", `/notifications/read_by_ticket/${id}`),
   deleteNotification: (id) => request("DELETE", `/notifications/${id}`),
   bulkDeleteNotifications: (ids) =>
     request("POST", "/notifications/bulk_delete", { ids }),

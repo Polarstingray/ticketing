@@ -52,14 +52,21 @@ def create_notification(
     *,
     user_id: Optional[int],
     type: str,
-    ticket: Ticket,
+    ticket: Optional[Ticket],
     actor: Optional[User],
     comment_id: Optional[int] = None,
+    title: Optional[str] = None,
 ) -> None:
     """Stage a notification for ``user_id`` about ``ticket``.
 
     No-op when there's no recipient, when the recipient is the actor (you never
     notify yourself), or when ``should_notify`` declines.
+
+    ``ticket`` may be None for a *system* notification that names no ticket —
+    the dispatcher's webhook auto-disable notice is the one such case. Pass
+    ``title`` to supply the inbox line for it; the row then carries a NULL
+    ``ticket_id``, which the model already permits (it is not an enforced FK)
+    and which the inbox renders as an entry with nothing to link to.
     """
     if user_id is None:
         return
@@ -72,8 +79,8 @@ def create_notification(
         Notification(
             user_id=user_id,
             type=type,
-            ticket_id=ticket.id,
-            ticket_title=ticket.title or "",
+            ticket_id=ticket.id if ticket else None,
+            ticket_title=(title if title is not None else (ticket.title if ticket else "")) or "",
             actor_id=actor.id if actor else None,
             actor_name=(actor.display_name if actor else "") or "",
             comment_id=comment_id,

@@ -8,7 +8,13 @@ from types import SimpleNamespace
 
 from database import SessionLocal
 from inbox import should_notify
-from models import NotificationPreference, Ticket, User
+from models import (
+    NotificationChannel,
+    NotificationPreference,
+    NotificationType,
+    Ticket,
+    User,
+)
 from notifications import notify_comment_email
 
 
@@ -30,14 +36,17 @@ def test_get_returns_full_matrix_default_on(client, make_user):
     r = client.get("/preferences", headers=_hdr(u.key))
     assert r.status_code == 200, r.text
     items = r.json()["items"]
-    # 2 types x 2 channels.
-    assert len(items) == 4
-    assert all(it["enabled"] is True for it in items)
-    combos = {(it["type"], it["channel"]) for it in items}
-    assert combos == {
-        ("assigned", "in_app"), ("assigned", "email"),
-        ("commented", "in_app"), ("commented", "email"),
+    # Every type x every channel. Derived from the enums rather than spelled
+    # out, because the matrix is what the router derives too — a new
+    # NotificationType should extend this, not break it.
+    expected = {
+        (t.value, c.value) for t in NotificationType for c in NotificationChannel
     }
+    assert len(items) == len(expected)
+    assert all(it["enabled"] is True for it in items)
+    assert {(it["type"], it["channel"]) for it in items} == expected
+    # The types that predate the settings panel are still in it.
+    assert {("assigned", "in_app"), ("commented", "email")} <= expected
 
 
 # --- PUT: upsert + prune -----------------------------------------------------
