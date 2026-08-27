@@ -17,12 +17,15 @@ worker thread and never the event loop, and the module stays consistent with the
 synchronous SQLAlchemy session it sits beside.
 """
 import json
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import httpx
 
 from .config import ChatConfig
+
+logger = logging.getLogger(__name__)
 
 # Providers vary in what they call these; normalize to the OpenAI names we read.
 _USAGE_INPUT_KEYS = ("prompt_tokens", "input_tokens")
@@ -137,10 +140,20 @@ class ToolCall:
     assistant message on the next hop, and some providers validate that
     round-trip — re-serializing a parsed dict changes key order and whitespace.
     Parsing happens once, at dispatch, where a failure is answerable.
+
+    ``id`` and ``name`` are required to be non-empty: the id is echoed back as
+    the ``tool_call_id`` of the matching ``role:"tool"`` message and a strict
+    provider rejects an empty one, and a nameless call cannot be dispatched.
+    Both are dropped upstream in :func:`_finish_tool_calls`; this is the belt to
+    that braces, so a partial call can never reach the wire.
     """
     id: str
     name: str
     arguments: str
+
+    def __post_init__(self) -> None:
+        if not self.id or not self.name:
+            raise ValueError("a tool call needs both an id and a name")
 
 
 @dataclass
@@ -237,11 +250,19 @@ def _accumulate_tool_calls(chunk: dict, buffers: dict) -> None:
         if not isinstance(function, dict):
             continue
         name = function.get("name")
-        if isinstance(name, str):
+        if isinstance(name, str) and name:
             # Appended, not assigned: the wire format permits a split name, and
             # assigning would keep only its last fragment. No gateway observed
             # repeats a whole name across fragments, which is what would make
-            # appending wrong.
+            # appending wrong — so log it when it happens, since a gateway that
+            # re-sends the whole name would otherwise corrupt the call silently
+            # into "get_ticketget_ticket" and surface as an unknown-tool error.
+            if buf["name"]:
+                logger.warning(
+                    "tool call name arrived in multiple fragments (%r + %r); "
+                    "appending, per the wire format",
+                    buf["name"], name,
+                )
             buf["name"] += name
         arguments = function.get("arguments")
         if isinstance(arguments, str):
@@ -251,20 +272,33 @@ def _accumulate_tool_calls(chunk: dict, buffers: dict) -> None:
 def _finish_tool_calls(buffers: dict) -> list[ToolCall]:
     """The accumulated buffers as complete calls, in the order they were opened.
 
-    A buffer with no name is dropped: a stream cut off mid-call leaves one, and a
-    nameless call cannot be dispatched — passing it on would only turn a truncated
-    answer into an "unknown tool" error attributed to the model.
+    A buffer with no name **or no id** is dropped: a stream cut off mid-call
+    leaves one, a nameless call cannot be dispatched, and an id-less one cannot
+    be answered — the matching ``role:"tool"`` message has to carry it back as
+    ``tool_call_id``, and a strict provider rejects an empty one. Passing either
+    on would only turn a truncated answer into a confusing error attributed to
+    the model.
+
+    Ordering is by index when every call has one, and by first-seen order the
+    moment the two keyings are mixed. Sorting index-keyed calls ahead of
+    id-keyed ones would reorder a gateway that interleaves them (index 0, id
+    "abc", index 1), and tool results are replayed to the model in the order
+    they were run — wire order is the only defensible answer there.
     """
+    mixed = len({kind for kind, _ in buffers}) > 1
+
     def order(item):
         (kind, value), buf = item
+        if mixed or kind != "i":
+            return buf["seq"]
         # Numeric on the index when there is one — string-sorting it would put
-        # call 10 before call 2. Otherwise first-seen order.
-        return (0, value) if kind == "i" else (1, buf["seq"])
+        # call 10 before call 2.
+        return value
 
     return [
         ToolCall(id=buf["id"], name=buf["name"], arguments=buf["arguments"])
         for _, buf in sorted(buffers.items(), key=order)
-        if buf["name"]
+        if buf["name"] and buf["id"]
     ]
 
 
@@ -361,6 +395,13 @@ def stream(cfg: ChatConfig, system: str, messages: list[dict],
     result.tool_calls = _finish_tool_calls(tool_buffers)
     if not result.model:
         result.model = cfg.model
+    # `finish_reason` is never branched on (see StreamResult) — logged instead,
+    # so it is diagnostics that someone can actually read when a turn ends
+    # oddly, rather than a field nothing ever looks at.
+    logger.debug(
+        "stream finished: reason=%r tool_calls=%d text_chars=%d",
+        result.finish_reason, len(result.tool_calls), len(result.text),
+    )
 
 
 def _status_error(status_code: int) -> ProviderError:
