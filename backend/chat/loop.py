@@ -164,9 +164,9 @@ def run(cfg: ChatConfig, system: str, messages: list[dict], state: TurnState, *,
         for call in result.tool_calls:
             yield from _run_one(call, work, state, dispatch=dispatch, budget=budget)
 
-    # Unreachable: the final iteration has offer_tools False, so it either
-    # returns on no tool calls or on the capped branch above.
-    state.capped = True
+    # No epilogue: the loop cannot fall out of the bottom. The final iteration
+    # has `offer_tools` False, so it either returns on no tool calls or on the
+    # capped branch above.
 
 
 def _run_one(call: provider.ToolCall, work: list[dict], state: TurnState, *,

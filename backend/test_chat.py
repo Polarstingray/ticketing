@@ -1221,6 +1221,40 @@ def test_stream_drops_a_nameless_tool_call(monkeypatch):
     assert [c.name for c in result.tool_calls] == ["get_ticket"]
 
 
+def test_stream_drops_a_tool_call_with_no_id(monkeypatch):
+    """The id comes back as the `tool_call_id` of the matching role:"tool"
+    message; a strict provider rejects an empty one. A stream cut off before any
+    id fragment leaves a buffer with a name and no id — dropping it turns a
+    truncated answer into a short answer, not a 400 from the next hop."""
+    out, result = _stream_tools(
+        monkeypatch,
+        _tool_frame(0, call_id="whole", name="get_ticket", arguments="{}"),
+        _tool_frame(1, name="get_agent_runs", arguments="{}"),
+    )
+    assert [(c.id, c.name) for c in result.tool_calls] == [("whole", "get_ticket")]
+
+
+def test_stream_keeps_wire_order_when_index_and_id_keying_are_mixed(monkeypatch):
+    """A gateway that sends `index` on some calls and not others must not have
+    its calls reordered: results are replayed to the model in the order they
+    were run, so wire order is the only defensible one."""
+    out, result = _stream_tools(
+        monkeypatch,
+        _tool_frame(0, call_id="a", name="t_first", arguments="{}"),
+        _tool_frame(None, call_id="b", name="t_second", arguments="{}"),
+        _tool_frame(1, call_id="c", name="t_third", arguments="{}"),
+    )
+    assert [c.name for c in result.tool_calls] == ["t_first", "t_second", "t_third"]
+
+
+def test_a_tool_call_cannot_be_built_without_an_id_and_a_name():
+    """The dataclass is the last line of defence for what reaches the wire."""
+    with pytest.raises(ValueError):
+        chat_provider.ToolCall(id="", name="get_ticket", arguments="{}")
+    with pytest.raises(ValueError):
+        chat_provider.ToolCall(id="a", name="", arguments="{}")
+
+
 def test_stream_ignores_finish_reason_and_trusts_the_accumulated_calls(monkeypatch):
     """Several gateways report finish_reason "stop" on a chunk that carries tool
     calls, so the presence of calls is the ground truth."""
