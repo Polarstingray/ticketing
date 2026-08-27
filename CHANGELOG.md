@@ -9,7 +9,62 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 
 ## [Unreleased]
 
+## [1.2.0]
+
 ### Added
+- **Chat assistant.** An optional AI assistant, in a popup on every page, that answers
+  questions about a ticket and the resolver's work on it. Off unless the deployment sets
+  `CHAT_API_URL`/`CHAT_API_KEY`/`CHAT_API_MODEL`, so a stock install carries no trace of
+  it. Answers stream as Server-Sent Events (`fetch` + a reader, since `EventSource` cannot
+  POST a body); threads persist per user and are **strictly private, admins included** —
+  unlike tickets there is deliberately no admin override, because a thread quotes ticket
+  content and a second, weaker path to that data is not worth having.
+
+  It has four read-only tools — search tickets, read one, read a ticket's resolver runs,
+  read the resolver roster — and **its write surface is zero**. It can only *propose* an
+  action (file a ticket, post a comment, change a status, ask the resolver to apply its
+  findings), which renders a card the user confirms; confirming calls the endpoints that
+  already existed, as the signed-in user. That is the load-bearing decision, not a
+  convenience: ticket text is attacker-controllable — descriptions, comments and code
+  blocks are written by people and by agents quoting repositories — so the mitigation is
+  structural rather than a matter of prompt wording. An injected instruction can at worst
+  make a button appear that a human has to read and click.
+
+  The read side follows the same rule. Tool dispatch is
+  `dispatch(name, args, *, db, user, ...)`: `args` is model-supplied and untrusted,
+  everything after the `*` is bound by the router, and every tool re-derives visibility
+  from that bound user through the same gates the REST API uses. The model chooses *what*
+  to ask about, never *who is asking*. A ticket you may not view returns the same
+  not-found answer whether it exists or not, so neither the endpoint nor a tool can probe
+  ticket ids. `get_resolver_status` is admin-only, matching `GET /resolvers` — a tool must
+  never be a wider door than the endpoint beside it. Metered twice: a per-IP rate limit
+  caps bursts, a per-user daily USD cap caps the bill, and the tool loop stops escalating
+  once a turn's running cost crosses that cap.
+- **Failed resolver runs now carry their transcript tail** (`AgentRun.log_tail`). Agent
+  transcripts lived only on the machine the resolver runs on, so "why did implement fail
+  on #42?" was unanswerable from the app — the one question the runs table exists to help
+  with. It could say a phase failed, never what it said on the way out. Only failures ship
+  a tail (a successful transcript is bulk nobody reads), enforced at both ends: the
+  resolver sends nothing for a succeeded run, and the API drops a tail posted alongside
+  `status="succeeded"`, since the sender is an unattended bot. Every tail is scrubbed
+  through the resolver's existing `audit.redact` before it leaves the machine — which
+  exposed that only the Stingray key had ever been registered as a literal secret, so the
+  review, critique and digest keys were scrubbed nowhere; all of them are registered now.
+  That mattered little while tails stayed on disk and matters a great deal now they are
+  persisted in the app and rendered into a model prompt.
+- **Event bus (transactional outbox).** Ticket changes are recorded to an `outbox` table
+  in the same transaction that makes the change, so an event cannot be emitted for a write
+  that rolled back, nor lost by a crash between the write and the notify. It is the seam
+  the SSE stream and the webhook dispatcher both consume.
+- **`GET /events/stream`.** A Server-Sent Events tail of the ticket event log, so an
+  automation reacts to a change in about a second instead of polling for it — and because
+  the client dials out, one behind NAT needs no open port. Visibility is the same rule as
+  `GET /tickets`, applied against the ticket *as it is now*, so a ticket reassigned away
+  stops appearing. A fresh connection starts at the head and does not replay history:
+  replaying to every client that connects turns a reconnect storm into a stampede. To
+  cover a gap, pass back the last id you processed via `last_event_id` or the standard
+  `Last-Event-ID` header. `resolver/listen.py` consumes it, so a resolver can wake on a
+  ticket instead of waiting for its next cron tick.
 - **Webhook subscriptions, with a delivery log.** An operator can register an HTTPS
   endpoint (`/webhooks` CRUD, plus a settings panel at `/settings/webhooks`) that receives
   ticket events, optionally narrowed to specific event types and to tickets carrying given
@@ -38,41 +93,6 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   unread count is non-zero, keeping an empty inbox at one request per 30s poll.
   Assignment notifications intentionally get no dot — the ticket already lands in the
   assignee's queue.
-
-### Fixed
-- **Pulls now keep the Python venvs in step with the checkout.** `resolver/requirements.txt`
-  gained `-e ../cli` (the shared client package); a pull brought the code that imports it
-  and nothing reinstalled, so every cron tick died at import with `ModuleNotFoundError`
-  and both resolvers on that box went silent for over an hour. It presented as "the
-  resolver isn't scheduled" — cron was firing perfectly, each run just died before it
-  could log a sweep. `deploy/autodeploy.sh` now reinstalls any component whose
-  `requirements.txt` hash changed, keyed on a stamp so an ordinary pull costs nothing.
-  It runs ahead of every gate — including the "nothing deployable changed" check, which
-  skips exactly the resolver-only commits that move these requirements, and the
-  auto-deploy kill switch, so a resolver-only box with `deploy/.autodeploy-disabled`
-  still gets synced. Also available as `make venv-sync`.
-- **A resolver that can't start now still rotates its cron log.** `audit.maintain_logs`
-  runs once the module has imported and a config has loaded, which is too late for the
-  failure it most needs to survive: an import-time crash relaunching on cron every few
-  minutes, appending a traceback to a log that can never roll itself. Rotation now also
-  happens at the top of `resolve_tickets`, before the imports that can fail, reading the
-  env file with nothing but stdlib.
-
-### Fixed
-- **Reviews and fixes now follow the commit a ticket was filed against.** A ticket
-  recorded which repo to work in (`repo:<name>`) but not where in it, so every git
-  decision was made from ambient checkout state: a review read whatever branch was
-  checked out at sweep time, a `/fix` branched off the remote default, and its PR
-  targeted that default. Filing a review from a feature branch and then switching
-  branches meant the review saw code the ticket was never about, and the fix was written
-  against a tree missing the very commits under review. `stingray review` now stamps
-  `rev:<sha>` and `branch:<name>` (both reserved, and covered by the `cli` key scope);
-  the resolver reviews and plans in a detached worktree at that commit, cuts the fix
-  branch from it, and targets the PR at that branch. Tickets without the tags behave
-  exactly as before, and a pin that has become unreachable (force-push, deleted branch)
-  falls back with a comment saying so rather than failing the ticket.
-
-### Added
 - **Daily digest**: `resolver/digest.py` files one report ticket summarizing a slice of
   the backlog — a short summary paragraph over a checklist grouped into sections
   (overdue, high priority, awaiting your approval, stale, …). It runs on its own
@@ -166,16 +186,6 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   tags and no other reserved tag. Scopes are **admin-granted only** — any member can mint
   their own keys, so self-service scoping would be no boundary. Surfaced on Profile →
   API keys.
-- **One-command install** (`install.sh`) and a `Makefile` of common tasks.
-- **Automatic resolver-bot provisioning**: with `SEED_RESOLVER_BOT=true` the backend seeds a
-  least-privilege bot user, mints its API key, and writes a bootstrap file the installer uses
-  to fill in `resolver/.env`.
-- **Resolver standard commands**: invoke a premade prompt (e.g. `/security-audit`) from a
-  ticket body; composes with the `delegate` tag for audit-then-fan-out.
-- **Published container images** to GHCR on tagged releases, plus
-  `docker-compose.images.yml` to run them without a source build.
-- Project governance docs: `LICENSE` (MIT), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, this
-  changelog, and GitHub issue/PR templates.
 - **Markdown in comments and descriptions**: ticket comment bodies and descriptions now
   render as markdown — headings, lists, tables, task lists, links, inline code, and
   syntax-highlighted fenced code blocks with a copy button. The resolver already wrote
@@ -195,7 +205,51 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   (an existing config is never clobbered). Minting is idempotent and one-way: a revoked
   key is not re-issued on the next boot.
 
+### Changed
+- Tag chips are now one shared component across the ticket list and detail pages. Reserved
+  workflow tags get the dashed, striped treatment everywhere (previously only on the
+  detail page), and derived badges like *Archived* and *Overdue* no longer look identical
+  to real tags on a list row.
+- The REST client and ticket-payload helpers moved to `cli/stingray_client/`, shared by
+  the CLI and the resolver. `resolver/stingray.py` subclasses the client to re-add audit
+  logging and `resolver/file_ticket.py` adapts to the library, so both keep their exact
+  previous behavior and command-line surfaces.
+- Ticket tag authorization is now per-tag (`control_tags.can_set_tag`) rather than
+  all-or-nothing, and the reserved-tag error message is generated from the constants —
+  the old fixed string had gone stale, naming four of the seven reserved forms.
+- A successful API-key request now credits back one failed attempt for that IP instead of
+  clearing the whole per-IP counter.
+
 ### Fixed
+- **Pulls now keep the Python venvs in step with the checkout.** `resolver/requirements.txt`
+  gained `-e ../cli` (the shared client package); a pull brought the code that imports it
+  and nothing reinstalled, so every cron tick died at import with `ModuleNotFoundError`
+  and both resolvers on that box went silent for over an hour. It presented as "the
+  resolver isn't scheduled" — cron was firing perfectly, each run just died before it
+  could log a sweep. `deploy/autodeploy.sh` now reinstalls any component whose
+  `requirements.txt` hash changed, keyed on a stamp so an ordinary pull costs nothing.
+  It runs ahead of every gate — including the "nothing deployable changed" check, which
+  skips exactly the resolver-only commits that move these requirements, and the
+  auto-deploy kill switch, so a resolver-only box with `deploy/.autodeploy-disabled`
+  still gets synced. Also available as `make venv-sync`.
+- **A resolver that can't start now still rotates its cron log.** `audit.maintain_logs`
+  runs once the module has imported and a config has loaded, which is too late for the
+  failure it most needs to survive: an import-time crash relaunching on cron every few
+  minutes, appending a traceback to a log that can never roll itself. Rotation now also
+  happens at the top of `resolve_tickets`, before the imports that can fail, reading the
+  env file with nothing but stdlib.
+- **Reviews and fixes now follow the commit a ticket was filed against.** A ticket
+  recorded which repo to work in (`repo:<name>`) but not where in it, so every git
+  decision was made from ambient checkout state: a review read whatever branch was
+  checked out at sweep time, a `/fix` branched off the remote default, and its PR
+  targeted that default. Filing a review from a feature branch and then switching
+  branches meant the review saw code the ticket was never about, and the fix was written
+  against a tree missing the very commits under review. `stingray review` now stamps
+  `rev:<sha>` and `branch:<name>` (both reserved, and covered by the `cli` key scope);
+  the resolver reviews and plans in a detached worktree at that commit, cuts the fix
+  branch from it, and targets the PR at that branch. Tickets without the tags behave
+  exactly as before, and a pin that has become unreachable (force-push, deleted branch)
+  falls back with a comment saying so rather than failing the ticket.
 - The dashboard's sticky filter rail used `top: 16px`, which is *behind* the sticky
   topbar (56px) — so on a page tall enough to scroll, the panel slid under the nav
   and its own header (the active-filter count and Clear all) was hidden. Both now
@@ -235,20 +289,21 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
   window, so an attacker who knows a username can no longer ratchet that account to the 1-hour
   lockout cap and hold it there. Arming a lockout is logged.
 
+## [1.1.0]
+
+### Added
+- **One-command install** (`install.sh`) and a `Makefile` of common tasks.
+- **Automatic resolver-bot provisioning**: with `SEED_RESOLVER_BOT=true` the backend seeds a
+  least-privilege bot user, mints its API key, and writes a bootstrap file the installer uses
+  to fill in `resolver/.env`.
+- **Resolver standard commands**: invoke a premade prompt (e.g. `/security-audit`) from a
+  ticket body; composes with the `delegate` tag for audit-then-fan-out.
+- **Published container images** to GHCR on tagged releases, plus
+  `docker-compose.images.yml` to run them without a source build.
+- Project governance docs: `LICENSE` (MIT), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, this
+  changelog, and GitHub issue/PR templates.
+
 ### Changed
-- Tag chips are now one shared component across the ticket list and detail pages. Reserved
-  workflow tags get the dashed, striped treatment everywhere (previously only on the
-  detail page), and derived badges like *Archived* and *Overdue* no longer look identical
-  to real tags on a list row.
-- The REST client and ticket-payload helpers moved to `cli/stingray_client/`, shared by
-  the CLI and the resolver. `resolver/stingray.py` subclasses the client to re-add audit
-  logging and `resolver/file_ticket.py` adapts to the library, so both keep their exact
-  previous behavior and command-line surfaces.
-- Ticket tag authorization is now per-tag (`control_tags.can_set_tag`) rather than
-  all-or-nothing, and the reserved-tag error message is generated from the constants —
-  the old fixed string had gone stale, naming four of the seven reserved forms.
-- A successful API-key request now credits back one failed attempt for that IP instead of
-  clearing the whole per-IP counter.
 - The resolver bot is now recognized for control-tag permissions by a DB flag
   (`User.is_resolver_bot`) instead of a `RESOLVER_BOT_USER_ID` env id that had to be kept in
   sync between the backend and resolver. The legacy env id is still honored.
