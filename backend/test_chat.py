@@ -1297,7 +1297,13 @@ def _dispatch(user, name, args, *, proposals=None, limit=100_000):
         db.close()
 
 
-@pytest.mark.parametrize("injected", ["user_id", "created_by", "assigned_to", "db", "user"])
+@pytest.mark.parametrize("injected", [
+    "user_id", "created_by", "assigned_to", "db", "user",
+    # The names of the *other* bindings, and of the attributes the read boundary
+    # actually reads: `visible_tickets` branches on `is_admin(user)`, so a key
+    # called `role` or `is_admin` is the one an injected instruction would try.
+    "role", "is_admin", "username", "proposals", "budget",
+])
 def test_dispatch_ignores_identity_keys_in_args(client, make_user, injected):
     """The model chooses *what* to ask about, never *who is asking*. An `args`
     key that names an identity is inert — it is simply never read."""
@@ -1444,6 +1450,54 @@ def test_resolver_status_projects_only_the_non_secret_config(make_user):
     assert "sk-leak-me" not in out and "sk-also-leak" not in out
 
 
+def test_resolver_status_escapes_pipes_in_its_cells(make_user):
+    """Every cell is database text and none of it is constrained to exclude `|`,
+    which would otherwise end the column and misalign the whole table."""
+    from models import ResolverInstance
+    bot = make_user()
+    db = _db()
+    try:
+        db.add(ResolverInstance(
+            bot_user_id=bot.id, name="a|b", agent="c|d", model="e|f",
+            effective_config={"agent_model": "g|h"},
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    row = [ln for ln in _dispatch(make_user(role="admin"), "get_resolver_status",
+                                  {}).splitlines() if f"#{bot.id}" in ln][0]
+    assert r"a\|b" in row and r"c\|d" in row and r"e\|f" in row and r"g\|h" in row
+    # 6 declared columns => 7 pipes, none of them contributed by the data.
+    assert row.replace(r"\|", "") .count("|") == 7
+
+
+def test_agent_runs_escape_pipes_in_their_cells(client, make_user):
+    from models import AgentRun
+    owner = make_user()
+    mine = _create(client, owner.key, title="Runs")
+    db = _db()
+    try:
+        db.add(AgentRun(ticket_id=mine["id"], phase="plan", agent="a|b",
+                        model="c|d", status="ok", input_tokens=1,
+                        output_tokens=2, cost_usd=0.5))
+        db.commit()
+    finally:
+        db.close()
+
+    row = _dispatch(owner, "get_agent_runs", {"ticket_id": mine["id"]}).splitlines()[-1]
+    assert r"a\|b" in row and r"c\|d" in row
+    assert row.replace(r"\|", "").count("|") == 8
+
+
+def test_search_escapes_pipes_in_titles_and_tags(client, make_user):
+    owner = make_user()
+    _create(client, owner.key, title="pipe|title probe", tags=["x_y"])
+    row = _dispatch(owner, "search_tickets", {"query": "pipe"}).splitlines()[-1]
+    assert r"pipe\|title probe" in row
+    assert row.replace(r"\|", "").count("|") == 7
+
+
 # --- Phase 3: proposed actions, which execute nothing -------------------------
 
 def _propose(user, kind, payload, *, proposals=None, rationale="because"):
@@ -1506,6 +1560,16 @@ def test_a_proposal_strips_reserved_tags(client, make_user):
         "title": "Tagged", "tags": ["backend", "dangerous", "repo:x", "rev:abc"],
     })
     assert sink[0]["payload"]["tags"] == ["backend"]
+
+
+def test_a_proposal_normalizes_tag_whitespace(client, make_user):
+    """The create endpoint strips on Confirm, so an unstripped tag would show one
+    thing on the card and create another."""
+    owner = make_user()
+    _, sink = _propose(owner, "create_ticket", {
+        "title": "Tagged", "tags": ["  backend ", "\tfrontend\n", "   ", 7],
+    })
+    assert sink[0]["payload"]["tags"] == ["backend", "frontend"]
 
 
 @pytest.mark.parametrize("kind,payload", [
