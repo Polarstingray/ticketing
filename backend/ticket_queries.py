@@ -32,6 +32,18 @@ def visible_tickets(db: Session, user: User):
     return query
 
 
+def like_escape(text: str) -> str:
+    r"""Escape LIKE wildcards in a value being matched as literal text.
+
+    ``_`` and ``%`` are wildcards to SQL but ordinary characters to a user typing
+    a search string or a tag, so they have to be escaped; the escape character
+    itself (``\``) goes first, or escaping would corrupt its own output. Every
+    ``LIKE``/``ILIKE`` built from user- or model-supplied text must go through
+    here and pass ``escape="\\"`` alongside it.
+    """
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def tag_clause(tag: str):
     r"""SQL matching one exact tag inside the serialized JSON array.
 
@@ -42,5 +54,4 @@ def tag_clause(tag: str):
     escaped though: ``_`` is allowed in tags (it is in ``\w``) and would otherwise
     match any single character, so ``a_b`` would wrongly match ``axb``.
     """
-    escaped = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return Ticket.tags.like(f'%"{escaped}"%', escape="\\")
+    return Ticket.tags.like(f'%"{like_escape(tag)}"%', escape="\\")
