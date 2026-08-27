@@ -20,11 +20,15 @@ export default function ChatWidget() {
 
   const messages = active?.messages || [];
 
-  // Follow the transcript as it grows, including during a stream.
+  // Follow the transcript as it grows, including during a stream. Running once
+  // per token is the point — the pending turn grows a character at a time, and
+  // anything coarser would let the text creep past the bottom edge. `pending`
+  // is keyed by length rather than by the whole string so the dependency check
+  // stays a number compare instead of a full string compare per token.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, pending, toolEvents.length, open]);
+  }, [messages.length, pending.length, toolEvents.length, open]);
 
   if (!config.enabled) return null;
 

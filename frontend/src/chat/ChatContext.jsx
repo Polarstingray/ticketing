@@ -155,7 +155,10 @@ export function ChatProvider({ children }) {
               ]);
             } else if (event === "tool_result") {
               // Fills in the most recent unfinished entry for this tool: calls
-              // and results arrive strictly paired and in order.
+              // and results arrive strictly paired and in order. A result with
+              // no open call to match is dropped on purpose — it would mean the
+              // server sent a frame for a tool it never announced, and inventing
+              // a row for it would show the user something that never ran.
               setToolEvents((prev) => {
                 const next = [...prev];
                 for (let i = next.length - 1; i >= 0; i -= 1) {
