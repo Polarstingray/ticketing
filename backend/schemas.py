@@ -266,6 +266,12 @@ class AgentRunCreate(BaseModel):
     log_tail: str = Field(default="", max_length=20_000)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    # Optional proof that the poster still holds the ticket's lease. Omitting it
+    # keeps the pre-lease behavior (the assignee gate alone), so existing callers
+    # are unaffected; supplying it makes the write fail once the lease has lapsed,
+    # which is what stops a worker that was presumed dead — and whose ticket has
+    # since been re-claimed — from writing results over its replacement's.
+    lease_token: Optional[str] = Field(default=None, max_length=100)
 
 
 class AgentRunOut(BaseModel):
@@ -314,6 +320,42 @@ class CostRollup(BaseModel):
     own: AgentRunTotals
     children: List[CostRollupChild]
     total: AgentRunTotals
+
+
+# --- Ticket leases -----------------------------------------------------------
+# Bounds on a lease's lifetime. The floor keeps a claim from expiring before the
+# holder's first heartbeat can land; the ceiling keeps a crashed worker from
+# stranding a ticket for hours, which is the whole point of putting a TTL on the
+# claim in the first place.
+MIN_LEASE_TTL = 5
+MAX_LEASE_TTL = 3600
+DEFAULT_LEASE_TTL = 300
+
+
+class ClaimRequest(BaseModel):
+    """How long the claimant wants the lease for. Workers extend rather than
+    asking for a long TTL up front — see :class:`models.TicketLease`."""
+    ttl_seconds: int = Field(default=DEFAULT_LEASE_TTL, ge=MIN_LEASE_TTL, le=MAX_LEASE_TTL)
+
+
+class LeaseRelease(BaseModel):
+    """Proof of holding the lease being dropped."""
+    token: str = Field(min_length=1, max_length=100)
+
+
+class LeaseExtend(LeaseRelease):
+    ttl_seconds: int = Field(default=DEFAULT_LEASE_TTL, ge=MIN_LEASE_TTL, le=MAX_LEASE_TTL)
+
+
+class LeaseOut(BaseModel):
+    """A granted lease. ``token`` is returned only to the worker that claimed
+    (or extended) it; there is no endpoint that hands it to anyone else."""
+    model_config = ConfigDict(from_attributes=True)
+
+    ticket_id: int
+    worker_id: int
+    token: str
+    expires_at: UTCDateTime
 
 
 # --- Notifications -----------------------------------------------------------

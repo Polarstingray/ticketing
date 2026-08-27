@@ -10,6 +10,23 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 ## [Unreleased]
 
 ### Added
+- **Explicit claim/lease API for ticket workers.** Claiming a ticket used to be implicit:
+  the resolver took everything assigned to its bot id and stamped `resolver:*` tags on it,
+  which is safe only because systemd runs exactly one sweep per bot. Opening the queue to
+  third-party agents — or waking resolvers on events — makes two workers picking up the
+  same ticket a live race. `POST /tickets/{id}/claim` now takes an exclusive lease (`409`
+  if someone else holds it), with `POST /tickets/{id}/lease/extend` as the heartbeat and
+  `POST /tickets/{id}/release` to hand it back early. Two properties do the work: a unique
+  constraint on `ticket_leases.ticket_id` means two concurrent claims cannot both win
+  however their reads interleave, and every claim carries a **TTL**, so a worker that dies
+  mid-ticket has its claim lapse instead of stranding the ticket under `resolver:planning`
+  forever. An expired lease deliberately cannot be resurrected by a late heartbeat, and
+  agent-run writes may carry their `lease_token` so a worker presumed dead can't post
+  results over whoever re-claimed its ticket. The resolver's sweep claims before
+  processing, heartbeats in the background, and releases in a `finally`; the `resolver:*`
+  tags stay on as a human-readable mirror, but the lease row is the source of truth. A
+  backend that predates the endpoints is treated as "no contention" rather than a locked
+  queue, so the two halves can be deployed separately.
 - **Webhook subscriptions, with a delivery log.** An operator can register an HTTPS
   endpoint (`/webhooks` CRUD, plus a settings panel at `/settings/webhooks`) that receives
   ticket events, optionally narrowed to specific event types and to tickets carrying given

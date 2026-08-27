@@ -207,6 +207,54 @@ class Ticket(Base):
     agent_runs = relationship(
         "AgentRun", cascade="all, delete-orphan"
     )
+    # SQLite's FK enforcement is off (see database._sqlite_pragmas), so the
+    # ondelete=CASCADE on TicketLease is documentation until it's turned on; this
+    # relationship is what actually clears a lease when a ticket is hard-deleted.
+    lease = relationship(
+        "TicketLease", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class TicketLease(Base):
+    """An exclusive, time-limited claim on a ticket held by one worker.
+
+    Claiming used to be implicit: the resolver took everything assigned to its
+    bot id and stamped ``resolver:*`` tags on it, which is only safe because
+    systemd runs exactly one sweep per bot. Opening the queue to third-party
+    agents (or waking resolvers on events) makes two workers picking up the same
+    ticket a live race, so the claim is made explicit here and the database — not
+    a tag — is the arbiter.
+
+    Two properties do the work:
+
+    * ``ticket_id`` is **unique**, so "at most one holder" is enforced by the
+      engine. Two concurrent claims cannot both win, however the SELECT that
+      precedes them interleaves; the loser takes an ``IntegrityError`` and is
+      answered 409.
+    * ``expires_at`` bounds the claim. A worker that dies mid-ticket previously
+      left ``resolver:planning`` on the ticket forever; now its lease simply
+      lapses and the next sweep re-claims. Holders keep a long job alive by
+      extending, which is a deliberate liveness/safety trade: a crashed worker
+      stops extending, so the ticket returns to the queue after at most one TTL.
+
+    ``token`` is an opaque secret handed to the claimant and required to release
+    or extend. Without it any caller who can see the ticket could drop a rival's
+    claim, which would make the lease decorative.
+
+    The ``resolver:*`` tags remain as a human-readable mirror (see
+    ``routers.tickets``), but this row is the source of truth.
+    """
+    __tablename__ = "ticket_leases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(
+        Integer, ForeignKey("tickets.id", ondelete="CASCADE"),
+        unique=True, nullable=False, index=True,
+    )
+    worker_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    token = Column(String, unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class AgentRun(Base):
