@@ -10,8 +10,8 @@ import styles from "../styles/ChatWidget.module.css";
 // renders nothing at all unless the deployment has a model configured.
 export default function ChatWidget() {
   const {
-    config, open, setOpen, conversations, active, streaming, pending, error,
-    ticketId, openThread, newThread, removeThread, send, stop,
+    config, open, setOpen, conversations, active, streaming, pending, toolEvents,
+    error, ticketId, openThread, newThread, removeThread, send, stop,
   } = useChat();
 
   const [draft, setDraft] = useState("");
@@ -24,7 +24,7 @@ export default function ChatWidget() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, pending, open]);
+  }, [messages.length, pending, toolEvents.length, open]);
 
   if (!config.enabled) return null;
 
@@ -121,12 +121,26 @@ export default function ChatWidget() {
         {messages.map((m) => (
           <ChatMessageView key={m.id} message={m} />
         ))}
+        {toolEvents.length > 0 && (
+          // The live view of what it is looking at. The finished turn re-renders
+          // this from `meta`, collapsed — see ChatMessageView.
+          <ul className={styles.toolLive}>
+            {toolEvents.map((call, i) => (
+              <li key={i}>
+                <code>{call.name}</code>
+                {call.summary ? ` ✓ ${call.summary}` : " …"}
+              </li>
+            ))}
+          </ul>
+        )}
         {pending && (
           <div className={styles.turnAssistant}>
             <div className={styles.turnBody}>{pending}</div>
           </div>
         )}
-        {streaming && !pending && <div className={styles.thinking}>Thinking…</div>}
+        {streaming && !pending && toolEvents.length === 0 && (
+          <div className={styles.thinking}>Thinking…</div>
+        )}
       </div>
 
       {error && <p className={styles.error}>{error}</p>}

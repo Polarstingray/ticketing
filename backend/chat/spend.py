@@ -79,9 +79,15 @@ def check_daily_cap(db: Session, user_id: int, limit: float) -> float:
     what they have spent so far.
 
     Checked *before* the request rather than after, so the cap is a gate and not
-    merely a report. That means a single turn can carry the total slightly past
-    the limit — the alternative is refusing to start a turn whose cost is not yet
-    knowable, which would make the last few cents of any budget unusable.
+    merely a report. That means a single turn can carry the total past the limit
+    — the alternative is refusing to start a turn whose cost is not yet knowable,
+    which would make the last few cents of any budget unusable.
+
+    That overshoot used to be one completion's worth. A turn is now up to
+    ``CHAT_MAX_TOOL_HOPS + 1`` provider calls, so ``chat/loop.py`` carries this
+    number into the turn and stops offering tools once the running cost crosses
+    the limit — the gate here still decides whether a turn may *start*, and the
+    loop decides how far it may escalate.
     """
     if limit <= 0:
         return spent_today(db, user_id)  # 0 or negative ⇒ no cap configured

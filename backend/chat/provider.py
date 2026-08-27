@@ -18,7 +18,7 @@ synchronous SQLAlchemy session it sits beside.
 """
 import json
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -128,6 +128,21 @@ _SSE_DATA_PREFIX = "data:"
 _SSE_DONE = "[DONE]"
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    """One complete tool call the model asked for.
+
+    ``arguments`` is the raw JSON *text* exactly as the model emitted it, not a
+    parsed dict. It is kept verbatim because it has to be echoed back in the
+    assistant message on the next hop, and some providers validate that
+    round-trip — re-serializing a parsed dict changes key order and whitespace.
+    Parsing happens once, at dispatch, where a failure is answerable.
+    """
+    id: str
+    name: str
+    arguments: str
+
+
 @dataclass
 class StreamResult:
     """What a finished stream knew by the end of it.
@@ -136,11 +151,22 @@ class StreamResult:
     generator can stay a plain text iterator while still reporting usage.
     ``model`` and the token counts are zero/empty when the provider declined to
     report them — which is why cost can legitimately be 0.0 on a real answer.
+
+    ``tool_calls`` belongs here rather than in the yielded stream for the same
+    reason usage does: a tool call arrives in fragments (id, name and arguments
+    each split across chunks) and a *partial* one cannot be dispatched, displayed
+    or even parsed. The only meaningful moment for it is the end, which is
+    precisely what this dataclass means.
     """
     model: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
     text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    # Recorded for diagnostics, deliberately never branched on: several
+    # OpenAI-compatible gateways report "stop" on a chunk that carries tool calls.
+    # The presence of accumulated calls is the ground truth, not this.
+    finish_reason: str = ""
 
 
 def _delta_text(chunk: dict) -> str:
@@ -163,8 +189,87 @@ def _delta_text(chunk: dict) -> str:
     return content if isinstance(content, str) else ""
 
 
+def _accumulate_tool_calls(chunk: dict, buffers: dict) -> None:
+    """Fold one chunk's ``delta.tool_calls`` fragments into ``buffers``.
+
+    Every level is probed defensively, exactly like :func:`_delta_text` — the
+    usage-only final chunk carries no choices at all.
+
+    Keying is the subtle part. OpenAI keys parallel calls by ``index``, but not
+    every compatible gateway sends one; falling back to ``id`` matters because
+    defaulting a missing index to 0 would silently *merge two parallel calls into
+    one corrupt blob*, which fails as a confusing JSON parse error much later.
+    """
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return
+    first = choices[0]
+    if not isinstance(first, dict):
+        return
+    delta = first.get("delta")
+    if not isinstance(delta, dict):
+        return
+    entries = delta.get("tool_calls")
+    if not isinstance(entries, list):
+        return
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("index")
+        call_id = entry.get("id")
+        if isinstance(index, int):
+            key = ("i", index)
+        elif isinstance(call_id, str) and call_id:
+            key = ("id", call_id)
+        else:
+            key = ("i", 0)
+        if key not in buffers:
+            # `seq` preserves the order calls were first seen, which is what
+            # orders id-keyed calls (they have no index to sort by).
+            buffers[key] = {"id": "", "name": "", "arguments": "", "seq": len(buffers)}
+        buf = buffers[key]
+
+        # The id repeats as "" on continuation fragments; first non-empty wins.
+        if isinstance(call_id, str) and call_id and not buf["id"]:
+            buf["id"] = call_id
+        function = entry.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if isinstance(name, str):
+            # Appended, not assigned: the wire format permits a split name, and
+            # assigning would keep only its last fragment. No gateway observed
+            # repeats a whole name across fragments, which is what would make
+            # appending wrong.
+            buf["name"] += name
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            buf["arguments"] += arguments
+
+
+def _finish_tool_calls(buffers: dict) -> list[ToolCall]:
+    """The accumulated buffers as complete calls, in the order they were opened.
+
+    A buffer with no name is dropped: a stream cut off mid-call leaves one, and a
+    nameless call cannot be dispatched — passing it on would only turn a truncated
+    answer into an "unknown tool" error attributed to the model.
+    """
+    def order(item):
+        (kind, value), buf = item
+        # Numeric on the index when there is one — string-sorting it would put
+        # call 10 before call 2. Otherwise first-seen order.
+        return (0, value) if kind == "i" else (1, buf["seq"])
+
+    return [
+        ToolCall(id=buf["id"], name=buf["name"], arguments=buf["arguments"])
+        for _, buf in sorted(buffers.items(), key=order)
+        if buf["name"]
+    ]
+
+
 def stream(cfg: ChatConfig, system: str, messages: list[dict],
-           result: StreamResult) -> Iterator[str]:
+           result: StreamResult, *, tools: list[dict] | None = None) -> Iterator[str]:
     """Yield the assistant's reply in fragments as the provider produces it.
 
     ``result`` is filled in as the stream is consumed — the caller reads it once
@@ -177,12 +282,24 @@ def stream(cfg: ChatConfig, system: str, messages: list[dict],
     signalled that way without discarding the text already yielded, so it ends
     the iteration instead and leaves ``result.text`` holding the partial answer;
     the router reports that as a truncated turn rather than a lost one.
+
+    ``tools`` is keyword-only and defaults to ``None``, and when it is falsy the
+    request body is byte-identical to the pre-tools one — so the text-only path
+    (and every caller that predates tools) is unaffected. When tools *are*
+    declared the model may answer with tool calls instead of text; those land on
+    ``result.tool_calls`` rather than being yielded, since a partial call is not
+    a renderable thing. See :func:`_accumulate_tool_calls`.
     """
     body = {
         "model": cfg.model,
         "messages": [{"role": "system", "content": system}] + messages,
         "stream": True,
     }
+    if tools:
+        # Same discipline as `stream_options` below: added only when it applies,
+        # so a strict gateway on the text-only path never sees an unknown field.
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
     if cfg.stream_usage:
         # OpenAI's opt-in for a final usage chunk. Compatible gateways accept or
         # ignore it; CHAT_STREAM_USAGE=false is the escape hatch for a strict one
@@ -193,6 +310,7 @@ def stream(cfg: ChatConfig, system: str, messages: list[dict],
         "Content-Type": "application/json",
     }
 
+    tool_buffers: dict = {}
     try:
         with httpx.stream("POST", cfg.api_url, json=body, headers=headers,
                           timeout=cfg.timeout) as resp:
@@ -220,6 +338,13 @@ def stream(cfg: ChatConfig, system: str, messages: list[dict],
                 if isinstance(usage, dict):
                     result.input_tokens = _usage_value(usage, _USAGE_INPUT_KEYS)
                     result.output_tokens = _usage_value(usage, _USAGE_OUTPUT_KEYS)
+                choices = chunk.get("choices")
+                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                    reason = choices[0].get("finish_reason")
+                    if isinstance(reason, str) and reason:
+                        result.finish_reason = reason
+                if tools:
+                    _accumulate_tool_calls(chunk, tool_buffers)
                 text = _delta_text(chunk)
                 if text:
                     result.text += text
@@ -233,6 +358,7 @@ def stream(cfg: ChatConfig, system: str, messages: list[dict],
             f"Could not reach the model provider: {type(exc).__name__}."
         ) from None
 
+    result.tool_calls = _finish_tool_calls(tool_buffers)
     if not result.model:
         result.model = cfg.model
 

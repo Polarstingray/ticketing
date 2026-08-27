@@ -19,6 +19,11 @@ vi.mock("../api", () => ({
     getConversation: vi.fn(),
     deleteConversation: vi.fn(),
     sendChatMessage: vi.fn(),
+    // The endpoints a proposed-action card confirms through. There are no new
+    // ones: the card calls what the rest of the app calls.
+    createTicket: vi.fn(),
+    updateTicket: vi.fn(),
+    addComment: vi.fn(),
   },
 }));
 
@@ -255,5 +260,226 @@ describe("threads", () => {
 
     await waitFor(() => expect(api.deleteConversation).toHaveBeenCalledWith(3));
     await waitFor(() => expect(screen.queryByText("Doomed")).not.toBeInTheDocument());
+  });
+});
+
+// --- Phase 3: tool calls and proposed actions -------------------------------
+// `streamsBack` already drives onEvent synchronously, so a new frame type is
+// just a longer list — no reader-level plumbing is involved.
+
+const DONE = {
+  event: "done",
+  data: {
+    message_id: 11,
+    title: "T",
+    usage: { model: "test-model", cost_usd: 0 },
+    spent_today_usd: 0.02,
+    meta: {},
+  },
+};
+
+function doneWith(meta) {
+  return { ...DONE, data: { ...DONE.data, meta } };
+}
+
+async function ask(text = "Why?", { fresh = true } = {}) {
+  if (fresh) {
+    renderWidget();
+    await openPopup();
+  }
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: text } });
+  fireEvent.click(screen.getByText("Send"));
+}
+
+describe("tool calls", () => {
+  it("shows what it is looking at while the turn streams", async () => {
+    // The stream is held open so the live list can be observed before `done`
+    // clears it — the whole point of keeping toolEvents out of `active`.
+    let finish;
+    api.sendChatMessage.mockImplementation(async (id, body, onEvent) => {
+      onEvent({ event: "tool_call", data: { name: "search_tickets", args: {} } });
+      await new Promise((resolve) => {
+        finish = () => {
+          onEvent({
+            event: "tool_result",
+            data: { name: "search_tickets", summary: "3 tickets" },
+          });
+          onEvent(DONE);
+          resolve();
+        };
+      });
+    });
+    await ask();
+
+    expect(await screen.findByText("search_tickets")).toBeInTheDocument();
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    finish();
+    await waitFor(() => expect(screen.queryByText(/…/)).not.toBeInTheDocument());
+  });
+
+  it("renders a finished turn's tool calls in a collapsed disclosure", async () => {
+    streamsBack([
+      { event: "token", data: { text: "Here." } },
+      doneWith({
+        tool_calls: [
+          { name: "search_tickets", args: {}, summary: "3 tickets" },
+          { name: "get_ticket", args: { ticket_id: 4 }, summary: "1.2k chars" },
+        ],
+      }),
+    ]);
+    await ask();
+
+    const disclosure = await screen.findByText("Looked at 2 things");
+    // Collapsed by default: the <details> that owns the list is closed.
+    expect(disclosure.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(disclosure);
+    expect(await screen.findByText(/3 tickets/)).toBeInTheDocument();
+  });
+
+  it("renders no disclosure on a turn that used no tools", async () => {
+    streamsBack([{ event: "token", data: { text: "Plain." } }, doneWith({})]);
+    await ask();
+    await screen.findByText("Plain.");
+    expect(screen.queryByText(/Looked at/)).not.toBeInTheDocument();
+  });
+
+  it("does not leak one turn's tool activity into the next", async () => {
+    streamsBack([
+      { event: "tool_call", data: { name: "search_tickets", args: {} } },
+      { event: "tool_result", data: { name: "search_tickets", summary: "3 tickets" } },
+      { event: "token", data: { text: "First." } },
+      doneWith({ tool_calls: [{ name: "search_tickets", summary: "3 tickets" }] }),
+    ]);
+    await ask("First question");
+    await screen.findByText("First.");
+
+    streamsBack([{ event: "token", data: { text: "Second." } }, doneWith({})]);
+    await ask("Second question", { fresh: false });
+    await screen.findByText("Second.");
+    // Exactly one disclosure — the first turn's. The live list was cleared.
+    expect(screen.getAllByText(/Looked at/)).toHaveLength(1);
+  });
+});
+
+describe("proposed actions", () => {
+  const CREATE = {
+    kind: "create_ticket",
+    payload: { type: "task", title: "Proposed ticket", description: "why", priority: "medium", tags: [] },
+    rationale: "You asked for one.",
+  };
+
+  async function propose(proposal) {
+    streamsBack([
+      { event: "token", data: { text: "Sure." } },
+      doneWith({ proposed_actions: [proposal] }),
+    ]);
+    await ask();
+    return screen.findByRole("button", { name: "Confirm" });
+  }
+
+  it("renders the proposal as a card without acting on it", async () => {
+    await propose(CREATE);
+    expect(screen.getByText("Proposed ticket")).toBeInTheDocument();
+    expect(screen.getByText("You asked for one.")).toBeInTheDocument();
+    // **The load-bearing assertion.** The assistant has no write path; nothing
+    // happens until a human clicks.
+    expect(api.createTicket).not.toHaveBeenCalled();
+    expect(api.addComment).not.toHaveBeenCalled();
+    expect(api.updateTicket).not.toHaveBeenCalled();
+  });
+
+  it("files the ticket through the existing endpoint on Confirm", async () => {
+    api.createTicket.mockResolvedValue({ id: 99 });
+    const confirm = await propose(CREATE);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.createTicket).toHaveBeenCalledWith(CREATE.payload));
+    expect(await screen.findByText("Filed #99")).toBeInTheDocument();
+  });
+
+  it("posts a comment through the existing endpoint on Confirm", async () => {
+    api.addComment.mockResolvedValue({ id: 5 });
+    const confirm = await propose({
+      kind: "add_comment",
+      payload: { ticket_id: 42, body: "Proposed comment" },
+      rationale: "r",
+    });
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.addComment).toHaveBeenCalledWith(42, "Proposed comment"));
+  });
+
+  it("changes the status through the existing endpoint on Confirm", async () => {
+    api.updateTicket.mockResolvedValue({ id: 42 });
+    const confirm = await propose({
+      kind: "set_status",
+      payload: { ticket_id: 42, status: "resolved" },
+      rationale: "r",
+    });
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(api.updateTicket).toHaveBeenCalledWith(42, { status: "resolved" })
+    );
+  });
+
+  it("sends the user to the ticket page for request_fix rather than acting", async () => {
+    streamsBack([
+      { event: "token", data: { text: "Sure." } },
+      doneWith({
+        proposed_actions: [
+          { kind: "request_fix", payload: { ticket_id: 42 }, rationale: "r" },
+        ],
+      }),
+    ]);
+    await ask();
+    // The real "Apply fixes" button owns the guards; this is a link to it.
+    const link = await screen.findByRole("link", { name: "Open ticket #42" });
+    expect(link).toHaveAttribute("href", "/tickets/42");
+    expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
+  });
+
+  it("shows the endpoint's error inline and keeps the card", async () => {
+    api.createTicket.mockRejectedValue(new Error("Reserved tag not allowed"));
+    const confirm = await propose(CREATE);
+    fireEvent.click(confirm);
+    expect(await screen.findByText("Reserved tag not allowed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
+  });
+
+  it("dismisses a proposal without calling anything", async () => {
+    await propose(CREATE);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    await waitFor(() =>
+      expect(screen.queryByText("Proposed ticket")).not.toBeInTheDocument()
+    );
+    expect(api.createTicket).not.toHaveBeenCalled();
+  });
+
+  it("renders tool calls and proposals from a reopened thread", async () => {
+    // Same output as the live path, because `done.meta` is the stored blob.
+    api.listConversations.mockResolvedValue([{ id: 3, title: "Old", updated_at: "" }]);
+    api.getConversation.mockResolvedValue({
+      id: 3,
+      title: "Old",
+      messages: [
+        { id: 1, role: "user", content: "Why?", cost_usd: 0 },
+        {
+          id: 2,
+          role: "assistant",
+          content: "Because.",
+          cost_usd: 0,
+          meta: {
+            tool_calls: [{ name: "get_ticket", summary: "1.2k chars" }],
+            proposed_actions: [CREATE],
+          },
+        },
+      ],
+    });
+    renderWidget();
+    await openPopup();
+    fireEvent.click(screen.getByText("Assistant"));
+    fireEvent.click(await screen.findByText("Old"));
+
+    expect(await screen.findByText("Looked at 1 thing")).toBeInTheDocument();
+    expect(screen.getByText("Proposed ticket")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
   });
 });

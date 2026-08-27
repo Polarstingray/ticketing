@@ -92,7 +92,7 @@ class ChatMessage(Base):
     id              = Column(Integer, primary_key=True, index=True)
     conversation_id = Column(Integer, ForeignKey("chat_conversations.id"),
                              nullable=False, index=True)
-    role            = Column(String, nullable=False)   # user | assistant | tool
+    role            = Column(String, nullable=False)   # user | assistant
     content         = Column(Text, nullable=False, default="")
     model           = Column(String, nullable=False, default="")
     input_tokens    = Column(Integer, nullable=False, default=0)
@@ -101,6 +101,15 @@ class ChatMessage(Base):
     meta            = Column(JSON, nullable=False, default=dict)
     created_at      = Column(DateTime, default=utcnow, nullable=False)
 ```
+
+**Tool hops are not persisted.** Only the question and the final answer become
+rows; the calls and proposals of a multi-hop turn live in `meta`. A stored
+`role: "tool"` message would be replayed by `_history()`, whose trimming window
+is deliberately arbitrary — once a thread grows past `history_turns` the trim can
+land between an assistant message and the tool results it refers to, and an
+orphan tool message is a hard 400 from the provider. Keeping hops in memory also
+keeps one cost per turn, which is what `spend.spent_today` sums.
+
 
 Migrations (`backend/migrations.py`, appended to `MIGRATIONS` in order):
 
@@ -163,7 +172,8 @@ def dispatch(name: str, args: dict, *, db: Session, user: User) -> str:
 - `search_tickets(query?, status?, tag?, assigned_to_me?, limit<=20)` — starts from
   `_visible_tickets(db, user)`, reusing `_tag_clause` for tag matching.
 - `get_ticket(ticket_id)` → `ticket_pack(...)`.
-- `get_agent_runs(ticket_id)` → runs + `log_tail` for failures.
+- `get_agent_runs(ticket_id)` → runs. (`log_tail` arrives with phase 4; until
+  then the app stores only run metadata, and the tool reports exactly that.)
 - `get_resolver_status()` → the `ResolverInstance` roster and non-secret
   `effective_config`, so "is the gemini resolver even running?" is answerable.
 
@@ -213,7 +223,7 @@ event: error        data: {"detail": "..."}
 async function stream(path, body, onEvent, { signal } = {}) { ... }
 ```
 
-`provider.py` uses `httpx` (async, native streaming) — a **new backend dependency**;
+`provider.py` uses `httpx` (synchronous, native streaming) — a **new backend dependency**;
 `backend/requirements.txt` currently has no HTTP client at all. The resolver's
 `_chat_completion` (`resolver/resolve_tickets.py:2249`) is the non-streaming ancestor of
 this code and is worth reading first; the response parsing and the 429-means-quota
@@ -262,7 +272,7 @@ admin override.
 |---|---|---|
 | `frontend/src/chat/ChatContext.jsx` | Provider: open state, active conversation, messages, streaming. Mounted in `App.jsx` around `<Layout />`, exactly like `NotificationsContext`. | 160 |
 | `frontend/src/components/ChatWidget.jsx` | Launcher button + popup panel: header with thread switcher, message list, composer, cost footer. | 250 |
-| `frontend/src/components/ChatMessage.jsx` | One turn: reuses the existing `Markdown.jsx`, plus a collapsed tool-call disclosure and proposed-action cards. | 120 |
+| `frontend/src/components/ChatMessageView.jsx` | One turn: reuses the existing `Markdown.jsx`, plus a collapsed tool-call disclosure and proposed-action cards. | 120 |
 | `frontend/src/styles/ChatWidget.module.css` | `position: fixed` bottom-right, using the tokens in `global.css`. | 180 |
 | `frontend/src/api.js` | `stream()` + `chatConfig` / `listConversations` / `createConversation` / `getConversation` / `deleteConversation` / `sendChatMessage`. | +40 |
 | `frontend/src/components/Layout.jsx` | Mount `<ChatWidget />` after `<main>`. | +2 |
@@ -324,7 +334,21 @@ Four PRs, each independently mergeable and useful:
    `api.stream` + the chat client in `api.js`, `chat/ChatContext.jsx`, `ChatWidget`,
    `ChatMessageView`, mounted in `Layout`. 77 backend tests; `ChatWidget.test.jsx`
    covers the popup.
-3. **Tool loop + proposed actions** — `tools.py`, the hop cap, the action cards.
+3. **Tool loop + proposed actions** — ✅ **shipped.** `backend/ticket_queries.py`
+   (the read boundary lifted out of the tickets router so the tools reuse it),
+   `chat/tools.py`, `chat/loop.py`, tool-call accumulation in `provider.stream`,
+   `CHAT_MAX_TOOL_HOPS`, the `tool_call`/`tool_result` frames and `done.meta`,
+   `ProposedAction.jsx` + the disclosure in `ChatMessageView`. **No migration** —
+   `ChatMessage.meta` was already the extension point. 350 backend tests.
+
+   Two known limitations, both accepted rather than overlooked:
+   *Confirmations are neither idempotent nor recorded* — nothing persists that a
+   card was confirmed, so a reload re-renders it and Confirm can be clicked twice
+   across sessions. Fixing it needs either a write endpoint (which this design
+   forbids, and rightly) or a `meta` mutation endpoint; the actual audit trail is
+   the `Activity` row the existing endpoint writes.
+   *The per-turn cost ceiling rises ~7×*, bounded by the shared context budget
+   and by the loop's running-cost check against the daily cap.
 4. **Resolver debugging** — `AgentRun.log_tail` + migration, resolver-side upload with
    redaction, `get_agent_runs`/`get_resolver_status` tools, the resolver-aware system
    prompt, and a seeded example thread in `seed_demo.py` for the hosted demo.

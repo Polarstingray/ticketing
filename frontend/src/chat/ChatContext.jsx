@@ -43,6 +43,10 @@ export function ChatProvider({ children }) {
   // so each token doesn't rewrite the stored transcript.
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
+  // What the assistant looked at during the turn currently streaming. Kept out
+  // of `active` for the same reason `pending` is: it belongs to the live turn,
+  // and the finished turn carries its own copy in `meta`.
+  const [toolEvents, setToolEvents] = useState([]);
   const abortRef = useRef(null);
 
   const ticketId = currentTicketId(pathname);
@@ -130,6 +134,7 @@ export function ChatProvider({ children }) {
       setActive((prev) => ({ ...prev, messages: [...(prev?.messages || []), asked] }));
       setStreaming(true);
       setPending("");
+      setToolEvents([]);
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -143,6 +148,24 @@ export function ChatProvider({ children }) {
             if (event === "token") {
               answer += data.text;
               setPending(answer);
+            } else if (event === "tool_call") {
+              setToolEvents((prev) => [
+                ...prev,
+                { name: data.name, args: data.args, summary: null },
+              ]);
+            } else if (event === "tool_result") {
+              // Fills in the most recent unfinished entry for this tool: calls
+              // and results arrive strictly paired and in order.
+              setToolEvents((prev) => {
+                const next = [...prev];
+                for (let i = next.length - 1; i >= 0; i -= 1) {
+                  if (next[i].name === data.name && next[i].summary === null) {
+                    next[i] = { ...next[i], summary: data.summary };
+                    break;
+                  }
+                }
+                return next;
+              });
             } else if (event === "error") {
               setError(data.detail || "The assistant failed to answer.");
             } else if (event === "done") {
@@ -155,6 +178,9 @@ export function ChatProvider({ children }) {
                     id: data.message_id,
                     role: "assistant",
                     content: answer,
+                    // The same blob the server stored, so this turn renders
+                    // identically now and after a reload.
+                    meta: data.meta || {},
                     ...data.usage,
                   },
                 ],
@@ -169,6 +195,7 @@ export function ChatProvider({ children }) {
       } finally {
         setStreaming(false);
         setPending("");
+        setToolEvents([]);
         abortRef.current = null;
         refreshConversations();
       }
@@ -193,6 +220,7 @@ export function ChatProvider({ children }) {
       active,
       streaming,
       pending,
+      toolEvents,
       error,
       ticketId,
       openThread,
@@ -202,7 +230,7 @@ export function ChatProvider({ children }) {
       stop,
     }),
     [
-      config, open, conversations, active, streaming, pending, error, ticketId,
+      config, open, conversations, active, streaming, pending, toolEvents, error, ticketId,
       openThread, newThread, removeThread, send, stop,
     ]
   );
