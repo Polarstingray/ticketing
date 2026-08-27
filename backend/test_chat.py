@@ -2013,3 +2013,57 @@ def test_the_pack_omits_tails_when_there_are_none(client, admin_key, make_user,
     sent = recorder[0]["user"]
     assert "## Resolver agent runs" in sent
     assert "transcript tail" not in sent
+
+
+# --- A transcript is the section most likely to contain markup like ours ------
+
+def test_a_tail_cannot_close_its_own_fence(client, make_user):
+    """An agent that printed a fenced diff has ``` in its transcript. A
+    three-backtick fence around that ends early, and the rest of the tail is read
+    as structure rather than as data — an agent-authored ``## heading`` becomes
+    indistinguishable from ours. The fence is sized from the content instead."""
+    owner = make_user()
+    mine = _create(client, owner.key, title="Chatty failure")
+    _add_run(mine["id"], log_tail="before\n```\n## Not a real section\n```\nafter")
+
+    out = _dispatch(owner, "get_agent_runs", {"ticket_id": mine["id"]})
+    tail = out.split("transcript tail\n\n", 1)[1]
+    fence = tail.split("\n", 1)[0]
+    assert len(fence) > 3 and set(fence) == {"`"}
+    # Everything the run said is inside that fence, terminated by the same fence.
+    body, _, rest = tail.partition("\n" + fence)
+    assert "## Not a real section" in body
+    assert rest.strip() == ""
+
+
+def test_the_pack_fences_a_tail_that_contains_a_fence(client, make_user, enabled,
+                                                      recorder):
+    owner = make_user()
+    t = _create(client, owner.key)
+    _add_run(t["id"], log_tail="```\nKeyError: 'path'\n```")
+
+    _ask(client, owner.key, question="Why did it fail?", ticket_id=t["id"])
+    sent = recorder[0]["user"]
+    assert "````\n```\nKeyError: 'path'\n```\n````" in sent
+
+
+def test_fence_for_outgrows_the_longest_run_in_the_text():
+    from chat.context import fence_for
+    assert fence_for("no ticks here") == "```"
+    assert fence_for("a ``` b") == "````"
+    assert fence_for("a ````` b") == "``````"
+
+
+def test_the_newest_runs_survive_the_row_limit(client, make_user, enabled, recorder):
+    """A ticket retried more times than MAX_RUNS must keep the *last* failures —
+    they are the ones the tails exist to explain."""
+    from chat import context as chat_context
+    owner = make_user()
+    t = _create(client, owner.key)
+    for i in range(chat_context.MAX_RUNS + 3):
+        _add_run(t["id"], log_tail=f"attempt {i} exploded")
+
+    _ask(client, owner.key, question="Why did it fail?", ticket_id=t["id"])
+    sent = recorder[0]["user"]
+    assert f"attempt {chat_context.MAX_RUNS + 2} exploded" in sent
+    assert "attempt 0 exploded" not in sent
