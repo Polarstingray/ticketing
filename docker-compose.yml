@@ -42,6 +42,24 @@ services:
       SMTP_FROM: ${SMTP_FROM:-stingray@localhost}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
       SMTP_SSL: ${SMTP_SSL:-false}
+      # Chat assistant (optional). The feature is OFF unless all three of
+      # URL/KEY/MODEL are non-empty — the popup does not render at all, and the
+      # endpoints 503 — so a stock deployment carries no trace of it. Everything
+      # below is a tunable with a working default; see .env.example.
+      CHAT_API_URL: ${CHAT_API_URL:-}
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+      CHAT_API_MODEL: ${CHAT_API_MODEL:-}
+      CHAT_TIMEOUT: ${CHAT_TIMEOUT:-120}
+      CHAT_CONTEXT_BUDGET: ${CHAT_CONTEXT_BUDGET:-60000}
+      CHAT_RATE_LIMIT: ${CHAT_RATE_LIMIT:-20/minute}
+      CHAT_PRICE_IN: ${CHAT_PRICE_IN:-0}
+      CHAT_PRICE_OUT: ${CHAT_PRICE_OUT:-0}
+      CHAT_DAILY_USD_LIMIT: ${CHAT_DAILY_USD_LIMIT:-0}
+      CHAT_HISTORY_TURNS: ${CHAT_HISTORY_TURNS:-10}
+      CHAT_STREAM_USAGE: ${CHAT_STREAM_USAGE:-true}
+      # How many times the assistant may call a tool before it must answer from
+      # what it has. 0 disables tools entirely.
+      CHAT_MAX_TOOL_HOPS: ${CHAT_MAX_TOOL_HOPS:-6}
     volumes:
       - stingray-data:/data
     networks:
