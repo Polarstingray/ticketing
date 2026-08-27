@@ -26,18 +26,29 @@ CONFIGURED = {
 }
 
 
-@pytest.fixture
-def enabled(monkeypatch):
-    """Configure the provider trio for one test, then restore the real state.
+@pytest.fixture(autouse=True)
+def _no_leaked_config():
+    """Empty the ``load`` cache around *every* test in this module.
 
-    ``load`` is ``lru_cache``d, so the cache is cleared on both sides of the
-    patch — otherwise a configured run would leak into every later test.
+    ``chat.config.load`` is ``lru_cache``d and the suite shares one process, so a
+    configured ``ChatConfig`` cached here would silently follow the run into
+    unrelated modules. Being autouse, this is set up first and therefore torn
+    down last — after ``monkeypatch`` has already restored the environment — so
+    the clear on the way out can never re-cache a patched value. Tests below only
+    need to clear the cache when they change the environment *mid-test*.
     """
-    for key, value in CONFIGURED.items():
-        monkeypatch.setenv(key, value)
     chat_config.load.cache_clear()
     yield
     chat_config.load.cache_clear()
+
+
+@pytest.fixture
+def enabled(monkeypatch):
+    """Configure the provider trio for one test. See ``_no_leaked_config``."""
+    for key, value in CONFIGURED.items():
+        monkeypatch.setenv(key, value)
+    chat_config.load.cache_clear()
+    return None
 
 
 @pytest.fixture
@@ -45,8 +56,7 @@ def disabled(monkeypatch):
     for key in CONFIGURED:
         monkeypatch.delenv(key, raising=False)
     chat_config.load.cache_clear()
-    yield
-    chat_config.load.cache_clear()
+    return None
 
 
 @pytest.fixture
@@ -67,6 +77,27 @@ def recorder(monkeypatch):
 
     monkeypatch.setattr(chat_router.provider, "complete", fake_complete)
     return calls
+
+
+@pytest.fixture
+def never_called(monkeypatch):
+    """A provider stub that fails the test if it is reached at all.
+
+    Every call to the real thing costs the operator money, so "this request is
+    refused *before* the metered call" is a property worth asserting directly
+    rather than by checking an empty recorder afterwards. It raises an ordinary
+    ``AssertionError``: nothing on the request path catches it, so TestClient
+    re-raises it into the test with its message intact. (``pytest.fail`` would
+    also fail the test, but its ``BaseException`` escapes the app's portal and
+    leaves the session-scoped client unusable for everything after it.)
+    """
+    def forbidden(cfg, system, user_message):
+        raise AssertionError(
+            "the model provider was called on a request that must be refused"
+        )
+
+    monkeypatch.setattr(chat_router.provider, "complete", forbidden)
+    return None
 
 
 def _create(client, key, **overrides):
@@ -121,8 +152,12 @@ def test_ask_when_unconfigured_is_503(client, admin_key, disabled):
 
 # --- The permission boundary -------------------------------------------------
 
-def test_other_users_ticket_is_404(client, admin_key, make_user, enabled, recorder):
-    """A member may not pull an unrelated ticket into the assistant's context."""
+def test_other_users_ticket_is_404(client, admin_key, make_user, enabled, never_called):
+    """A member may not pull an unrelated ticket into the assistant's context.
+
+    ``never_called`` carries the second half of the property: the refusal happens
+    before the metered call, so probing ids can't be made to cost money.
+    """
     owner = make_user()
     stranger = make_user()
     t = _create(client, owner.key, title="Private work")
@@ -130,22 +165,28 @@ def test_other_users_ticket_is_404(client, admin_key, make_user, enabled, record
     r = _ask(client, stranger.key, question="What is this?", ticket_id=t["id"])
     assert r.status_code == 404
     assert r.json()["detail"] == "Ticket not found"
-    # The refusal must happen before the metered call, not after it.
-    assert recorder == []
 
 
 def test_missing_and_forbidden_tickets_are_indistinguishable(
-    client, make_user, enabled, recorder
+    client, make_user, enabled, never_called
 ):
-    """Same status and same body, so the endpoint can't be used to probe ids."""
+    """Same status and same body, so the endpoint can't be used to probe ids.
+
+    Both are also compared against ``GET /tickets/{id}``'s own 404 rather than a
+    literal, so the assertion is anchored to the app's convention for "you may
+    not know" instead of to a snapshot of this router's error body.
+    """
     owner = make_user()
     stranger = make_user()
     t = _create(client, owner.key)
 
     forbidden = _ask(client, stranger.key, question="?", ticket_id=t["id"])
     missing = _ask(client, stranger.key, question="?", ticket_id=99_999_999)
-    assert forbidden.status_code == missing.status_code == 404
-    assert forbidden.json() == missing.json()
+    canonical = client.get(
+        f"/tickets/{t['id']}", headers={"X-API-Key": stranger.key}
+    )
+    assert forbidden.status_code == missing.status_code == canonical.status_code == 404
+    assert forbidden.json() == missing.json() == canonical.json()
 
 
 def test_owner_gets_their_ticket_in_context(client, make_user, enabled, recorder):
@@ -201,9 +242,9 @@ def test_question_without_ticket_sends_no_context(client, admin_key, enabled, re
 
 
 @pytest.mark.parametrize("question", ["", "   ", "x" * 4001])
-def test_bad_questions_are_rejected(client, admin_key, enabled, recorder, question):
+def test_bad_questions_are_rejected(client, admin_key, enabled, never_called, question):
+    """Validation refuses before the provider is reached — see ``never_called``."""
     assert _ask(client, admin_key, question=question).status_code == 422
-    assert recorder == []
 
 
 # --- Usage accounting --------------------------------------------------------
@@ -232,9 +273,8 @@ def test_unpriced_deployment_reports_zero_not_a_guess(
 
 def test_unparseable_price_falls_back_instead_of_breaking(monkeypatch):
     monkeypatch.setenv("CHAT_PRICE_IN", "three dollars")
-    chat_config.load.cache_clear()
+    chat_config.load.cache_clear()  # mid-test env change; the exit clear is autouse
     assert chat_config.load().price_in_per_mtok == 0.0
-    chat_config.load.cache_clear()
 
 
 # --- Provider failures -------------------------------------------------------
@@ -253,44 +293,53 @@ def test_provider_errors_keep_their_status(
 
 
 # --- Context packing ---------------------------------------------------------
+# The tests below call `ticket_pack` directly rather than through `POST /ask`.
+# That is deliberate and confined to this section: the router turns `None` into a
+# 404 (so "returns None" is not observable through HTTP) and always passes the
+# *configured* budget (so a small budget can't be dialed in). Everything the
+# router can express is still tested through the router.
 
-def test_pack_keeps_the_header_and_truncates_the_tail(client, make_user, enabled):
-    """A budget too small for the body still yields an identifiable ticket."""
+def _pack_as(user_id: int, ticket_id: int, *, budget: int) -> str | None:
+    """``ticket_pack`` for one user, against the shared test database."""
     from database import SessionLocal
     from models import User
 
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).one()
+        return chat_context.ticket_pack(db, user, ticket_id, budget=budget)
+    finally:
+        db.close()
+
+
+def test_pack_keeps_the_header_and_truncates_the_tail(client, make_user, enabled):
+    """A budget too small for the body still yields an identifiable ticket."""
     owner = make_user()
     t = _create(client, owner.key, title="Big one", description="x" * 5000)
 
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == owner.id).one()
-        pack = chat_context.ticket_pack(db, user, t["id"], budget=400)
-    finally:
-        db.close()
+    budget = 400
+    pack = _pack_as(owner.id, t["id"], budget=budget)
 
     assert f"# Ticket #{t['id']}: Big one" in pack
     assert chat_budget.TRUNCATION_NOTE in pack
     # The header is charged against the budget but never clipped, so the pack can
-    # exceed it slightly; what it must not do is run away with the description.
-    assert len(pack) < 1000
+    # exceed it — by exactly as much as the header does. Rather than a magic
+    # ceiling, split the pack at the description heading and hold the remainder
+    # to what the budget actually had left once the header was charged.
+    header, heading, body = pack.partition("\n\n## Description\n\n")
+    assert heading, pack
+    left_for_the_body = budget - len(header)
+    assert 0 < left_for_the_body < 5000  # the budget really did bite
+    assert len(body) <= left_for_the_body + len(chat_budget.TRUNCATION_NOTE)
 
 
 def test_pack_is_none_for_an_unviewable_ticket(client, make_user, enabled):
-    from database import SessionLocal
-    from models import User
-
     owner = make_user()
     stranger = make_user()
     t = _create(client, owner.key)
 
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == stranger.id).one()
-        assert chat_context.ticket_pack(db, user, t["id"], budget=60_000) is None
-        assert chat_context.ticket_pack(db, user, 99_999_999, budget=60_000) is None
-    finally:
-        db.close()
+    assert _pack_as(stranger.id, t["id"], budget=60_000) is None
+    assert _pack_as(stranger.id, 99_999_999, budget=60_000) is None
 
 
 def test_pack_includes_agent_runs(client, admin_key, make_user, enabled, recorder):
@@ -329,6 +378,72 @@ def test_code_blocks_are_capped_per_block(client, admin_key, enabled, recorder):
     assert "a.py" in sent
     assert chat_budget.TRUNCATION_NOTE in sent
     assert len(sent) < chat_context.CODE_SECTION_CAP + 20_000
+
+
+def test_code_section_charges_its_sub_allowance_to_the_parent_budget():
+    """The code section spends a nested Budget; the parent must be billed for it.
+
+    Tested directly rather than through its effect, because the failure mode is
+    silent: forget to fold ``section.used`` back in and every pack still renders
+    correctly, while a code-heavy ticket quietly overruns the whole budget.
+    """
+    from types import SimpleNamespace
+
+    def block(content):
+        return {"filename": "a.py", "language": "python",
+                "line_start": 1, "line_end": 1, "content": content}
+
+    # Small blocks: the parent is charged exactly the content that was packed.
+    parent = chat_budget.Budget(100_000)
+    chat_context._code_blocks(
+        SimpleNamespace(code_blocks=[block("a" * 10), block("b" * 20)]), parent
+    )
+    assert parent.used == 30
+
+    # An oversized block is charged at the per-block cap, not at its full size,
+    # and the section total can never exceed CODE_SECTION_CAP.
+    parent = chat_budget.Budget(100_000)
+    chat_context._code_blocks(
+        SimpleNamespace(code_blocks=[block("z" * 50_000)] * 10), parent
+    )
+    # (Every cap here is "+ the truncation note": `clip` cuts to the limit and
+    # then appends the marker, so a clipped section overshoots by its length.)
+    note = len(chat_budget.TRUNCATION_NOTE)
+    assert 0 < parent.used <= chat_context.CODE_SECTION_CAP + note
+
+    # And once charged, what remains is what later sections actually get.
+    assert parent.remaining == 100_000 - parent.used
+    remaining = parent.remaining
+    tail = parent.take("t" * 200_000)
+    assert len(tail) <= remaining + note
+
+
+def test_comments_overflowing_their_cap_dont_starve_the_activity_tail(
+    client, make_user, enabled
+):
+    """COMMENTS_CAP exists so a long thread can't eat the sections after it."""
+    owner = make_user()
+    t = _create(client, owner.key)
+    # Comfortably past COMMENTS_CAP (20k) without approaching the pack budget.
+    for i in range(24):
+        r = client.post(
+            f"/tickets/{t['id']}/comments",
+            json={"body": f"comment {i}\n" + "c" * 1_100},
+            headers={"X-API-Key": owner.key},
+        )
+        assert r.status_code == 201, r.text
+
+    pack = _pack_as(owner.id, t["id"], budget=60_000)
+    comments, heading, activity = pack.partition("\n\n## Activity\n\n")
+    _, _, comments_body = comments.partition("\n\n## Comments\n\n")
+
+    assert comments_body, pack
+    assert len(comments_body) <= chat_context.COMMENTS_CAP + len(
+        chat_budget.TRUNCATION_NOTE
+    )
+    assert chat_budget.TRUNCATION_NOTE in comments_body
+    # The cap did its job: the activity trail after it survived.
+    assert heading and activity.strip()
 
 
 # --- Budget helpers ----------------------------------------------------------
@@ -418,11 +533,19 @@ def test_provider_maps_upstream_status_codes(monkeypatch, status_code, expected)
 
 
 def test_provider_never_echoes_the_upstream_body_on_auth_failure(monkeypatch):
-    """A reflecting gateway must not leak the submitted key into our error."""
+    """A reflecting gateway must not leak the submitted key into our error.
+
+    Pinned by equality, not by ``"sk-test" not in ...``: an absence assertion
+    passes vacuously if the error path changes shape (an empty message, a
+    different exception type reaching the router), whereas the whole message has
+    to stay a fixed, secret-free sentence for this to hold.
+    """
     _respond(monkeypatch, status_code=401, json_body={"error": "bad key sk-test"})
     with pytest.raises(chat_provider.ProviderError) as exc:
-        chat_provider.complete(_cfg(), "sys", "user")
-    assert "sk-test" not in str(exc.value)
+        chat_provider.complete(_cfg(api_key="sk-test"), "sys", "user")
+    assert str(exc.value) == (
+        "The model provider rejected this deployment's credentials."
+    )
 
 
 @pytest.mark.parametrize("body", [
@@ -453,10 +576,15 @@ def test_provider_maps_a_timeout_to_504(monkeypatch):
 
 
 def test_provider_transport_errors_hide_the_endpoint(monkeypatch):
-    """`public()` withholds the URL; the error path must not reintroduce it."""
+    """`public()` withholds the URL; the error path must not reintroduce it.
+
+    Like the auth-failure test above, this pins the exact message rather than the
+    absence of a substring: the message must name the *class* of failure and
+    nothing else, which is a property the whole string can be checked against.
+    """
     import httpx
     _respond(monkeypatch, exc=httpx.ConnectError("failed connecting to provider.example"))
     with pytest.raises(chat_provider.ProviderError) as exc:
         chat_provider.complete(_cfg(), "sys", "user")
     assert exc.value.status == 502
-    assert "provider.example" not in str(exc.value)
+    assert str(exc.value) == "Could not reach the model provider: ConnectError."
