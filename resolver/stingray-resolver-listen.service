@@ -1,0 +1,42 @@
+# Stingray resolver — SSE push wakeup. Holds an outbound connection to
+# `GET /api/events/stream` and starts stingray-resolver.service when a ticket is
+# assigned to the bot, cutting pickup latency from the timer interval to ~1s.
+#
+# This is an *optimisation*, not a dependency. stingray-resolver.timer stays
+# installed and enabled as the safety net; if this unit is stopped, masked, or
+# wedged, the resolver falls back to the timer's cadence and nothing is lost.
+#
+# Install (alongside the timer, which must already be set up):
+#   sed "s#/opt/ticketing/resolver#$(pwd)#" stingray-resolver-listen.service \
+#     | sudo tee /etc/systemd/system/stingray-resolver-listen.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now stingray-resolver-listen.service
+#   journalctl -u stingray-resolver-listen -f
+#
+# Edit User= to the account that owns the checkout — the same one in
+# stingray-resolver.service, since this unit starts that one.
+[Unit]
+Description=Stingray resolver SSE listener (push wakeup)
+# Not Requires=: a listener that cannot start must not stop the timer path.
+Wants=stingray-resolver.timer
+After=network-online.target
+Wants=network-online.target
+# Don't hammer a server that is down hard enough to kill the process on start.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=stingray
+WorkingDirectory=/opt/ticketing/resolver
+ExecStart=/opt/ticketing/resolver/.venv/bin/python /opt/ticketing/resolver/listen.py
+# A dropped stream is handled in-process with backoff, so reaching here means the
+# process died outright. Restart always (not on-failure): a clean exit from a
+# server closing the connection is still a listener that should come back.
+Restart=always
+RestartSec=10s
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

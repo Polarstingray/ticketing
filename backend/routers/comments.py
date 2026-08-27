@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from activity import record_activity
 from auth import can_view_ticket, get_current_user, is_admin
 from database import get_db
+from events import emit
 from inbox import notify_comment_recipients
 from models import Comment, Ticket, User
 from notifications import notify_comment_email
@@ -62,6 +63,8 @@ def create_comment(
     db.flush()  # assign comment.id
     record_activity(db, ticket_id, user.id, "commented", {"comment_id": comment.id})
     notify_comment_recipients(db, ticket, comment, user)
+    emit(db, type="comment.created", ticket=ticket, actor=user,
+         delta={"comment_id": comment.id})
     notify_comment_email(background, db, ticket, comment, user)
     db.commit()
     db.refresh(comment)

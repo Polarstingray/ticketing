@@ -1,11 +1,21 @@
-# Runs stingray-resolver.service every 10 minutes. systemd serializes runs of the
+# Runs stingray-resolver.service every 30 minutes. systemd serializes runs of the
 # same unit, so this replaces the cron + flock pattern (no overlapping sweeps).
+#
+# This is the *safety net*, not the primary trigger: stingray-resolver-listen.service
+# holds an SSE connection and pokes the same unit within about a second of a ticket
+# being assigned. The timer still has to exist, because push covers only what emits
+# an event — it does not cover a missed event, a listener that is down, or a ticket
+# that becomes actionable with no event at all (a due date passing). The sweep is
+# idempotent, so a redundant wakeup costs a wasted round trip and nothing else.
+#
+# Without the listener installed, drop this back to OnUnitActiveSec=10min: it is
+# then the only thing picking work up, and the interval is the pickup latency.
 [Unit]
-Description=Run the Stingray resolver every 10 minutes
+Description=Run the Stingray resolver every 30 minutes
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=10min
+OnUnitActiveSec=30min
 AccuracySec=30s
 Persistent=true
 

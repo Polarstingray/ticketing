@@ -864,8 +864,13 @@ def _opencode_event(logger, line: str, state: dict) -> None:
 # separately below and is always treated as retryable.
 _RETRYABLE_ERR = re.compile(
     r"overload|unavailable|exhaust|rate.?limit|throttl|deadline|timeout|"
+    r"server.?error|unexpected|internal|"
     r"\b429\b|\b500\b|\b502\b|\b503\b|\b504\b", re.I)
 
+# Errors that are definitely non-retryable and won't clear on retry.
+_NON_RETRYABLE_ERR = re.compile(
+    r"auth|permission|forbidden|unauthorized|invalid.?api.?key|no such model|"
+    r"\b401\b|\b403\b", re.I)
 
 _API_ERR_PATTERNS = re.compile(
     r"HTTP status code|RESOURCE_EXHAUSTED|model overloaded|rate limit|quota exceeded|unavailable|temporary error",
@@ -1007,8 +1012,25 @@ def _run_opencode_once(cfg: Config, prompt: str, cwd: Path, mode: str,
         return False, f"opencode timed out after {timeout}s.", True, cmd
     if state.get("error"):
         err = state["error"]
-        name = err.get("name") if isinstance(err, dict) else err
-        return False, f"opencode error: {name}", bool(_RETRYABLE_ERR.search(str(name))), cmd
+        name = err.get("name") if isinstance(err, dict) else str(err)
+        # Serialize the whole dict so _RETRYABLE_ERR can match data.message/ref too
+        err_text = json.dumps(err) if isinstance(err, dict) else str(err)
+        # Build a human-readable suffix from data.message and ref if present
+        data = err.get("data") or {} if isinstance(err, dict) else {}
+        msg_part = data.get("message", "") if isinstance(data, dict) else ""
+        ref_part = err.get("ref", "") or (data.get("ref", "") if isinstance(data, dict) else "")
+        suffix = ""
+        if msg_part:
+            suffix += f" — {msg_part}"
+        if ref_part:
+            suffix += f" (ref {ref_part})"
+        failure_text = f"opencode error: {name}{suffix}"
+        # Default to retryable unless it matches known non-retryable patterns (auth/permission/hard failures).
+        # Unrecognized errors default to retryable (cost of wrong retry = one model attempt;
+        # cost of wrong non-retry = burned ticket + human handback).
+        is_non_retryable = bool(_NON_RETRYABLE_ERR.search(err_text))
+        retryable = not is_non_retryable
+        return False, failure_text, retryable, cmd
     result_text = (state.get("final") or "".join(state.get("texts") or [])).strip()
     if not state.get("stopped") and not result_text:
         # First rule out a quota/429: that's the usual reason a free-tier Gemini run
@@ -1102,6 +1124,11 @@ def run_opencode(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path)
     can hand the ticket back (or off to another resolver). Returns (ok, result_text)."""
     logger = audit.get_logger()
     models = _opencode_model_chain(cfg, mode)
+    # Validate model format — missing provider/ prefix causes generic "UnknownError"
+    for model in models:
+        if model and "/" not in model:
+            logger.warning("opencode model '%s' has no provider prefix — will likely fail with "
+                           "UnknownError. Check agent_model in resolver settings.", model)
 
     for i, model in enumerate(models):
         # Attempt 1 uses the caller's log path (so the common single-attempt case
@@ -3111,6 +3138,13 @@ def main() -> None:
         remote = {}
     _overlay_settings(cfg, remote)
     AUDIT_TAIL_BYTES = cfg.audit_output_tail_bytes  # re-set: overlay may change it
+    # Warn if effective model looks invalid (missing provider/ prefix).
+    effective_model = cfg.agent_model or cfg.agent_implement_model or ""
+    if effective_model and "/" not in effective_model:
+        log(f"resolver-settings: WARNING — effective agent_model '{effective_model}' "
+            f"has no provider prefix (expected 'provider/model-name'). "
+            f"opencode will likely fail with a generic error. "
+            f"Fix the model name in resolver settings.")
     # Self-report to the resolver-manager registry (best-effort; a registry
     # failure must never affect resolution — same contract as run_agent_tracked).
     try:
