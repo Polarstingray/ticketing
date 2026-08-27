@@ -43,7 +43,7 @@ from models import (
     TicketType,
     User,
 )
-from ticket_queries import tag_clause, visible_tickets
+from ticket_queries import like_escape, tag_clause, visible_tickets
 
 from .budget import Budget, clip
 from .context import ticket_pack
@@ -123,10 +123,17 @@ def _one_of(value: str, allowed: list[str], label: str) -> str:
     return value
 
 
-def _like_escape(text: str) -> str:
-    r"""Escape LIKE wildcards. Same discipline ``tag_clause`` documents: ``_``
-    and ``%`` are ordinary characters in a search string and must not match."""
-    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+# --- Markdown rendering ------------------------------------------------------
+
+def _cell(value, fallback: str = "") -> str:
+    r"""One markdown table cell. ``|`` becomes ``\|`` or it ends the column.
+
+    Every cell here is database text — titles, tags, bot names, resolver models —
+    and none of it is constrained to exclude ``|``, so all of it is escaped on the
+    way out rather than only the fields that seemed likely to contain one.
+    """
+    text = "" if value is None else str(value)
+    return text.replace("|", "\\|") or fallback
 
 
 # --- The read-only tools -----------------------------------------------------
@@ -145,7 +152,7 @@ def _search_tickets(args: dict, *, db: Session, user: User, budget: Budget, **_)
         # Title only. `description` is the expensive column, and `get_ticket` is
         # the tool for depth — keeping search rows small is what makes several
         # hops affordable within one turn's budget.
-        query = query.filter(Ticket.title.ilike(f"%{_like_escape(text)}%", escape="\\"))
+        query = query.filter(Ticket.title.ilike(f"%{like_escape(text)}%", escape="\\"))
 
     status = _str(args, "status", cap=40)
     if status:
@@ -171,9 +178,9 @@ def _search_tickets(args: dict, *, db: Session, user: User, budget: Budget, **_)
     lines = ["| id | status | priority | title | assignee | tags |",
              "|---|---|---|---|---|---|"]
     for t in rows:
-        title = clip((t.title or "").replace("|", "\\|"), TITLE_CAP)
-        tags = clip(", ".join(t.tags or []).replace("|", "\\|"), TAGS_CAP)
-        who = names.get(t.assigned_to, "—") if t.assigned_to else "—"
+        title = clip(_cell(t.title), TITLE_CAP)
+        tags = clip(_cell(", ".join(t.tags or [])), TAGS_CAP)
+        who = _cell(names.get(t.assigned_to) if t.assigned_to else None, "—")
         lines.append(
             f"| {t.id} | {t.status} | {t.priority} | {title} | {who} | {tags} |"
         )
@@ -202,6 +209,10 @@ def _get_ticket(args: dict, *, db: Session, user: User, budget: Budget, **_) -> 
     pack = ticket_pack(db, user, ticket_id, budget=budget.remaining)
     if pack is None:
         return NOT_FOUND
+    # The one tool that charges the budget by hand instead of via `budget.take`.
+    # `take` clips what it is handed, but `ticket_pack` has already assembled the
+    # pack to fit `budget.remaining`, section by section, so clipping it a second
+    # time would cut mid-section. Charge for what it built, don't re-trim it.
     budget.used += len(pack)
     return pack
 
@@ -235,8 +246,9 @@ def _get_agent_runs(args: dict, *, db: Session, user: User, budget: Budget, **_)
              "|---|---|---|---|---|---|---|"]
     for r in runs:
         lines.append(
-            f"| {r.phase} | {r.agent} | {r.model or '—'} | {r.status} | "
-            f"{r.input_tokens} | {r.output_tokens} | ${r.cost_usd:.4f} |"
+            f"| {_cell(r.phase, '—')} | {_cell(r.agent, '—')} | {_cell(r.model, '—')} | "
+            f"{_cell(r.status, '—')} | {r.input_tokens} | {r.output_tokens} | "
+            f"${r.cost_usd:.4f} |"
         )
     return budget.take("\n".join(lines))
 
@@ -277,8 +289,8 @@ def _get_resolver_status(args: dict, *, db: Session, user: User, budget: Budget,
                 settings = "(unreadable)"
         seen = inst.last_seen_at.isoformat() if inst.last_seen_at else "—"
         lines.append(
-            f"| #{inst.bot_user_id} | {inst.name or '—'} | {inst.agent or '—'} | "
-            f"{inst.model or '—'} | {seen} | {clip(settings, 200)} |"
+            f"| #{inst.bot_user_id} | {_cell(inst.name, '—')} | {_cell(inst.agent, '—')} | "
+            f"{_cell(inst.model, '—')} | {seen} | {clip(_cell(settings, '—'), 200)} |"
         )
     return budget.take("\n".join(lines))
 
@@ -355,9 +367,11 @@ def _clean_payload(kind: str, payload: dict, *, db: Session, user: User) -> dict
         # Reserved tags are managed by the app and the resolver; the model cannot
         # know which, and including one would make the endpoint reject the whole
         # create. Drop them rather than fail the proposal.
+        # Stripped, not just tested stripped: the endpoint normalizes on Confirm,
+        # so an unstripped tag would show one thing on the card and create another.
         payload["tags"] = [
-            t for t in tags[:20]
-            if isinstance(t, str) and t.strip() and not is_reserved_tag(t.strip())
+            stripped for stripped in (t.strip() for t in tags[:20] if isinstance(t, str))
+            if stripped and not is_reserved_tag(stripped)
         ]
     elif kind == "add_comment":
         body = _str(payload, "body", cap=BODY_CAP)
