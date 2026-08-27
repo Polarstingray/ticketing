@@ -2836,6 +2836,66 @@ def test_setup_logging_registers_every_configured_secret(tmp_path, monkeypatch):
         assert secret not in audit.redact(f"leaking {secret} here")
 
 
+def test_every_credential_field_on_config_is_registered(monkeypatch):
+    """Registration is by naming convention, so a credential added to `Config`
+    later is scrubbed without anyone remembering to update a list here. This
+    fails loudly if that convention is broken (e.g. a field named `openai_pat`)."""
+    import dataclasses
+
+    import config as resolver_config
+
+    monkeypatch.setattr(audit, "_literal_secrets", set())
+    names = [f.name for f in dataclasses.fields(resolver_config.Config)]
+    cfg = SimpleNamespace(**{n: f"value-for-{n}-0123456789" for n in names})
+    registered = set(audit.register_config_secrets(cfg))
+
+    assert {"api_key", "review_api_key", "critique_api_key",
+            "digest_admin_key", "digest_api_key"} <= registered
+    # Non-credential fields are left alone — registering a URL or a model name
+    # would scrub useful context out of every log line.
+    assert "stingray_url" not in registered
+    assert "agent_model" not in registered
+    for name in registered:
+        assert f"value-for-{name}-0123456789" not in audit.redact(
+            f"leaking value-for-{name}-0123456789 here")
+
+
+def test_register_secret_ignores_values_too_short_to_be_credentials():
+    """The floor exists so a placeholder can't scrub unrelated words. Every real
+    credential is far longer than it."""
+    audit.register_secret("abc")
+    assert "abc" in audit.redact("abc appears in a word like abcdef")
+
+
+@pytest.mark.parametrize("line, leaked", [
+    ("Authorization: Basic dXNlcjpodW50ZXIyc2VjcmV0", "dXNlcjpodW50ZXIyc2VjcmV0"),
+    ("GET /v1/models?api_key=abcdef1234567890 HTTP/1.1", "abcdef1234567890"),
+    ("GET /v1/models?access_token=abcdef1234567890", "abcdef1234567890"),
+    ("env: OPENROUTER_API_KEY=or-v1-abcdef1234567890", "or-v1-abcdef1234567890"),
+    ('{"aws_secret_access_key": "wJalrXUtnFEMI0K7MDENGbPxRfiCY"}',
+     "wJalrXUtnFEMI0K7MDENGbPxRfiCY"),
+    ("POSTGRES_PASSWORD=hunter2hunter2", "hunter2hunter2"),
+    ("using sk-proj-abcdef1234567890 for the call", "sk-proj-abcdef1234567890"),
+])
+def test_redact_catches_transcript_shapes(line, leaked):
+    """`redact` was written for single log lines; a tail is a transcript, so it
+    also sees URLs, JSON bodies and `env` dumps. None of these are registered."""
+    out = audit.redact(line)
+    assert leaked not in out
+    assert out != line
+
+
+@pytest.mark.parametrize("line", [
+    "monkey=business as usual today",
+    "keyboard: mechanical_switches_here",
+    "the plan mentions a primary key on tickets",
+])
+def test_redact_leaves_ordinary_text_alone(line):
+    """Over-redaction costs debuggability, so the name match is per underscore
+    segment: `monkey` is not a key."""
+    assert audit.redact(line) == line
+
+
 def test_a_failed_phase_posts_its_tail(monkeypatch, tmp_path):
     log = tmp_path / "run.log"
 
