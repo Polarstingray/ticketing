@@ -1167,6 +1167,39 @@ def run_agent(cfg: Config, prompt: str, cwd: Path, mode: str,
     return agents.get_runner(cfg.agent).run(cfg, prompt, cwd, mode, log_path)
 
 
+# How much of a failed run's transcript travels to the app. Enough to carry a
+# traceback and the lines around it; small enough that a chatty agent's log does
+# not become the largest thing on the ticket. The server caps at 20k as well.
+LOG_TAIL_BYTES = 8_000
+
+
+def failed_log_tail(log_path: Path, ok: bool) -> str:
+    """The redacted tail of a phase's transcript — empty unless it failed.
+
+    Two rules, both deliberate:
+
+    * **Only on failure.** A successful transcript is bulk nobody reads. The
+      point of shipping any of it is to answer "why did this fail?", which is
+      otherwise unanswerable from the app: transcripts live here, on the machine
+      the resolver runs on, and the app stores only run metadata.
+    * **Always through `audit.redact`.** This is the one path where log content
+      leaves this machine and is persisted somewhere else, so it goes through the
+      same scrubber every log line does rather than a second, weaker copy. Every
+      configured credential is registered with it in `audit.setup_logging`.
+
+    Never raises: the log file may be missing, unreadable, half-written, or not
+    a path at all (some phases run without one), and none of that is a reason to
+    fail a phase that has already finished doing its work.
+    """
+    if ok or not log_path:
+        return ""
+    try:
+        text = Path(log_path).read_text(errors="replace")
+    except Exception:
+        return ""
+    return audit.redact(tail(text, LOG_TAIL_BYTES))
+
+
 def run_agent_tracked(cfg: Config, client: StingrayClient, ticket: dict, prompt: str,
                       cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
     """Run one phase, then POST its token usage/cost to the backend as an
@@ -1196,6 +1229,7 @@ def run_agent_tracked(cfg: Config, client: StingrayClient, ticket: dict, prompt:
             cache_write_tokens=collected.get("cache_write_tokens", 0),
             cost_usd=collected.get("cost_usd", 0.0),
             status="succeeded" if ok else "failed",
+            log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -2384,6 +2418,7 @@ def run_critique(cfg, client: StingrayClient, ticket: dict, plan: str,
             cache_write_tokens=collected.get("cache_write_tokens", 0),
             cost_usd=collected.get("cost_usd", 0.0),
             status="succeeded" if ok else "failed",
+            log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -2496,6 +2531,7 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
             cache_write_tokens=collected.get("cache_write_tokens", 0),
             cost_usd=collected.get("cost_usd", 0.0),
             status="succeeded" if ok else "failed",
+            log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
         )

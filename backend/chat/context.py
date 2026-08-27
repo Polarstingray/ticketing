@@ -46,6 +46,11 @@ MAX_COMMENTS = 40
 MAX_ACTIVITY = 40
 MAX_RUNS = 40
 
+# Per failed run. A tail is the most useful thing in the pack when a run failed
+# and the least useful when it did not, so it is capped tightly enough that two
+# or three of them cannot crowd out the comments that explain the ticket.
+LOG_TAIL_CAP = 6_000
+
 
 def _fmt_date(value) -> str:
     return value.isoformat() if value else "—"
@@ -122,9 +127,13 @@ def _agent_runs(db: Session, ticket: Ticket, budget: Budget) -> str:
 
     Deliberately placed before the long free-text sections: it is a handful of
     short rows, and it is the section a question like "why did the resolver stop
-    on this ticket?" actually needs. A later phase attaches the failing run's log
-    tail here (see docs/chat-design.md); today the app stores only metadata, so
-    that is exactly what this reports.
+    on this ticket?" actually needs.
+
+    A **failed** run's transcript tail is appended below the table, newest first.
+    That is the part that actually answers "why", and it is the reason the table
+    alone was not enough: without it the pack could say a phase failed but never
+    what it said on the way out. Successful runs carry no tail — the resolver
+    does not send one.
     """
     runs = (
         db.query(AgentRun)
@@ -142,7 +151,40 @@ def _agent_runs(db: Session, ticket: Ticket, budget: Budget) -> str:
             f"| {r.phase} | {r.agent} | {r.model or '—'} | {r.status} | "
             f"{r.input_tokens} | {r.output_tokens} | ${r.cost_usd:.4f} |"
         )
-    return _section(budget, "\n\n## Resolver agent runs\n\n", "\n".join(lines))
+    out = _section(budget, "\n\n## Resolver agent runs\n\n", "\n".join(lines))
+    if not out:
+        # The table itself did not fit; a tail without it would be a transcript
+        # with nothing to attribute it to.
+        return ""
+
+    # Newest first: a ticket retried three times has three failures, and the last
+    # one is the one being asked about. Whatever budget is left decides how many
+    # survive, which is why they are added one at a time rather than joined.
+    for r in sorted(runs, key=lambda r: r.id, reverse=True):
+        if not r.log_tail:
+            continue
+        out += _log_tail_section(budget, r)
+    return out
+
+
+_FENCE_OPEN = "```\n"
+_FENCE_CLOSE = "\n```"
+
+
+def _log_tail_section(budget: Budget, run: AgentRun) -> str:
+    """One failed run's transcript tail, fenced and charged.
+
+    Not ``_section``: the fences have to be charged *and* sit outside the clip,
+    or a truncated tail leaves the rest of the pack inside an unterminated code
+    block — which matters more here than elsewhere, since a transcript is the
+    one section whose content is most likely to look like markup itself.
+    """
+    heading = f"\n\n### Failed {run.phase} run (agent {run.agent}) — transcript tail\n\n"
+    overhead = len(heading) + len(_FENCE_OPEN) + len(_FENCE_CLOSE)
+    if budget.remaining < overhead + MIN_SECTION_CONTENT:
+        return ""
+    budget.used += overhead
+    return heading + _FENCE_OPEN + budget.take(run.log_tail, cap=LOG_TAIL_CAP) + _FENCE_CLOSE
 
 
 def _code_blocks(ticket: Ticket, budget: Budget) -> str:

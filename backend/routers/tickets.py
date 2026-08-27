@@ -27,6 +27,7 @@ from models import (
     PRIORITY_ORDER,
     Activity,
     AgentRun,
+    AgentRunStatus,
     Ticket,
     TicketPriority,
     TicketStatus,
@@ -453,6 +454,11 @@ def create_agent_run(
         cache_write_tokens=payload.cache_write_tokens,
         cost_usd=payload.cost_usd,
         status=payload.status,
+        # Only a failed run's tail is kept. A successful transcript is bulk
+        # nobody reads, and the point of storing any of it is to answer "why did
+        # this fail?" — so a tail arriving on a succeeded run is dropped here
+        # rather than trusted, since the sender is an unattended bot.
+        log_tail=payload.log_tail if payload.status == AgentRunStatus.failed.value else "",
         started_at=payload.started_at,
         # Default the completion time server-side if the caller omits it.
         finished_at=payload.finished_at or utcnow(),

@@ -96,7 +96,16 @@ class _AuditOnly(logging.Filter):
 # --- public API ----------------------------------------------------------
 def setup_logging(cfg, sweep_id: str) -> logging.Logger:
     """Configure and return the resolver logger for one sweep."""
-    register_secret(cfg.api_key)
+    # Every configured credential, not just the Stingray one. The regexes in
+    # `redact` catch token *shapes* (gh*_, sk_, Bearer), but a provider key that
+    # looks like none of them is only scrubbed if it is registered here — and
+    # since phase 4 a redacted log tail leaves this machine and is stored in the
+    # app, so an unregistered key would be persisted rather than merely printed.
+    for secret in (cfg.api_key, getattr(cfg, "review_api_key", ""),
+                   getattr(cfg, "critique_api_key", ""),
+                   getattr(cfg, "digest_admin_key", ""),
+                   getattr(cfg, "digest_api_key", "")):
+        register_secret(secret)
     cfg.logs_dir.mkdir(exist_ok=True)
 
     logger = logging.getLogger(LOGGER_NAME)
