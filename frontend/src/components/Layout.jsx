@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useNotifications } from "../notifications/NotificationsContext";
 import ChatWidget from "./ChatWidget";
+import { StingrayIcon } from "./icons";
 import styles from "../styles/Layout.module.css";
 
 export default function Layout() {
@@ -21,7 +22,7 @@ export default function Layout() {
     <div className={styles.shell}>
       <header className={styles.topbar}>
         <div className={styles.brand}>
-          <span className={styles.logo}>🐟</span> Stingray Tickets
+          <StingrayIcon size={20} className={styles.logo} /> Stingray Tickets
         </div>
         <nav className={styles.nav}>
           <NavLink to="/tickets" className={linkClass}>

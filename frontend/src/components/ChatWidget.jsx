@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "../chat/ChatContext";
 import ChatMessageView from "./ChatMessageView";
+import { ChatIcon, TrashIcon } from "./icons";
 import { formatUsd } from "../constants";
 import styles from "../styles/ChatWidget.module.css";
 
@@ -57,7 +58,7 @@ export default function ChatWidget() {
         onClick={() => setOpen(true)}
         aria-label="Open the assistant"
       >
-        💬
+        <ChatIcon size={24} />
       </button>
     );
   }
@@ -108,7 +109,7 @@ export default function ChatWidget() {
                 onClick={() => removeThread(c.id)}
                 aria-label={`Delete conversation ${c.title || c.id}`}
               >
-                🗑
+                <TrashIcon size={14} />
               </button>
             </li>
           ))}
