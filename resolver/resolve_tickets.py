@@ -1194,6 +1194,58 @@ def run_agent(cfg: Config, prompt: str, cwd: Path, mode: str,
     return agents.get_runner(cfg.agent).run(cfg, prompt, cwd, mode, log_path)
 
 
+def tail(text: str, limit: int = 3000) -> str:
+    """Keep the last `limit` characters, marking the elision."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else "...\n" + text[-limit:]
+
+
+# How much of a failed run's transcript travels to the app. Enough to carry a
+# traceback and the lines around it; small enough that a chatty agent's log does
+# not become the largest thing on the ticket. Deliberately well under the
+# server's independent 20k cap on `log_tail` (backend/schemas.py) rather than
+# equal to it: the two are separate processes that version independently, so an
+# older resolver posting to a newer server (or the reverse) has to stay valid,
+# and the margin means a shape change here can never start bouncing POSTs there.
+LOG_TAIL_BYTES = 8_000
+
+
+def failed_log_tail(log_path: Path, ok: bool) -> str:
+    """The redacted tail of a phase's transcript — empty unless it failed.
+
+    Two rules, both deliberate:
+
+    * **Only on failure.** A successful transcript is bulk nobody reads. The
+      point of shipping any of it is to answer "why did this fail?", which is
+      otherwise unanswerable from the app: transcripts live here, on the machine
+      the resolver runs on, and the app stores only run metadata.
+    * **Always through `audit.redact`.** This is the one path where log content
+      leaves this machine and is persisted somewhere else, so it goes through the
+      same scrubber every log line does rather than a second, weaker copy. Every
+      configured credential is registered with it in `audit.setup_logging`.
+
+    The server enforces the same "only on failure" rule independently, dropping
+    a tail posted with status="succeeded". That is redundant on purpose, not
+    drift: this side and the backend version separately, so the app must not
+    depend on an older — or a hand-rolled — resolver to keep the rule.
+
+    Never raises: the log file may be missing, unreadable, half-written, or not
+    a path at all (some phases run without one), and none of that is a reason to
+    fail a phase that has already finished doing its work. The `except` is broad
+    for that reason and not out of laziness — it is not just OSError; a caller
+    may pass a non-path, and the caller is inside the try that guards the POST,
+    so anything escaping here would be swallowed as "failed to POST agent run"
+    and lose the whole run record silently.
+    """
+    if ok or not log_path:
+        return ""
+    try:
+        text = Path(log_path).read_text(errors="replace")
+    except Exception:
+        return ""
+    return audit.redact(tail(text, LOG_TAIL_BYTES))
+
+
 def run_agent_tracked(cfg: Config, client: StingrayClient, ticket: dict, prompt: str,
                       cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
     """Run one phase, then POST its token usage/cost to the backend as an
@@ -1223,6 +1275,7 @@ def run_agent_tracked(cfg: Config, client: StingrayClient, ticket: dict, prompt:
             cache_write_tokens=collected.get("cache_write_tokens", 0),
             cost_usd=collected.get("cost_usd", 0.0),
             status="succeeded" if ok else "failed",
+            log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -2411,6 +2464,7 @@ def run_critique(cfg, client: StingrayClient, ticket: dict, plan: str,
             cache_write_tokens=collected.get("cache_write_tokens", 0),
             cost_usd=collected.get("cost_usd", 0.0),
             status="succeeded" if ok else "failed",
+            log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -2523,6 +2577,7 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
             cache_write_tokens=collected.get("cache_write_tokens", 0),
             cost_usd=collected.get("cost_usd", 0.0),
             status="succeeded" if ok else "failed",
+            log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -2689,11 +2744,6 @@ def fail(client: StingrayClient, ticket: dict, message: str, *,
         set_state(client, ticket, [], status="open", assigned_to=ticket["created_by"])
     phase("failed", ticket, f"#{ticket['id']}: FAILED — {message.splitlines()[0]}",
           reimplementable=reimplementable)
-
-
-def tail(text: str, limit: int = 3000) -> str:
-    text = (text or "").strip()
-    return text if len(text) <= limit else "...\n" + text[-limit:]
 
 
 # --- dispatch ------------------------------------------------------------

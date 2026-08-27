@@ -349,6 +349,120 @@ it. Treat delivery as at-least-once: handle a repeat of an event you have alread
 `resolver/listen.py` is a worked example — it follows this stream and wakes the ticket
 resolver on assignment.
 
+### Chat assistant
+
+An AI assistant that answers questions about a ticket. **Optional**: it is off unless the
+deployment sets `CHAT_API_URL`, `CHAT_API_KEY` and `CHAT_API_MODEL` (see `.env.example`),
+and `GET /chat/config` is how a client discovers that.
+
+It **never writes**. It has read-only tools — searching tickets, reading one, reading a
+ticket's resolver runs — and it can *propose* an action (file a ticket, post a comment,
+change a status), which renders a card the user confirms; confirming calls the ordinary
+endpoints below as the signed-in user. There are no assistant-only write routes.
+
+Every tool resolves against **the caller's own** read permissions, so a ticket you may not
+view returns `404` — the same answer `GET /tickets/{id}` gives, so neither the endpoint nor
+a tool can be used to probe ticket ids. The model chooses *what* to ask about; it never
+chooses *who is asking*.
+
+#### `GET /chat/config`
+Whether the assistant is available, and which model answers. The endpoint URL and API key
+are never exposed.
+```bash
+curl -s -H "X-API-Key: $KEY" "$BASE/chat/config"
+```
+Response `200`: `{ "enabled": true, "model": "claude-sonnet-5" }`
+
+#### `POST /chat/ask`
+Ask one question, optionally anchored to a ticket. There is no conversation state — each
+call stands alone.
+
+| Field | Type | Notes |
+|---|---|---|
+| `question` | string | required, 1–4000 chars |
+| `ticket_id` | int | optional; attaches that ticket's context |
+
+```bash
+curl -s -X POST "$BASE/chat/ask" \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"question": "Why did the resolver stop on this?", "ticket_id": 42}'
+```
+Response `200`:
+```json
+{
+  "answer": "The implement run failed before it opened a PR ...",
+  "usage": {"model": "claude-sonnet-5", "input_tokens": 4210,
+            "output_tokens": 180, "cost_usd": 0.015330},
+  "context_ticket_id": 42,
+  "context_chars": 18442
+}
+```
+`usage.cost_usd` is priced from the deployment's configured per-1M-token rates, and reads
+`0.0` when those are unset. `context_chars` is how much ticket context was actually sent —
+a large ticket is truncated to the configured budget rather than rejected.
+
+Errors: `404` ticket not found or not yours · `422` blank/oversized question ·
+`429` rate limited (per-IP, or the provider's own quota) · `503` assistant not configured ·
+`502`/`504` the model provider failed or timed out.
+
+#### Conversations
+
+Threads persist per user and are **strictly private — admins included**. Every route
+answers `404` for a thread you don't own.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/chat/conversations` | your threads, most recently active first |
+| `POST` | `/chat/conversations` | `{ "ticket_id": 42 }` (optional) → `201` |
+| `GET` | `/chat/conversations/{id}` | the thread with its full transcript |
+| `DELETE` | `/chat/conversations/{id}` | `204`; cascades to the messages |
+
+A thread's `ticket_id` is an *anchor*, not a grant: it is re-resolved against the
+caller's own read permissions on every turn, so losing access to the ticket stops the
+thread with a `404`.
+
+#### `POST /chat/conversations/{id}/messages`
+
+Ask a question in a thread. The answer streams back as **Server-Sent Events**.
+
+| Field | Type | Notes |
+|---|---|---|
+| `content` | string | required, 1–4000 chars |
+| `ticket_id` | int | optional; overrides the thread's anchor for this turn |
+
+Every gate — ownership, the ticket's readability, the daily budget — is checked before
+the stream opens, so refusals are real HTTP statuses rather than error frames.
+
+```bash
+curl -N -X POST "$BASE/chat/conversations/3/messages" \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"content": "Why did the implement run fail?"}'
+```
+
+```
+event: token
+data: {"text": "The implement run "}
+
+event: token
+data: {"text": "failed before opening a PR."}
+
+event: done
+data: {"message_id": 91, "conversation_id": 3, "title": "Why did the implement run fail?",
+       "usage": {"model": "claude-sonnet-5", "input_tokens": 4210,
+                 "output_tokens": 180, "cost_usd": 0.015330},
+       "spent_today_usd": 0.0421}
+```
+
+An `error` frame (`{"detail": "...", "status": 502}`) means the failure happened after
+the stream opened. The question is still recorded; no answer is invented.
+
+Note `EventSource` cannot be used here — it is GET-only and cannot carry a body. Read the
+stream with `fetch` and a reader (see `frontend/src/api.js`).
+
+Errors: `404` thread or ticket not found or not yours · `422` blank/oversized content ·
+`429` rate limited **or the daily USD cap reached** (the detail names the numbers) ·
+`503` assistant not configured.
+
 ---
 
 ### Saved views

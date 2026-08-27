@@ -259,6 +259,11 @@ class AgentRunCreate(BaseModel):
     cache_write_tokens: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0)
     status: AgentRunStatusName = "succeeded"
+    # The tail of a FAILED run's transcript, already redacted by the resolver.
+    # Capped here as well as there: this is the one field on an agent run whose
+    # size is set by how chatty an agent was rather than by the schema, and the
+    # sender is a bot posting unattended.
+    log_tail: str = Field(default="", max_length=20_000)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
@@ -277,6 +282,10 @@ class AgentRunOut(BaseModel):
     cache_write_tokens: int
     cost_usd: float
     status: str
+    # Returned to anyone who may view the ticket — the same gate the rest of the
+    # run is behind, and the same gate that already governs code_blocks, which
+    # carry private source.
+    log_tail: str = ""
     started_at: Optional[UTCDateTime] = None
     finished_at: UTCDateTime
     created_at: UTCDateTime
@@ -762,3 +771,127 @@ class ResolverRosterEntry(BaseModel):
     model: Optional[str] = None
     last_seen_at: Optional[UTCDateTime] = None
     effective_config: Optional[ResolverSettingsValues] = None
+
+
+# --- Chat assistant ----------------------------------------------------------
+
+# Bounds on the question. Unbounded free text here is both a cost problem (it is
+# forwarded to a metered provider) and a context problem (it competes with the
+# ticket context for room), so it is capped well below the context budget.
+MAX_QUESTION_LENGTH = 4000
+
+
+class ChatConfigOut(BaseModel):
+    """What the browser is told about the assistant's configuration.
+
+    Deliberately excludes the endpoint URL and key, which live in the backend's
+    environment and are never exposed (see ``chat/config.py``). The UI renders no
+    trace of the feature when ``enabled`` is false.
+
+    The spend fields are per-caller, not deployment-wide: they let the popup show
+    "$0.12 of $0.50 today" without a second request. ``daily_usd_limit`` is 0.0
+    when no cap is configured.
+    """
+    enabled: bool
+    model: str = ""
+    daily_usd_limit: float = 0.0
+    spent_today_usd: float = 0.0
+
+
+class ChatAskRequest(BaseModel):
+    """One question, optionally anchored to a ticket.
+
+    ``ticket_id`` is a *request* for context, not an authorization claim: the
+    router resolves it against the caller's own read permissions and 404s when
+    they may not see it.
+    """
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_LENGTH)
+    ticket_id: Optional[int] = None
+
+    @field_validator("question")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("question must not be blank")
+        return v
+
+
+class ChatUsage(BaseModel):
+    """Token usage and cost for one answer.
+
+    Mirrors ``AgentRunOut``'s accounting fields on purpose: resolver work and
+    chat work are both metered AI spend, and the UI should be able to render
+    them the same way.
+    """
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+class ChatAskResponse(BaseModel):
+    answer: str
+    usage: ChatUsage
+    # Which ticket's context actually went into the answer, and how much of it —
+    # so the UI can show what the assistant was looking at, and a truncated pack
+    # is visible rather than silent.
+    context_ticket_id: Optional[int] = None
+    context_chars: int = 0
+
+
+class ChatMessageOut(BaseModel):
+    """One stored turn. Assistant turns carry the accounting; user turns don't."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    role: str
+    content: str
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    meta: Dict = Field(default_factory=dict)
+    created_at: UTCDateTime
+
+
+class ChatConversationSummary(BaseModel):
+    """A thread as it appears in the popup's thread list — no message bodies."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    ticket_id: Optional[int] = None
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
+
+
+class ChatConversationOut(ChatConversationSummary):
+    """A thread with its full transcript, oldest first."""
+    messages: List[ChatMessageOut] = Field(default_factory=list)
+
+
+class ChatConversationCreate(BaseModel):
+    """``ticket_id`` anchors the thread to a ticket. It is validated against the
+    caller's own read permission at creation *and* re-checked on every turn, so
+    it never becomes a stored grant of access."""
+    ticket_id: Optional[int] = None
+
+
+class ChatSendRequest(BaseModel):
+    """One question in an existing thread.
+
+    ``ticket_id`` overrides the thread's anchor for this turn only — the popup
+    sends the ticket the user is currently looking at, which may differ from the
+    one the thread started on.
+    """
+    content: str = Field(min_length=1, max_length=MAX_QUESTION_LENGTH)
+    ticket_id: Optional[int] = None
+
+    @field_validator("content")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("content must not be blank")
+        return v

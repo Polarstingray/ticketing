@@ -58,6 +58,7 @@ Two auth paths into the same API:
 | `activity.py` / `inbox.py` | Audit-trail writes and the notification gate (`should_notify`) |
 | `ratelimit.py` / `login_throttle.py` | Per-IP limits; pluggable Redis storage for multi-worker deploys |
 | `seed.py` | First-admin bootstrap and optional resolver-bot provisioning |
+| `chat/` | The optional in-app AI assistant: provider, context pack, prompt |
 
 ## Ticket lifecycle with the resolver
 

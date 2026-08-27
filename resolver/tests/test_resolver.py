@@ -2835,3 +2835,167 @@ def test_do_delegate_without_repo_fails(fake_cfg, monkeypatch):
               "created_by": 9, "type": "task", "title": "audit", "description": "d"}
     rt.do_delegate(fake_cfg, client, ticket, None)
     assert any(rt.FAIL_MARKER in body for _, body in client.comments_added)
+
+
+# --- phase 4: a failed run's transcript tail --------------------------------
+# Transcripts live only on this machine, which makes "why did implement fail on
+# #42?" unanswerable from the app. These cover the one path where log content
+# leaves the machine — so the redaction assertions are the point, not decoration.
+
+def test_failed_log_tail_is_empty_for_a_successful_run(tmp_path):
+    """A successful transcript is bulk nobody reads."""
+    log = tmp_path / "run.log"
+    log.write_text("all fine\n")
+    assert rt.failed_log_tail(log, True) == ""
+
+
+def test_failed_log_tail_returns_the_tail_of_a_failure(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("early noise\n" + "x" * 50 + "\nTraceback: it broke\n")
+    out = rt.failed_log_tail(log, False)
+    assert "Traceback: it broke" in out
+
+
+def test_failed_log_tail_is_bounded(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("y" * (rt.LOG_TAIL_BYTES * 3))
+    out = rt.failed_log_tail(log, False)
+    # `tail` prefixes an elision marker, so allow for it.
+    assert len(out) <= rt.LOG_TAIL_BYTES + 10
+
+
+def test_failed_log_tail_redacts_registered_secrets(tmp_path):
+    """The whole reason this goes through `audit.redact` rather than shipping
+    the file: a provider key in a traceback would otherwise be persisted in the
+    app, not merely printed here."""
+    audit.register_secret("sk-provider-key-abcdef123456")
+    log = tmp_path / "run.log"
+    log.write_text(
+        "POST https://api.example/v1 failed\n"
+        "Authorization: Bearer sk-provider-key-abcdef123456\n"
+        "X-API-Key: sk_stingray_key_9876543210\n"
+        "also ghp_ABCDEFGHIJKLMNOP1234\n"
+    )
+    out = rt.failed_log_tail(log, False)
+    assert "sk-provider-key-abcdef123456" not in out
+    assert "sk_stingray_key_9876543210" not in out
+    assert "ghp_ABCDEFGHIJKLMNOP1234" not in out
+    # Still useful: the surrounding context survives.
+    assert "failed" in out
+
+
+@pytest.mark.parametrize("path", [None, "", "/nonexistent/nope.log"])
+def test_failed_log_tail_never_raises(path):
+    """A phase that already ran must not be failed by an unreadable log."""
+    assert rt.failed_log_tail(path, False) == ""
+
+
+def test_failed_log_tail_survives_undecodable_bytes(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_bytes(b"\xff\xfe broken bytes then it failed\n")
+    assert "it failed" in rt.failed_log_tail(log, False)
+
+
+def test_setup_logging_registers_every_configured_secret(tmp_path, monkeypatch):
+    """The regexes catch token *shapes*; a provider key shaped like none of them
+    is only scrubbed if it was registered."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(audit, "_literal_secrets", set())
+    cfg = SimpleNamespace(
+        api_key="stingray-key-value-1", review_api_key="review-key-value-2",
+        critique_api_key="critique-key-value-3", digest_admin_key="digest-key-value-4",
+        digest_api_key="digest-key-value-5", logs_dir=tmp_path,
+    )
+    audit.setup_logging(cfg, "sweep-1")
+    for secret in ("stingray-key-value-1", "review-key-value-2",
+                   "critique-key-value-3", "digest-key-value-4",
+                   "digest-key-value-5"):
+        assert secret not in audit.redact(f"leaking {secret} here")
+
+
+def test_every_credential_field_on_config_is_registered(monkeypatch):
+    """Registration is by naming convention, so a credential added to `Config`
+    later is scrubbed without anyone remembering to update a list here. This
+    fails loudly if that convention is broken (e.g. a field named `openai_pat`)."""
+    import dataclasses
+
+    import config as resolver_config
+
+    monkeypatch.setattr(audit, "_literal_secrets", set())
+    names = [f.name for f in dataclasses.fields(resolver_config.Config)]
+    cfg = SimpleNamespace(**{n: f"value-for-{n}-0123456789" for n in names})
+    registered = set(audit.register_config_secrets(cfg))
+
+    assert {"api_key", "review_api_key", "critique_api_key",
+            "digest_admin_key", "digest_api_key"} <= registered
+    # Non-credential fields are left alone — registering a URL or a model name
+    # would scrub useful context out of every log line.
+    assert "stingray_url" not in registered
+    assert "agent_model" not in registered
+    for name in registered:
+        assert f"value-for-{name}-0123456789" not in audit.redact(
+            f"leaking value-for-{name}-0123456789 here")
+
+
+def test_register_secret_ignores_values_too_short_to_be_credentials():
+    """The floor exists so a placeholder can't scrub unrelated words. Every real
+    credential is far longer than it."""
+    audit.register_secret("abc")
+    assert "abc" in audit.redact("abc appears in a word like abcdef")
+
+
+@pytest.mark.parametrize("line, leaked", [
+    ("Authorization: Basic dXNlcjpodW50ZXIyc2VjcmV0", "dXNlcjpodW50ZXIyc2VjcmV0"),
+    ("GET /v1/models?api_key=abcdef1234567890 HTTP/1.1", "abcdef1234567890"),
+    ("GET /v1/models?access_token=abcdef1234567890", "abcdef1234567890"),
+    ("env: OPENROUTER_API_KEY=or-v1-abcdef1234567890", "or-v1-abcdef1234567890"),
+    ('{"aws_secret_access_key": "wJalrXUtnFEMI0K7MDENGbPxRfiCY"}',
+     "wJalrXUtnFEMI0K7MDENGbPxRfiCY"),
+    ("POSTGRES_PASSWORD=hunter2hunter2", "hunter2hunter2"),
+    ("using sk-proj-abcdef1234567890 for the call", "sk-proj-abcdef1234567890"),
+])
+def test_redact_catches_transcript_shapes(line, leaked):
+    """`redact` was written for single log lines; a tail is a transcript, so it
+    also sees URLs, JSON bodies and `env` dumps. None of these are registered."""
+    out = audit.redact(line)
+    assert leaked not in out
+    assert out != line
+
+
+@pytest.mark.parametrize("line", [
+    "monkey=business as usual today",
+    "keyboard: mechanical_switches_here",
+    "the plan mentions a primary key on tickets",
+])
+def test_redact_leaves_ordinary_text_alone(line):
+    """Over-redaction costs debuggability, so the name match is per underscore
+    segment: `monkey` is not a key."""
+    assert audit.redact(line) == line
+
+
+def test_a_failed_phase_posts_its_tail(monkeypatch, tmp_path):
+    log = tmp_path / "run.log"
+
+    def fake_run_agent(cfg, prompt, cwd, mode, log_path):
+        log.write_text("it exploded: ValueError\n")
+        return False, "boom"
+
+    monkeypatch.setattr(rt, "run_agent", fake_run_agent)
+    client = RunRecordingClient()
+    rt.run_agent_tracked(_tracking_cfg(), client, {"id": 9}, "p", None,
+                         "implement", log)
+    _, fields = client.runs[0]
+    assert fields["status"] == "failed"
+    assert "it exploded: ValueError" in fields["log_tail"]
+
+
+def test_a_succeeded_phase_posts_no_tail(monkeypatch, tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("chatty but fine\n")
+    monkeypatch.setattr(rt, "run_agent", lambda *a, **k: (True, "ok"))
+    client = RunRecordingClient()
+    rt.run_agent_tracked(_tracking_cfg(), client, {"id": 9}, "p", None,
+                         "implement", log)
+    _, fields = client.runs[0]
+    assert fields["status"] == "succeeded"
+    assert fields["log_tail"] == ""
