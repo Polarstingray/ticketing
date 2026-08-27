@@ -221,3 +221,71 @@ def test_delete_ticket_cascades_runs(client, admin_key):
     # Ticket gone -> the runs sub-resource 404s with it (and the rows are gone).
     r = client.get(f"/tickets/{t['id']}/agent-runs", headers={"X-API-Key": admin_key})
     assert r.status_code == 404
+
+
+# --- log_tail: a failed run's transcript tail --------------------------------
+# Transcripts live on the machine the resolver runs on, so "why did implement
+# fail on #42?" is otherwise unanswerable from the app. The resolver redacts the
+# tail before sending; the rules enforced *here* are about what the server keeps.
+
+def test_a_failed_run_keeps_its_log_tail(client, admin_key):
+    t = _create(client, admin_key)
+    r = client.post(
+        f"/tickets/{t['id']}/agent-runs",
+        json=_run_payload(status="failed", log_tail="Traceback: it broke"),
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["log_tail"] == "Traceback: it broke"
+
+    listed = client.get(f"/tickets/{t['id']}/agent-runs",
+                        headers={"X-API-Key": admin_key}).json()
+    assert listed[0]["log_tail"] == "Traceback: it broke"
+
+
+def test_a_succeeded_run_drops_a_tail_it_was_sent(client, admin_key):
+    """The sender is an unattended bot, so this is enforced rather than trusted:
+    a successful transcript is bulk with no reader."""
+    t = _create(client, admin_key)
+    r = client.post(
+        f"/tickets/{t['id']}/agent-runs",
+        json=_run_payload(status="succeeded", log_tail="chatty but fine"),
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["log_tail"] == ""
+
+
+def test_log_tail_defaults_to_empty(client, admin_key):
+    """An older resolver posts no log_tail at all; that must still work."""
+    t = _create(client, admin_key)
+    r = client.post(f"/tickets/{t['id']}/agent-runs", json=_run_payload(),
+                    headers={"X-API-Key": admin_key})
+    assert r.status_code == 201, r.text
+    assert r.json()["log_tail"] == ""
+
+
+def test_an_oversized_log_tail_is_rejected(client, admin_key):
+    """Capped at the schema, not just at the resolver — this is the one field
+    whose size is set by how chatty an agent was."""
+    t = _create(client, admin_key)
+    r = client.post(
+        f"/tickets/{t['id']}/agent-runs",
+        json=_run_payload(status="failed", log_tail="x" * 20_001),
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 422
+
+
+def test_log_tail_is_hidden_from_an_outsider(client, admin_key, make_user):
+    """It rides the ticket's read gate, like code_blocks — a transcript can
+    quote private source."""
+    t = _create(client, admin_key)
+    client.post(f"/tickets/{t['id']}/agent-runs",
+                json=_run_payload(status="failed", log_tail="secret internals"),
+                headers={"X-API-Key": admin_key})
+    outsider = make_user()
+    r = client.get(f"/tickets/{t['id']}/agent-runs",
+                   headers={"X-API-Key": outsider.key})
+    assert r.status_code == 404
+    assert "secret internals" not in r.text

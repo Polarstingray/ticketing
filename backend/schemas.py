@@ -257,6 +257,11 @@ class AgentRunCreate(BaseModel):
     cache_write_tokens: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0)
     status: AgentRunStatusName = "succeeded"
+    # The tail of a FAILED run's transcript, already redacted by the resolver.
+    # Capped here as well as there: this is the one field on an agent run whose
+    # size is set by how chatty an agent was rather than by the schema, and the
+    # sender is a bot posting unattended.
+    log_tail: str = Field(default="", max_length=20_000)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
@@ -275,6 +280,10 @@ class AgentRunOut(BaseModel):
     cache_write_tokens: int
     cost_usd: float
     status: str
+    # Returned to anyone who may view the ticket — the same gate the rest of the
+    # run is behind, and the same gate that already governs code_blocks, which
+    # carry private source.
+    log_tail: str = ""
     started_at: Optional[UTCDateTime] = None
     finished_at: UTCDateTime
     created_at: UTCDateTime

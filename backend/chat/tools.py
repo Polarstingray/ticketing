@@ -62,6 +62,14 @@ MAX_PROPOSALS = 5        # per turn; an injected description shouldn't yield a w
 RATIONALE_CAP = 500
 BODY_CAP = 4_000
 
+# Per failed run, when reporting agent runs. Tight enough that two or three
+# tails cannot consume a whole turn's budget on their own.
+LOG_TAIL_CAP = 6_000
+# A tail is not worth its heading if only a line or two of it survives.
+MIN_TAIL_CONTENT = 200
+_FENCE_OPEN = "```\n"
+_FENCE_CLOSE = "\n```"
+
 _STATUSES = [s.value for s in TicketStatus]
 _TYPES = [t.value for t in TicketType]
 _PRIORITIES = [p.value for p in TicketPriority]
@@ -224,8 +232,10 @@ def _get_agent_runs(args: dict, *, db: Session, user: User, budget: Budget, **_)
     runs are keyed by ticket id, and reading them for a ticket you cannot see
     would leak both its existence and what the resolver did to it.
 
-    Metadata only — the app does not store transcripts yet (that is phase 4), so
-    this reports exactly what exists.
+    A failed run's redacted transcript tail is appended below the table, newest
+    first — that is the part that answers "why did implement fail on #42?", and
+    it is why this tool is worth more than the summary already in the pack. A
+    successful run has no tail; the resolver does not send one.
     """
     ticket_id = _int(args, "ticket_id")
     if ticket_id is None:
@@ -250,7 +260,26 @@ def _get_agent_runs(args: dict, *, db: Session, user: User, budget: Budget, **_)
             f"{_cell(r.status, '—')} | {r.input_tokens} | {r.output_tokens} | "
             f"${r.cost_usd:.4f} |"
         )
-    return budget.take("\n".join(lines))
+    out = budget.take("\n".join(lines))
+    if not out:
+        return "Error: the context budget for this question is used up."
+
+    # Newest first — a ticket retried three times has three failures, and the
+    # last is the one being asked about. Added one at a time so a tight budget
+    # keeps the most recent rather than truncating the oldest mid-line.
+    for r in sorted(runs, key=lambda r: r.id, reverse=True):
+        if not r.log_tail:
+            continue
+        heading = f"\n\n### Failed {_cell(r.phase)} run — transcript tail\n\n"
+        # The fences are charged with the heading and sit *outside* the clip, so
+        # a tail that gets truncated still ends in a closing fence rather than
+        # leaving the rest of the prompt inside an unterminated code block.
+        overhead = len(heading) + len(_FENCE_OPEN) + len(_FENCE_CLOSE)
+        if budget.remaining < overhead + MIN_TAIL_CONTENT:
+            break
+        budget.used += overhead
+        out += heading + _FENCE_OPEN + budget.take(r.log_tail, cap=LOG_TAIL_CAP) + _FENCE_CLOSE
+    return out
 
 
 def _get_resolver_status(args: dict, *, db: Session, user: User, budget: Budget, **_) -> str:

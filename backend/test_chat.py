@@ -1902,3 +1902,114 @@ def test_ask_still_declares_no_tools(client, make_user, enabled, recorder):
     r = _ask(client, owner.key, question="hello")
     assert r.status_code == 200, r.text
     assert len(recorder) == 1
+
+
+# --- Phase 4: a failed run's transcript tail reaches the assistant -----------
+# The whole point of phase 4: "why did implement fail on #42?" was unanswerable
+# from the database, because transcripts lived only on the resolver's machine.
+
+def _add_run(ticket_id, **overrides):
+    from models import AgentRun
+    fields = dict(ticket_id=ticket_id, phase="implement", agent="claude",
+                  model="opus", status="failed", input_tokens=1, output_tokens=2,
+                  cost_usd=0.5, log_tail="")
+    fields.update(overrides)
+    db = _db()
+    try:
+        run = AgentRun(**fields)
+        db.add(run)
+        db.commit()
+        return run.id
+    finally:
+        db.close()
+
+
+def test_the_tool_reports_a_failed_runs_transcript_tail(client, make_user):
+    owner = make_user()
+    mine = _create(client, owner.key, title="Failed run")
+    _add_run(mine["id"], log_tail="ValueError: the verify step exploded")
+
+    out = _dispatch(owner, "get_agent_runs", {"ticket_id": mine["id"]})
+    assert "transcript tail" in out
+    assert "ValueError: the verify step exploded" in out
+
+
+def test_a_succeeded_run_contributes_no_tail(client, make_user):
+    owner = make_user()
+    mine = _create(client, owner.key, title="Fine run")
+    # Belt and braces: the API drops a tail on a succeeded run, but a row written
+    # directly must not surface one either.
+    _add_run(mine["id"], status="succeeded", log_tail="")
+
+    out = _dispatch(owner, "get_agent_runs", {"ticket_id": mine["id"]})
+    assert "transcript tail" not in out
+
+
+def test_tails_are_reported_newest_first(client, make_user):
+    """A ticket retried three times has three failures, and the last one is the
+    one being asked about."""
+    owner = make_user()
+    mine = _create(client, owner.key, title="Retried")
+    _add_run(mine["id"], log_tail="FIRST attempt blew up")
+    _add_run(mine["id"], log_tail="SECOND attempt blew up")
+
+    out = _dispatch(owner, "get_agent_runs", {"ticket_id": mine["id"]})
+    assert out.index("SECOND attempt") < out.index("FIRST attempt")
+
+
+def test_a_tail_is_clipped_to_its_cap(client, make_user):
+    from chat import tools as chat_tools
+    owner = make_user()
+    mine = _create(client, owner.key, title="Chatty failure")
+    _add_run(mine["id"], log_tail="z" * 40_000)
+
+    out = _dispatch(owner, "get_agent_runs", {"ticket_id": mine["id"]})
+    assert out.count("z") <= chat_tools.LOG_TAIL_CAP
+
+
+def test_a_tail_cannot_starve_the_budget(client, make_user):
+    """Several large tails must not consume a whole turn on their own."""
+    owner = make_user()
+    mine = _create(client, owner.key, title="Many failures")
+    for i in range(5):
+        _add_run(mine["id"], log_tail=f"failure {i} " + "q" * 8_000)
+
+    out = _dispatch(owner, "get_agent_runs", {"ticket_id": mine["id"]}, limit=3_000)
+    assert len(out) <= 3_000
+
+
+def test_a_tail_cannot_be_read_through_someone_elses_ticket(client, make_user):
+    from chat import tools as chat_tools
+    owner, stranger = make_user(), make_user()
+    theirs = _create(client, stranger.key, title="Not yours")
+    _add_run(theirs["id"], log_tail="internal traceback")
+
+    out = _dispatch(owner, "get_agent_runs", {"ticket_id": theirs["id"]})
+    assert out == chat_tools.NOT_FOUND
+    assert "internal traceback" not in out
+
+
+def test_the_pack_carries_a_failed_runs_tail(client, admin_key, make_user,
+                                             enabled, recorder):
+    """The popup attaches one ticket; its pack must carry the tail too, or the
+    assistant would have to spend a tool hop to learn what it already could."""
+    owner = make_user()
+    t = _create(client, owner.key)
+    _add_run(t["id"], log_tail="ImportError: no module named widgets")
+
+    _ask(client, owner.key, question="Why did it fail?", ticket_id=t["id"])
+    sent = recorder[0]["user"]
+    assert "transcript tail" in sent
+    assert "ImportError: no module named widgets" in sent
+
+
+def test_the_pack_omits_tails_when_there_are_none(client, admin_key, make_user,
+                                                  enabled, recorder):
+    owner = make_user()
+    t = _create(client, owner.key)
+    _add_run(t["id"], status="succeeded", log_tail="")
+
+    _ask(client, owner.key, question="How did it go?", ticket_id=t["id"])
+    sent = recorder[0]["user"]
+    assert "## Resolver agent runs" in sent
+    assert "transcript tail" not in sent

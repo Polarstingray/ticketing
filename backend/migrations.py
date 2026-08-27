@@ -130,6 +130,12 @@ def _migrate_chat_tables(engine: Engine) -> None:
     ChatMessage.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_agent_run_log_tail(engine: Engine) -> None:
+    """agent_runs.log_tail — added so a failed resolver phase carries the tail of
+    its transcript into the app (chat assistant phase 4)."""
+    _add_column(engine, "agent_runs", "log_tail", "TEXT NOT NULL DEFAULT ''")
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
@@ -142,6 +148,7 @@ MIGRATIONS = [
     _migrate_resolver_instances,
     _migrate_saved_views,
     _migrate_chat_tables,
+    _migrate_agent_run_log_tail,
 ]
 
 

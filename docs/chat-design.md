@@ -44,13 +44,23 @@ The fix is small and bounded: **failed runs ship a truncated log tail with the r
 - `schemas.AgentRunCreate` gains `log_tail: str = Field(default="", max_length=20000)`;
   `AgentRunOut` exposes it (already gated by `can_view_ticket` in `list_agent_runs`,
   `backend/routers/tickets.py:484`).
-- Resolver side: at each `client.add_agent_run(...)` call site
-  (`resolver/resolve_tickets.py:1197`, `:2385`, `:2497`), pass
-  `log_tail=_redact(cfg, tail(log_path.read_text(), 8000))` **when the run failed**.
-  `tail()` already exists; `_redact` is new and scrubs any configured secret value
-  (`stingray_api_key`, `review_api_key`, `critique_api_key`, provider keys) before the
-  tail leaves the dev station. An agent transcript is a plausible place for a key to
-  land in an echoed command; this is the one place to catch it.
+- Resolver side: at each `client.create_agent_run(...)` call site (the plan said
+  `add_agent_run`; the method is `create_agent_run`), pass
+  `log_tail=failed_log_tail(log_path, ok)` — empty unless the run failed.
+- **Redaction reuses `audit.redact`, which already existed.** The plan called for a
+  new `_redact`; writing one would have been a second, weaker copy of the scrubber
+  every log line already goes through. What *was* missing is that only `cfg.api_key`
+  was registered as a literal secret — `review_api_key`, `critique_api_key` and the
+  digest keys were not. The regexes catch token *shapes* (`gh*_`, `sk_`, `Bearer`),
+  so a provider key shaped like none of them was scrubbed nowhere.
+  `audit.setup_logging` now registers all of them. That gap mattered little while
+  the tail stayed on the dev station and matters a great deal now that it is
+  persisted in the app. An agent transcript is a plausible place for a key to land
+  in an echoed command; this is the one place to catch it.
+- **Only failure ships a tail**, enforced twice: `failed_log_tail` returns `""` for a
+  successful run, and `create_agent_run` drops a tail sent alongside
+  `status="succeeded"` — the sender is an unattended bot, so this is enforced rather
+  than trusted.
 
 That single field is what turns "run 3 failed" into "run 3 failed because the verify
 command couldn't find `.venv` in a fresh worktree."
@@ -172,8 +182,8 @@ def dispatch(name: str, args: dict, *, db: Session, user: User) -> str:
 - `search_tickets(query?, status?, tag?, assigned_to_me?, limit<=20)` — starts from
   `_visible_tickets(db, user)`, reusing `_tag_clause` for tag matching.
 - `get_ticket(ticket_id)` → `ticket_pack(...)`.
-- `get_agent_runs(ticket_id)` → runs. (`log_tail` arrives with phase 4; until
-  then the app stores only run metadata, and the tool reports exactly that.)
+- `get_agent_runs(ticket_id)` → runs, plus each failed run's redacted transcript
+  tail, newest first (phase 4).
 - `get_resolver_status()` → the `ResolverInstance` roster and non-secret
   `effective_config`, so "is the gemini resolver even running?" is answerable.
 
@@ -312,7 +322,8 @@ Backend (`backend/test_chat.py`, plus additions to `test_agent_runs.py`):
 - provider unconfigured → `GET /chat/config` reports `enabled: false`; send → 503
 - SSE frame sequence, with `provider.stream` monkeypatched to yield canned events
 - `propose_action` records to `meta` and performs no write (ticket/comment counts unchanged)
-- `log_tail` accepted on `AgentRunCreate`, capped, and returned only to viewers
+- `log_tail` accepted on `AgentRunCreate`, capped, dropped on a succeeded run, and
+  returned only to viewers; the resolver redacts registered secrets before sending
 
 Frontend (`ChatWidget.test.jsx`, vitest + testing-library, matching the existing suites):
 
@@ -349,9 +360,19 @@ Four PRs, each independently mergeable and useful:
    the `Activity` row the existing endpoint writes.
    *The per-turn cost ceiling rises ~7×*, bounded by the shared context budget
    and by the loop's running-cost check against the daily cap.
-4. **Resolver debugging** — `AgentRun.log_tail` + migration, resolver-side upload with
-   redaction, `get_agent_runs`/`get_resolver_status` tools, the resolver-aware system
-   prompt, and a seeded example thread in `seed_demo.py` for the hosted demo.
+4. **Resolver debugging** — ✅ **shipped.** `AgentRun.log_tail` +
+   `_migrate_agent_run_log_tail`, the resolver-side upload through `audit.redact`
+   (and the missing secret registrations that fixed), the tail folded into both
+   `context._agent_runs` and the `get_agent_runs` tool, and a seeded thread in
+   `seed_demo.py` — a failed `implement` run, the assistant explaining the
+   `KeyError`, and a proposed follow-up ticket — so the hosted demo shows the
+   feature with no `CHAT_API_*` configured. 375 backend tests, 347 resolver.
+
+   Tails are charged against the same budget as everything else and capped per
+   run (`LOG_TAIL_CAP`), newest first: a ticket retried three times has three
+   failures and the last is the one being asked about. The code fences are
+   charged *and* sit outside the clip, so a truncated tail cannot leave the rest
+   of the prompt inside an unterminated code block.
 
 ## What phase 2 settled that the plan hadn't
 

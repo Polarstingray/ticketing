@@ -199,6 +199,14 @@ class AgentRun(Base):
     cache_write_tokens = Column(Integer, nullable=False, default=0)
     cost_usd = Column(Float, nullable=False, default=0.0)
     status = Column(String, nullable=False, default=AgentRunStatus.succeeded.value)
+    # The tail of the agent's transcript, for a run that FAILED. Transcripts
+    # otherwise live only on the machine the resolver runs on
+    # (``resolver/logs/ticket-<id>-<phase>-<ts>.log``), which makes "why did
+    # implement fail on #42?" unanswerable from the app — the one question the
+    # runs table exists to help with. The resolver redacts it before sending, and
+    # sends nothing at all for a run that succeeded: a successful transcript is
+    # bulk with no reader.
+    log_tail = Column(Text, nullable=False, default="")
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, default=utcnow, nullable=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
