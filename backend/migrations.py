@@ -158,6 +158,16 @@ def _migrate_webhooks(engine: Engine) -> None:
     WebhookDelivery.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_ticket_leases(engine: Engine) -> None:
+    """ticket_leases table — added with the explicit claim/lease API.
+
+    A brand-new table, so `create_all` builds it on a fresh DB; this backfills
+    it on databases that predate the model. `checkfirst=True` no-ops when the
+    table already exists (idempotent)."""
+    from models import TicketLease
+    TicketLease.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
@@ -173,6 +183,7 @@ MIGRATIONS = [
     _migrate_agent_run_log_tail,
     _migrate_outbox,
     _migrate_webhooks,
+    _migrate_ticket_leases,
 ]
 
 
