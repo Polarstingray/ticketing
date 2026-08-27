@@ -323,14 +323,29 @@ that execs them, so changing the behavior is an ordinary reviewable commit.
 Tune the branch with `DEPLOY_BRANCH=` (empty means any branch).
 
 **Demo data** (for a screenshot/walkthrough or a hosted demo — a lived-in board
-with a resolved code-review ticket, its per-phase agent-run cost timeline, and a
-delegated parent→child fan-out):
+with a resolved code-review ticket, its per-phase agent-run cost timeline, a
+delegated parent→child fan-out, a *failed* implement run carrying the redacted
+tail of its transcript, and a chat thread where the assistant explains that
+failure and proposes a follow-up ticket):
 
 ```bash
 cd backend
 DATABASE_PATH=data/demo.db python -m seed_demo   # login: admin / demopass123
 DATABASE_PATH=data/demo.db uvicorn main:app --port 8000
 ```
+
+The seeded chat thread is stored, so reading it costs nothing — but the popup
+hides itself entirely unless the assistant is configured (`ChatConfig.enabled`
+needs all three of `CHAT_API_URL`/`CHAT_API_KEY`/`CHAT_API_MODEL`). For a demo
+that only *browses* the thread, the values need not be valid:
+
+```bash
+CHAT_API_URL=https://demo.invalid/v1/chat/completions \
+CHAT_API_KEY=demo-not-a-real-key CHAT_API_MODEL=claude-sonnet-5 \
+DATABASE_PATH=data/demo.db uvicorn main:app --port 8000
+```
+
+Asking a *new* question of course needs a real provider.
 
 ## Testing
 
