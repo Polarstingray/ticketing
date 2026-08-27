@@ -13,6 +13,8 @@ used to confirm the existence of someone else's ticket.
 Everything in the pack originates as user- or agent-authored text and must be
 treated as untrusted data by the caller; see ``prompts.py``.
 """
+import re
+
 from sqlalchemy.orm import Session
 
 from auth import can_view_ticket
@@ -49,7 +51,12 @@ MAX_RUNS = 40
 # Per failed run. A tail is the most useful thing in the pack when a run failed
 # and the least useful when it did not, so it is capped tightly enough that two
 # or three of them cannot crowd out the comments that explain the ticket.
+# Shared with ``tools.py``, which renders the same tails for the get_agent_runs
+# tool: one cap with one rationale, rather than two constants that happen to
+# agree until somebody edits one of them.
 LOG_TAIL_CAP = 6_000
+# A tail is not worth its heading if only a line or two of it survives.
+MIN_TAIL_CONTENT = 200
 
 
 def _fmt_date(value) -> str:
@@ -135,13 +142,18 @@ def _agent_runs(db: Session, ticket: Ticket, budget: Budget) -> str:
     what it said on the way out. Successful runs carry no tail — the resolver
     does not send one.
     """
+    # The *newest* MAX_RUNS, then reversed for the table so it still reads
+    # chronologically. Taking them ascending would keep the oldest ones on a
+    # ticket retried more times than the limit — dropping precisely the runs the
+    # tails exist to explain.
     runs = (
         db.query(AgentRun)
         .filter(AgentRun.ticket_id == ticket.id)
-        .order_by(AgentRun.started_at.asc().nullslast(), AgentRun.id.asc())
+        .order_by(AgentRun.started_at.desc().nullsfirst(), AgentRun.id.desc())
         .limit(MAX_RUNS)
         .all()
     )
+    runs.reverse()
     if not runs:
         return ""
     lines = ["| phase | agent | model | status | in | out | cost |",
@@ -163,28 +175,55 @@ def _agent_runs(db: Session, ticket: Ticket, budget: Budget) -> str:
     for r in sorted(runs, key=lambda r: r.id, reverse=True):
         if not r.log_tail:
             continue
-        out += _log_tail_section(budget, r)
+        heading = f"\n\n### Failed {r.phase} run (agent {r.agent}) — transcript tail\n\n"
+        block = log_tail_block(budget, heading, r.log_tail)
+        if not block:
+            # Out of room. Stop rather than continue: the loop is newest-first on
+            # purpose, and a shorter heading further down the list must not buy an
+            # older tail a place the newer one was just refused.
+            break
+        out += block
     return out
 
 
-_FENCE_OPEN = "```\n"
-_FENCE_CLOSE = "\n```"
+_BACKTICK_RUN = re.compile(r"`+")
 
 
-def _log_tail_section(budget: Budget, run: AgentRun) -> str:
-    """One failed run's transcript tail, fenced and charged.
+def fence_for(text: str) -> str:
+    """The shortest fence ``text`` cannot close from the inside.
+
+    A transcript is the one section whose content is *most* likely to look like
+    markup — an agent that printed a Markdown file, or a resolver log quoting a
+    fenced diff, contains ```` ``` ```` verbatim. A three-backtick fence around
+    that ends early, and everything after it is read as pack structure rather
+    than as data: the remainder of an agent-authored transcript would be
+    indistinguishable from our own ``##`` headings. CommonMark lets a fence be
+    any run of three or more backticks and only a *longer-or-equal* run closes
+    it, so the fence is sized from the content instead.
+    """
+    longest = max((len(m.group()) for m in _BACKTICK_RUN.finditer(text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def log_tail_block(budget: Budget, heading: str, tail: str) -> str:
+    """One failed run's transcript tail, fenced and charged. ``""`` if it won't fit.
 
     Not ``_section``: the fences have to be charged *and* sit outside the clip,
-    or a truncated tail leaves the rest of the pack inside an unterminated code
-    block — which matters more here than elsewhere, since a transcript is the
-    one section whose content is most likely to look like markup itself.
+    or a truncated tail leaves the rest of the prompt inside an unterminated code
+    block. Shared with ``tools.py`` so the fence sizing, the arithmetic and the
+    "no heading without content" floor are written once — the tool renders the
+    same tails from the same rows, and the two copies drifted apart in exactly
+    the way that hides a breakout in one of them.
     """
-    heading = f"\n\n### Failed {run.phase} run (agent {run.agent}) — transcript tail\n\n"
-    overhead = len(heading) + len(_FENCE_OPEN) + len(_FENCE_CLOSE)
-    if budget.remaining < overhead + MIN_SECTION_CONTENT:
+    if not tail:
+        return ""
+    fence = fence_for(tail)
+    open_, close = fence + "\n", "\n" + fence
+    overhead = len(heading) + len(open_) + len(close)
+    if budget.remaining < overhead + MIN_TAIL_CONTENT:
         return ""
     budget.used += overhead
-    return heading + _FENCE_OPEN + budget.take(run.log_tail, cap=LOG_TAIL_CAP) + _FENCE_CLOSE
+    return heading + open_ + budget.take(tail, cap=LOG_TAIL_CAP) + close
 
 
 def _code_blocks(ticket: Ticket, budget: Budget) -> str:

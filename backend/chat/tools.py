@@ -45,8 +45,9 @@ from models import (
 )
 from ticket_queries import like_escape, tag_clause, visible_tickets
 
+from . import context as context_module
 from .budget import Budget, clip
-from .context import ticket_pack
+from .context import log_tail_block, ticket_pack
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +63,14 @@ MAX_PROPOSALS = 5        # per turn; an injected description shouldn't yield a w
 RATIONALE_CAP = 500
 BODY_CAP = 4_000
 
-# Per failed run, when reporting agent runs. Tight enough that two or three
-# tails cannot consume a whole turn's budget on their own.
-LOG_TAIL_CAP = 6_000
-# A tail is not worth its heading if only a line or two of it survives.
-MIN_TAIL_CONTENT = 200
-_FENCE_OPEN = "```\n"
-_FENCE_CLOSE = "\n```"
+# Per failed run, when reporting agent runs: the same cap and the same floor the
+# pack renders tails under, imported rather than restated. They are one rule
+# about one kind of content, and two copies of it drift.
+LOG_TAIL_CAP = context_module.LOG_TAIL_CAP
+MIN_TAIL_CONTENT = context_module.MIN_TAIL_CONTENT
+# Rows in the runs table. Without it a heavily retried ticket's table alone can
+# spend the whole turn's budget and leave nothing for the tails below it.
+MAX_RUNS = 40
 
 _STATUSES = [s.value for s in TicketStatus]
 _TYPES = [t.value for t in TicketType]
@@ -244,12 +246,15 @@ def _get_agent_runs(args: dict, *, db: Session, user: User, budget: Budget, **_)
     if ticket is None or not can_view_ticket(user, ticket):
         return NOT_FOUND
 
+    # Newest MAX_RUNS, re-reversed so the table still reads chronologically.
     runs = (
         db.query(AgentRun)
         .filter(AgentRun.ticket_id == ticket.id)
-        .order_by(AgentRun.started_at.asc().nullslast(), AgentRun.id.asc())
+        .order_by(AgentRun.started_at.desc().nullsfirst(), AgentRun.id.desc())
+        .limit(MAX_RUNS)
         .all()
     )
+    runs.reverse()
     if not runs:
         return f"No agent runs recorded on ticket #{ticket.id}."
     lines = ["| phase | agent | model | status | in | out | cost |",
@@ -271,14 +276,13 @@ def _get_agent_runs(args: dict, *, db: Session, user: User, budget: Budget, **_)
         if not r.log_tail:
             continue
         heading = f"\n\n### Failed {_cell(r.phase)} run — transcript tail\n\n"
-        # The fences are charged with the heading and sit *outside* the clip, so
-        # a tail that gets truncated still ends in a closing fence rather than
-        # leaving the rest of the prompt inside an unterminated code block.
-        overhead = len(heading) + len(_FENCE_OPEN) + len(_FENCE_CLOSE)
-        if budget.remaining < overhead + MIN_TAIL_CONTENT:
-            break
-        budget.used += overhead
-        out += heading + _FENCE_OPEN + budget.take(r.log_tail, cap=LOG_TAIL_CAP) + _FENCE_CLOSE
+        # The fences are charged with the heading, sit *outside* the clip, and are
+        # sized so the transcript cannot close them from the inside; see
+        # ``context.log_tail_block``.
+        block = log_tail_block(budget, heading, r.log_tail)
+        if not block:
+            break  # out of room, and the loop is newest-first on purpose
+        out += block
     return out
 
 
