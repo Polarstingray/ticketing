@@ -37,27 +37,80 @@ _ticket_ctx: ContextVar[str] = ContextVar("resolver_ticket", default="-")
 _REDACTED = "«redacted»"
 _literal_secrets: set[str] = set()
 
+# A config field holding a credential, by name. Registration iterates the Config
+# rather than naming its fields one by one, so a credential added to config.py
+# later is scrubbed without anyone remembering to come back here — the failure
+# mode of a hand-written list is silent (see `register_config_secrets`).
+_SECRET_FIELD_RE = re.compile(r"(?:^|_)(key|token|secret|password|passwd)$")
+
+# Shortest value `register_secret` will scrub. Below this a "secret" is more
+# likely a placeholder ("", "none", "todo") whose literal replacement would
+# mangle unrelated words; no credential this resolver takes is that short (the
+# Stingray keys are 40+ chars, provider keys longer still).
+_MIN_SECRET_LEN = 6
+
 
 def register_secret(value: str | None) -> None:
     """Register an exact secret string (e.g. the API key) to scrub from all
     output. Short values are ignored to avoid mangling unrelated text."""
-    if value and len(value) >= 6:
+    if value and len(value) >= _MIN_SECRET_LEN:
         _literal_secrets.add(value)
 
 
+def register_config_secrets(cfg) -> list[str]:
+    """Register every credential-shaped field on `cfg`, by naming convention.
+
+    Structural on purpose. The regexes in `redact` only catch token *shapes*, so
+    a provider key that looks like none of them is scrubbed only if it was
+    registered — and since a redacted log tail now leaves this machine and is
+    persisted in the app, a credential nobody remembered to add to a hand-written
+    list would be stored there rather than merely printed locally.
+
+    Returns the field names it registered (for logging/tests).
+    """
+    registered = []
+    for name, value in vars(cfg).items():
+        if isinstance(value, str) and _SECRET_FIELD_RE.search(name):
+            register_secret(value)
+            registered.append(name)
+    return registered
+
+
 def redact(text: str) -> str:
-    """Remove registered secrets and token-shaped strings from a log line."""
+    """Remove registered secrets and token-shaped strings from a log line.
+
+    Also applied to multi-line text — a failed run's transcript tail, which may
+    carry request bodies, `env` dumps and URLs rather than one tidy log line.
+    Every value pattern below stops at whitespace so a match can never run past
+    the end of its own line.
+    """
     if not text:
         return text
     for secret in _literal_secrets:
         if secret in text:
             text = text.replace(secret, _REDACTED)
-    # GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_) and Stingray keys (sk_...).
+    # GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_) and sk_/sk- keys (Stingray's, and
+    # the OpenAI-compatible providers' `sk-...` shape).
     text = re.sub(r"\bgh[poursa]_[A-Za-z0-9]{16,}", _REDACTED, text)
+    text = re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}", _REDACTED, text)
     text = re.sub(r"\bsk_[A-Za-z0-9]{8,}", _REDACTED, text)
-    # `Bearer <token>` and `X-API-Key: <token>` — keep the label, drop the value.
+    # `Bearer <token>`, `Basic <b64>` and `X-API-Key: <token>` — keep the label,
+    # drop the value. Basic matters as much as Bearer: it is a password.
     text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", r"\1" + _REDACTED, text)
+    text = re.sub(r"(?i)(basic\s+)[A-Za-z0-9+/=._\-]{8,}", r"\1" + _REDACTED, text)
     text = re.sub(r"(?i)(x-api-key['\"\s:=]+)[A-Za-z0-9._\-]{8,}", r"\1" + _REDACTED, text)
+    # `?api_key=...` / `&token=...` in a logged URL — the value only, so the
+    # endpoint that failed stays readable.
+    text = re.sub(r"(?i)([?&](?:api[-_]?key|access[-_]?token|token|key|secret)=)[^&\s'\"]{8,}",
+                  r"\1" + _REDACTED, text)
+    # `FOO_API_KEY=...` / `"aws_secret_access_key": "..."` — an env dump or a
+    # JSON body. Names, not shapes, so an unregistered credential is still caught.
+    # The name is matched by underscore-separated segment, so `monkey=` and
+    # `keyboard:` are not mistaken for credentials.
+    text = re.sub(
+        r"(?i)\b((?:[A-Z0-9]+_)*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)(?:_[A-Z0-9]+)*)"
+        r"(['\"]?\s*[=:]\s*['\"]?)[^\s'\",}]{8,}",
+        r"\1\2" + _REDACTED, text)
     return text
 
 
@@ -96,16 +149,10 @@ class _AuditOnly(logging.Filter):
 # --- public API ----------------------------------------------------------
 def setup_logging(cfg, sweep_id: str) -> logging.Logger:
     """Configure and return the resolver logger for one sweep."""
-    # Every configured credential, not just the Stingray one. The regexes in
-    # `redact` catch token *shapes* (gh*_, sk_, Bearer), but a provider key that
-    # looks like none of them is only scrubbed if it is registered here — and
-    # since phase 4 a redacted log tail leaves this machine and is stored in the
-    # app, so an unregistered key would be persisted rather than merely printed.
-    for secret in (cfg.api_key, getattr(cfg, "review_api_key", ""),
-                   getattr(cfg, "critique_api_key", ""),
-                   getattr(cfg, "digest_admin_key", ""),
-                   getattr(cfg, "digest_api_key", "")):
-        register_secret(secret)
+    # Every configured credential, not just the Stingray one — and found by
+    # convention rather than by a list that silently goes stale (see
+    # `register_config_secrets`).
+    register_config_secrets(cfg)
     cfg.logs_dir.mkdir(exist_ok=True)
 
     logger = logging.getLogger(LOGGER_NAME)
