@@ -304,9 +304,15 @@ An AI assistant that answers questions about a ticket. **Optional**: it is off u
 deployment sets `CHAT_API_URL`, `CHAT_API_KEY` and `CHAT_API_MODEL` (see `.env.example`),
 and `GET /chat/config` is how a client discovers that.
 
-It is strictly read-only and has no tools. Ticket context is resolved against **the
-caller's own** read permissions, so a ticket you may not view returns `404` — the same
-answer `GET /tickets/{id}` gives, so the endpoint can't be used to probe ticket ids.
+It **never writes**. It has read-only tools — searching tickets, reading one, reading a
+ticket's resolver runs — and it can *propose* an action (file a ticket, post a comment,
+change a status), which renders a card the user confirms; confirming calls the ordinary
+endpoints below as the signed-in user. There are no assistant-only write routes.
+
+Every tool resolves against **the caller's own** read permissions, so a ticket you may not
+view returns `404` — the same answer `GET /tickets/{id}` gives, so neither the endpoint nor
+a tool can be used to probe ticket ids. The model chooses *what* to ask about; it never
+chooses *who is asking*.
 
 #### `GET /chat/config`
 Whether the assistant is available, and which model answers. The endpoint URL and API key
