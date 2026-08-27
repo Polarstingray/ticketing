@@ -28,6 +28,7 @@ from models import (
     PRIORITY_ORDER,
     Activity,
     AgentRun,
+    AgentRunStatus,
     Ticket,
     TicketPriority,
     TicketStatus,
@@ -50,6 +51,7 @@ from schemas import (
     TicketOut,
     TicketUpdate,
 )
+from ticket_queries import tag_clause, visible_tickets
 
 router = APIRouter(prefix="/tickets", tags=["tickets"])
 
@@ -104,31 +106,12 @@ def _authorize_tags(
     return pinned + [t for t in submitted if t not in pinned]
 
 
-def _visible_tickets(db: Session, user: User):
-    """Base query honoring the read boundary.
-
-    Non-admins may only see tickets they created or are assigned to; code_review
-    tickets embed private source in code_blocks. Every listing/aggregation route
-    must start here, or it can leak the existence of another user's tickets.
-    """
-    query = db.query(Ticket)
-    if not is_admin(user):
-        query = query.filter(or_(Ticket.created_by == user.id, Ticket.assigned_to == user.id))
-    return query
-
-
-def _tag_clause(tag: str):
-    r"""SQL matching one exact tag inside the serialized JSON array.
-
-    ``tags`` is a JSON column, which SQLite stores as text (``'["auth", "bug"]'``),
-    so we match the quoted token. The surrounding quotes make this exact rather
-    than a prefix match — the tag charset (schemas._TAG_CHARS) forbids ``"``, so
-    ``"auth"`` cannot appear inside any other tag. LIKE wildcards still have to be
-    escaped though: ``_`` is allowed in tags (it is in ``\w``) and would otherwise
-    match any single character, so ``a_b`` would wrongly match ``axb``.
-    """
-    escaped = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return Ticket.tags.like(f'%"{escaped}"%', escape="\\")
+# The read boundary and exact tag matching live in ``ticket_queries`` so the chat
+# assistant's read-only tools start from the *same* definitions these routes do —
+# one place to change if the boundary ever moves. Aliased to the private names the
+# rest of this module already uses.
+_visible_tickets = visible_tickets
+_tag_clause = tag_clause
 
 
 # `?sort=` value -> the column to order by. `priority` is a String column, so
@@ -481,6 +464,11 @@ def create_agent_run(
         cache_write_tokens=payload.cache_write_tokens,
         cost_usd=payload.cost_usd,
         status=payload.status,
+        # Only a failed run's tail is kept. A successful transcript is bulk
+        # nobody reads, and the point of storing any of it is to answer "why did
+        # this fail?" — so a tail arriving on a succeeded run is dropped here
+        # rather than trusted, since the sender is an unattended bot.
+        log_tail=payload.log_tail if payload.status == AgentRunStatus.failed.value else "",
         started_at=payload.started_at,
         # Default the completion time server-side if the caller omits it.
         finished_at=payload.finished_at or utcnow(),

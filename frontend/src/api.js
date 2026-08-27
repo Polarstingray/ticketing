@@ -37,6 +37,89 @@ async function request(method, path, body) {
 }
 
 /**
+ * Stream a Server-Sent Events response, invoking onEvent({ event, data }) per frame.
+ *
+ * Why not EventSource: it is GET-only and cannot carry a request body, and a chat
+ * turn is a POST with the question in it. So this reads the response body itself.
+ *
+ * Frames arrive split across arbitrary chunk boundaries, so bytes are buffered
+ * and only whole frames (terminated by a blank line) are parsed — a naive
+ * per-chunk parse drops any event unlucky enough to straddle a boundary.
+ *
+ * Returns when the stream ends. Pass `signal` to abort it (the caller navigating
+ * away, or hitting stop); an abort resolves quietly rather than throwing, since
+ * it is a user action and not a failure.
+ */
+async function stream(path, body, onEvent, { signal } = {}) {
+  let res;
+  try {
+    res = await fetch(BASE + path, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    throw err;
+  }
+
+  // Gates (ownership, ticket access, budget, provider unconfigured) are checked
+  // before the stream opens, so a failure here is still a real HTTP status with
+  // a JSON body — parse it the same way request() does.
+  if (!res.ok) {
+    let data = null;
+    try {
+      data = JSON.parse(await res.text());
+    } catch {
+      data = null;
+    }
+    const detail = data && data.detail ? data.detail : res.statusText;
+    const err = new Error(typeof detail === "string" ? detail : "Request failed");
+    err.status = res.status;
+    throw err;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const flush = (block) => {
+    let event = null;
+    let data = null;
+    block.split("\n").forEach((line) => {
+      if (line.startsWith("event: ")) event = line.slice(7);
+      else if (line.startsWith("data: ")) {
+        try {
+          data = JSON.parse(line.slice(6));
+        } catch {
+          data = null;
+        }
+      }
+    });
+    if (event) onEvent({ event, data });
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let split = buffer.indexOf("\n\n");
+      while (split !== -1) {
+        flush(buffer.slice(0, split));
+        buffer = buffer.slice(split + 2);
+        split = buffer.indexOf("\n\n");
+      }
+    }
+    if (buffer.trim()) flush(buffer); // a final frame with no trailing blank line
+  } catch (err) {
+    if (err.name !== "AbortError") throw err;
+  }
+}
+
+/**
  * Build a query string from a params object, dropping empty values.
  *
  * Array values are appended once per element rather than joined, which is what
@@ -159,6 +242,27 @@ export const api = {
     ),
   // The resolver-manager roster: each resolver bot + its live self-reported state.
   listResolvers: () => request("GET", "/resolvers"),
+
+  // Chat assistant (optional — hidden entirely when chatConfig().enabled is
+  // false). Returns { enabled, model, daily_usd_limit, spent_today_usd }.
+  chatConfig: () => request("GET", "/chat/config"),
+  listConversations: () => request("GET", "/chat/conversations"),
+  createConversation: (ticketId) =>
+    request("POST", "/chat/conversations", { ticket_id: ticketId ?? null }),
+  getConversation: (id) => request("GET", `/chat/conversations/${id}`),
+  deleteConversation: (id) => request("DELETE", `/chat/conversations/${id}`),
+  // Streams the answer. onEvent receives { event, data } for each SSE frame:
+  // "token" ({ text }), "tool_call" ({ name, args }), "tool_result"
+  // ({ name, summary }), "done" ({ message_id, usage, meta, spent_today_usd,
+  // title }) and "error" ({ detail, status }). An error *frame* is a mid-turn
+  // failure; a pre-stream refusal throws with an HTTP status instead.
+  //
+  // `done.meta` is the same blob the server stored on the message, so a turn
+  // rendered live and the same turn re-fetched later have identical shape.
+  // `flush()` above dispatches on the event name alone, so these needed no
+  // change there.
+  sendChatMessage: (id, body, onEvent, opts) =>
+    stream(`/chat/conversations/${id}/messages`, body, onEvent, opts),
 
   listUsers: () => request("GET", "/users"),
   createUser: (body) => request("POST", "/users", body),

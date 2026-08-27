@@ -118,6 +118,24 @@ def _migrate_saved_views(engine: Engine) -> None:
     SavedView.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_chat_tables(engine: Engine) -> None:
+    """chat_conversations + chat_messages — added with the chat assistant.
+
+    Brand-new tables, so `create_all` builds them on a fresh DB; this backfills
+    them on databases that predate the models. Created parent-first so the
+    child's foreign key has something to point at, and `checkfirst=True` no-ops
+    when they already exist (idempotent)."""
+    from models import ChatConversation, ChatMessage
+    ChatConversation.__table__.create(bind=engine, checkfirst=True)
+    ChatMessage.__table__.create(bind=engine, checkfirst=True)
+
+
+def _migrate_agent_run_log_tail(engine: Engine) -> None:
+    """agent_runs.log_tail — added so a failed resolver phase carries the tail of
+    its transcript into the app (chat assistant phase 4)."""
+    _add_column(engine, "agent_runs", "log_tail", "TEXT NOT NULL DEFAULT ''")
+
+
 def _migrate_outbox(engine: Engine) -> None:
     """outbox table — added with the transactional event bus.
 
@@ -151,6 +169,8 @@ MIGRATIONS = [
     _migrate_resolver_settings,
     _migrate_resolver_instances,
     _migrate_saved_views,
+    _migrate_chat_tables,
+    _migrate_agent_run_log_tail,
     _migrate_outbox,
     _migrate_webhooks,
 ]

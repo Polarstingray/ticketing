@@ -13,6 +13,7 @@ from database import Base, SessionLocal, engine
 from migrations import run_migrations
 from ratelimit import limiter
 from routers import auth as auth_router
+from routers import chat as chat_router
 from routers import comments as comments_router
 from routers import events as events_router
 from routers import notifications as notifications_router
@@ -81,6 +82,7 @@ app.add_middleware(
 
 app.include_router(auth_router.router)
 app.include_router(tickets_router.router)
+app.include_router(chat_router.router)
 app.include_router(comments_router.router)
 app.include_router(events_router.router)
 app.include_router(notifications_router.router)

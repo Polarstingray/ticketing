@@ -35,6 +35,9 @@ from models import (
     AgentRunStatus,
     ApiKey,
     Base,
+    ChatConversation,
+    ChatMessage,
+    ChatRole,
     Comment,
     Ticket,
     TicketPriority,
@@ -80,15 +83,33 @@ def _activity(db, ticket, actor, action, detail, when):
 
 
 def _run(db, ticket, *, agent, phase, model, in_tok, out_tok, cache_r, cache_w,
-         cost, started, dur_s):
+         cost, started, dur_s, status=AgentRunStatus.succeeded.value, log_tail=""):
     db.add(AgentRun(
         ticket_id=ticket.id, agent=agent, phase=phase, model=model,
         input_tokens=in_tok, output_tokens=out_tok,
         cache_read_tokens=cache_r, cache_write_tokens=cache_w, cost_usd=cost,
-        status=AgentRunStatus.succeeded.value,
+        status=status, log_tail=log_tail,
         started_at=started, finished_at=started + timedelta(seconds=dur_s),
         created_at=started + timedelta(seconds=dur_s),
     ))
+
+
+# A realistic failed-run transcript tail. Already redacted, exactly as the
+# resolver would send it — the «redacted» markers are the point, not noise.
+DEMO_LOG_TAIL = """\
+[opencode] loading model claude-sonnet-5
+[opencode] POST https://gateway.internal/v1/chat/completions
+[opencode] Authorization: Bearer «redacted»
+[opencode] applying plan step 2/4: guard plan paths
+Traceback (most recent call last):
+  File "/work/resolver-wt/resolve_tickets.py", line 1841, in do_implement
+    plan = find_approved_plan(client, ticket)
+  File "/work/resolver-wt/resolve_tickets.py", line 1702, in find_approved_plan
+    root = Path(entry["path"]).resolve()
+KeyError: 'path'
+[opencode] phase failed after 48s (exit 1)
+[opencode] no changes written to the worktree
+"""
 
 
 def seed_demo(db: Session) -> None:
@@ -265,6 +286,18 @@ def seed_demo(db: Session) -> None:
              "resolving outside the checkout. PR #52.",
         created_at=_ago(hours=3, minutes=20)))
 
+    # A first implement attempt that failed, carrying the tail of its transcript.
+    # This is what phase 4 exists for: without it the timeline can say a phase
+    # failed but never what it said on the way out, and the transcript itself
+    # lives only on the machine the resolver runs on. Note the redaction — the
+    # resolver scrubs every registered credential before the tail leaves.
+    _run(db, child, agent="opencode", phase="implement",
+         model="claude-sonnet-5", in_tok=9_140, out_tok=310,
+         cache_r=0, cache_w=0, cost=0.0288,
+         started=_ago(hours=4, minutes=52), dur_s=48,
+         status=AgentRunStatus.failed.value,
+         log_tail=DEMO_LOG_TAIL)
+
     c_impl = _ago(hours=4, minutes=30)
     c_review = _ago(hours=3, minutes=40)
     _run(db, child, agent="opencode", phase="implement",
@@ -276,6 +309,66 @@ def seed_demo(db: Session) -> None:
          cache_r=0, cache_w=0, cost=0.0331,
          started=c_review, dur_s=35)
 
+    # ---- A chat thread that answers the question the tail exists for ----------
+    # Seeded rather than left to a live model so the hosted demo shows the
+    # feature without needing CHAT_API_* configured. The assistant's turn carries
+    # the same `meta` shape a real turn stores, so the tool disclosure and the
+    # proposed-action card both render from it.
+    # Owned by the admin the demo walkthrough logs in as. Conversations are
+    # strictly per-owner — there is no admin override, deliberately, since a
+    # thread quotes ticket content — so a thread seeded onto anyone else would be
+    # invisible in the demo. Ada can also *view* this bot-owned ticket, which a
+    # member could not: an anchor the owner cannot read makes every turn a 404.
+    asked = _ago(hours=2, minutes=50)
+    thread = ChatConversation(
+        user_id=admin.id, ticket_id=child.id,
+        title="Why did the first implement run fail?",
+        created_at=asked, updated_at=asked + timedelta(seconds=12))
+    db.add(thread)
+    db.flush()  # need thread.id for the messages
+    db.add(ChatMessage(
+        conversation_id=thread.id, role=ChatRole.user.value,
+        content="Why did the first implement run fail?",
+        meta={"ticket_id": child.id, "context_chars": 4_820},
+        created_at=asked))
+    db.add(ChatMessage(
+        conversation_id=thread.id, role=ChatRole.assistant.value,
+        content=(
+            "The first `implement` run failed with a `KeyError: 'path'` in "
+            "`find_approved_plan()` — it read `entry[\"path\"]` from a plan entry "
+            "that didn't have one, so the phase aborted after 48s without "
+            "writing anything to the worktree.\n\n"
+            "The retry 22 minutes later succeeded, and the change that landed "
+            "(`_within_worktree()`) is unrelated to the crash — so the missing "
+            "`path` key is still unguarded. Worth a ticket."
+        ),
+        model="claude-sonnet-5", input_tokens=6_240, output_tokens=310,
+        cost_usd=0.0071,
+        meta={
+            "ticket_id": child.id,
+            "context_chars": 4_820,
+            "tool_calls": [
+                {"name": "get_agent_runs", "args": {"ticket_id": child.id},
+                 "summary": "1.1k chars", "chars": 1_136},
+            ],
+            "proposed_actions": [{
+                "kind": "create_ticket",
+                "payload": {
+                    "type": "task",
+                    "title": "find_approved_plan crashes on a plan entry with no `path`",
+                    "description": (
+                        "The first implement run on #{} died with KeyError: 'path'. "
+                        "The retry succeeded for unrelated reasons, so the missing-key "
+                        "case is still unguarded."
+                    ).format(child.id),
+                    "priority": "medium",
+                    "tags": ["resolver"],
+                },
+                "rationale": "The crash is still unguarded; the retry passed by luck.",
+            }],
+        },
+        created_at=asked + timedelta(seconds=12)))
+
     db.commit()
 
     print("[seed_demo] Seeded demo data:")
@@ -284,6 +377,8 @@ def seed_demo(db: Session) -> None:
     print(f"  resolver bot   : id={bot.id}  API key {bot_key}")
     print(f"  hero ticket    : #{hero.id} (code_review, 3 agent runs)")
     print(f"  delegation     : parent #{parent.id} -> child #{child.id}")
+    print(f"  chat thread    : #{thread.id} on ticket #{child.id} "
+          f"(owner {admin.username}), showing a failed run explained")
 
 
 def main() -> int:
@@ -303,7 +398,8 @@ def main() -> int:
             return 1
         if args.force:
             # Order matters for FK integrity on the child tables.
-            for model in (AgentRun, Comment, Activity, Ticket, ApiKey, User):
+            for model in (ChatMessage, ChatConversation, AgentRun, Comment,
+                          Activity, Ticket, ApiKey, User):
                 db.query(model).delete()
             db.commit()
         seed_demo(db)
