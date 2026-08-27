@@ -1167,9 +1167,19 @@ def run_agent(cfg: Config, prompt: str, cwd: Path, mode: str,
     return agents.get_runner(cfg.agent).run(cfg, prompt, cwd, mode, log_path)
 
 
+def tail(text: str, limit: int = 3000) -> str:
+    """Keep the last `limit` characters, marking the elision."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else "...\n" + text[-limit:]
+
+
 # How much of a failed run's transcript travels to the app. Enough to carry a
 # traceback and the lines around it; small enough that a chatty agent's log does
-# not become the largest thing on the ticket. The server caps at 20k as well.
+# not become the largest thing on the ticket. Deliberately well under the
+# server's independent 20k cap on `log_tail` (backend/schemas.py) rather than
+# equal to it: the two are separate processes that version independently, so an
+# older resolver posting to a newer server (or the reverse) has to stay valid,
+# and the margin means a shape change here can never start bouncing POSTs there.
 LOG_TAIL_BYTES = 8_000
 
 
@@ -1187,9 +1197,18 @@ def failed_log_tail(log_path: Path, ok: bool) -> str:
       same scrubber every log line does rather than a second, weaker copy. Every
       configured credential is registered with it in `audit.setup_logging`.
 
+    The server enforces the same "only on failure" rule independently, dropping
+    a tail posted with status="succeeded". That is redundant on purpose, not
+    drift: this side and the backend version separately, so the app must not
+    depend on an older — or a hand-rolled — resolver to keep the rule.
+
     Never raises: the log file may be missing, unreadable, half-written, or not
     a path at all (some phases run without one), and none of that is a reason to
-    fail a phase that has already finished doing its work.
+    fail a phase that has already finished doing its work. The `except` is broad
+    for that reason and not out of laziness — it is not just OSError; a caller
+    may pass a non-path, and the caller is inside the try that guards the POST,
+    so anything escaping here would be swallowed as "failed to POST agent run"
+    and lose the whole run record silently.
     """
     if ok or not log_path:
         return ""
@@ -2698,11 +2717,6 @@ def fail(client: StingrayClient, ticket: dict, message: str, *,
         set_state(client, ticket, [], status="open", assigned_to=ticket["created_by"])
     phase("failed", ticket, f"#{ticket['id']}: FAILED — {message.splitlines()[0]}",
           reimplementable=reimplementable)
-
-
-def tail(text: str, limit: int = 3000) -> str:
-    text = (text or "").strip()
-    return text if len(text) <= limit else "...\n" + text[-limit:]
 
 
 # --- dispatch ------------------------------------------------------------
