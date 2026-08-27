@@ -1,8 +1,7 @@
 """Chat assistant routes — configuration, conversations, and streamed answers.
 
-The assistant reads only what the calling user may already read, has no tools,
-and performs no writes. Three boundaries make it safe to add rather than a new
-attack surface:
+The assistant reads only what the calling user may already read, and performs
+no writes. Four boundaries make it safe to add rather than a new attack surface:
 
 * **Authorization is delegated, not reimplemented.** ``chat.context.ticket_pack``
   goes through ``can_view_ticket``; a ticket the caller may not see yields 404,
@@ -12,13 +11,23 @@ attack surface:
 * **Conversations are strictly per-owner — including from admins.** Unlike
   tickets, there is no admin override: a thread quotes ticket content, and a
   second, weaker path to that data is not worth having.
+* **Tools are read-only and caller-bound.** ``chat/tools.py`` dispatches with
+  ``db``/``user`` bound by *this* module via ``functools.partial``, never from
+  the model's arguments; every tool re-derives visibility from that user. The
+  assistant can *propose* an action, which renders a card the user confirms — the
+  confirmation calls the existing endpoints as the user. There is no write path
+  here at all, which is what makes injected ticket text a nuisance and not a
+  vulnerability.
 * **Metered calls are bounded twice.** A per-IP rate limit caps bursts; a
-  per-user daily USD cap (``chat/spend.py``) caps the bill.
+  per-user daily USD cap (``chat/spend.py``) caps the bill. A turn is now up to
+  ``CHAT_MAX_TOOL_HOPS + 1`` provider calls, so the loop also stops escalating
+  once the running cost crosses that cap.
 
 Answers stream as Server-Sent Events. ``EventSource`` cannot issue a POST or
 carry a body, so the browser reads the stream with ``fetch`` + a reader instead
 (see ``frontend/src/api.js``).
 """
+import functools
 import json
 from collections.abc import Iterator
 
@@ -29,8 +38,10 @@ from sqlalchemy.orm import Session
 from auth import get_current_user
 from chat import config as chat_config
 from chat import context as chat_context
+from chat import loop as chat_loop
 from chat import prompts, provider, spend
-from chat.budget import estimate_cost
+from chat import tools as chat_tools
+from chat.budget import Budget, estimate_cost
 from database import SessionLocal, get_db
 from models import ChatConversation, ChatMessage, ChatRole, User, utcnow
 from ratelimit import limiter
@@ -237,6 +248,12 @@ def _stream_turn(conversation_id: int, user_id: int, question: str,
     even if the provider then fails. The assistant's message is written only when
     there is text to store; a stream that died before its first token leaves the
     question standing alone, which is what actually happened.
+
+    The ``User`` the tools enforce against is **re-loaded here**, in this session,
+    rather than passed in from the request. The request-scoped instance would be
+    detached by now, and handing a tool a detached ORM object is the kind of bug
+    that passes in tests and fails against a real connection pool. Re-reading it
+    also means the identity the tools check is the one this session sees.
     """
     db = SessionLocal()
     try:
@@ -248,6 +265,14 @@ def _stream_turn(conversation_id: int, user_id: int, question: str,
         if convo is None:  # deleted between the request and the stream starting
             yield _sse("error", {"detail": "Conversation not found"})
             return
+        user = db.query(User).filter(User.id == user_id).one_or_none()
+        if user is None:  # deleted mid-flight; nothing to enforce against
+            yield _sse("error", {"detail": "Conversation not found"})
+            return
+        # What this user had already spent when the turn began. The loop adds the
+        # turn's own running cost to it — `spent_today` only counts *persisted*
+        # turns, so re-querying it between hops would return the same number.
+        spent_before = spend.spent_today(db, user_id)
 
         history = _history(convo, cfg.history_turns)
         db.add(ChatMessage(
@@ -261,38 +286,61 @@ def _stream_turn(conversation_id: int, user_id: int, question: str,
         convo.updated_at = utcnow()
         db.commit()
 
-        result = provider.StreamResult()
+        state = chat_loop.TurnState()
+        # Bound here, in the stream-local session, and never from the model's
+        # arguments: `dispatch` receives a name and an untrusted dict, and gets
+        # its identity and its database from this partial. See chat/tools.py.
+        budget = Budget(cfg.context_budget)
+        do_tool = functools.partial(
+            chat_tools.dispatch, db=db, user=user,
+            proposals=state.proposed_actions, budget=budget,
+        )
         try:
-            for fragment in provider.stream(
+            for event, data in chat_loop.run(
                 cfg,
                 prompts.SYSTEM_PROMPT,
                 prompts.build_messages(history, question, pack),
-                result,
+                state,
+                dispatch=do_tool,
+                tools=chat_tools.TOOLS,
+                budget=budget,
+                spent_before=spent_before,
             ):
-                yield _sse("token", {"text": fragment})
+                yield _sse(event, data)
         except provider.ProviderError as exc:
             # Pre-stream failures only; a mid-stream fault ends the iteration
-            # instead, leaving the partial text in `result`.
+            # instead, leaving the partial text in `state`.
             yield _sse("error", {"detail": str(exc), "status": exc.status})
             return
 
-        if not result.text:
+        # A turn that only proposed an action and said nothing is degenerate, but
+        # it is not a provider failure and must not be reported as one.
+        if not state.text and not state.proposed_actions:
             yield _sse("error", {"detail": "The model returned an empty response."})
             return
 
         cost = estimate_cost(
-            result.input_tokens, result.output_tokens,
+            state.input_tokens, state.output_tokens,
             cfg.price_in_per_mtok, cfg.price_out_per_mtok,
         )
+        # Tool keys are added only when non-empty, so a plain turn's meta stays
+        # exactly what it has always been.
+        meta = {"ticket_id": ticket_id, "context_chars": len(pack or "")}
+        if state.tool_calls:
+            meta["tool_calls"] = state.tool_calls
+        if state.proposed_actions:
+            meta["proposed_actions"] = state.proposed_actions
+        if state.capped:
+            meta["tool_hops_capped"] = True
         message = ChatMessage(
             conversation_id=convo.id,
             role=ChatRole.assistant.value,
-            content=result.text,
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
+            content=state.text,
+            model=state.model,
+            input_tokens=state.input_tokens,
+            output_tokens=state.output_tokens,
             cost_usd=cost,
-            meta={"ticket_id": ticket_id, "context_chars": len(pack or "")},
+            meta=meta,
         )
         db.add(message)
         convo.updated_at = utcnow()
@@ -304,11 +352,14 @@ def _stream_turn(conversation_id: int, user_id: int, question: str,
             "conversation_id": convo.id,
             "title": convo.title,
             "usage": {
-                "model": result.model,
-                "input_tokens": result.input_tokens,
-                "output_tokens": result.output_tokens,
+                "model": state.model,
+                "input_tokens": state.input_tokens,
+                "output_tokens": state.output_tokens,
                 "cost_usd": cost,
             },
+            # The *same blob that was stored*, so a turn rendered live and the
+            # same turn after a reload have identical shape in the frontend.
+            "meta": meta,
             "spent_today_usd": spend.spent_today(db, user_id),
         })
     finally:
@@ -364,6 +415,12 @@ def ask(
     user: User = Depends(get_current_user),
 ):
     """One question, one answer, no thread — for API clients and scripts.
+
+    **No tools.** This path stays a single completion: ``ChatAskResponse`` has
+    nowhere to put tool records or proposed actions, and growing a second tool
+    parser for a non-streaming shape would guarantee the two drift. If parity is
+    ever wanted, the move is to implement ``complete()`` on top of ``stream()``,
+    not to duplicate the accumulation.
 
     Kept alongside the conversation endpoints rather than replaced by them: it is
     the whole surface a non-browser caller needs, and it does not stream, so it

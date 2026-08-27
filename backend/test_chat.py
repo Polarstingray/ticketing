@@ -592,14 +592,30 @@ def streamer(monkeypatch):
         usage = {"input_tokens": 900, "output_tokens": 100, "model": "streamed-model"}
         error = None
         calls = []
+        # Scripted tool calls, one list per hop: `hops[0]` is what the first
+        # provider call answers with. Hops past the end answer with text, which
+        # is what ends the loop. Returned regardless of whether `tools` were
+        # actually offered, so the "asked anyway on the tools-free call" branch
+        # is reachable.
+        hops = []
+        # Per-hop fragment override, keyed by hop index. A hop that answers with
+        # tool calls emits nothing unless it appears here.
+        hop_fragments = {}
 
-    def fake_stream(cfg, system, messages, result):
-        Streamer.calls.append({"system": system, "messages": messages})
+    def fake_stream(cfg, system, messages, result, *, tools=None):
+        index = len(Streamer.calls)
+        Streamer.calls.append({"system": system, "messages": messages, "tools": tools})
         if Streamer.error is not None:
             raise Streamer.error
-        for fragment in Streamer.fragments:
+        calls = list(Streamer.hops[index]) if index < len(Streamer.hops) else []
+        if index in Streamer.hop_fragments:
+            fragments = Streamer.hop_fragments[index]
+        else:
+            fragments = [] if calls else Streamer.fragments
+        for fragment in fragments:
             result.text += fragment
             yield fragment
+        result.tool_calls = calls
         result.model = Streamer.usage["model"]
         result.input_tokens = Streamer.usage["input_tokens"]
         result.output_tokens = Streamer.usage["output_tokens"]
@@ -607,6 +623,8 @@ def streamer(monkeypatch):
     Streamer.calls = []
     Streamer.fragments = ["Hello", ", ", "world."]
     Streamer.error = None
+    Streamer.hops = []
+    Streamer.hop_fragments = {}
     monkeypatch.setattr(chat_router.provider, "stream", fake_stream)
     return Streamer
 
@@ -1104,3 +1122,685 @@ def test_stream_usage_option_can_be_switched_off(monkeypatch):
     list(chat_provider.stream(_cfg(stream_usage=False), "s", [], chat_provider.StreamResult()))
     assert "stream_options" not in sent
     assert sent["stream"] is True
+
+
+# --- Phase 3: tool-call accumulation on the wire ------------------------------
+# The provider's half of the tool loop. A tool call arrives in fragments — id,
+# name and arguments each split across chunks — so these tests are about
+# reassembly, not about what any tool does.
+
+def _tool_frame(index, *, call_id=None, name=None, arguments=None, extra=""):
+    """One `delta.tool_calls` chunk, with only the fields a real one would carry."""
+    fields = []
+    if index is not None:
+        fields.append(f'"index": {index}')
+    if call_id is not None:
+        fields.append(f'"id": "{call_id}"')
+    fn = []
+    if name is not None:
+        fn.append(f'"name": "{name}"')
+    if arguments is not None:
+        import json as _json
+        fn.append('"arguments": ' + _json.dumps(arguments))
+    if fn:
+        fields.append('"function": {' + ", ".join(fn) + "}")
+    return ('{"choices": [{"delta": {"tool_calls": [{' + ", ".join(fields) + "}]}"
+            + extra + "}]}")
+
+
+def _stream_tools(monkeypatch, *frames, cfg=None):
+    _stream_response(monkeypatch, _sse_body(*frames, "[DONE]"))
+    result = chat_provider.StreamResult()
+    out = list(chat_provider.stream(cfg or _cfg(), "sys", [], result,
+                                    tools=[{"type": "function"}]))
+    return out, result
+
+
+def test_stream_accumulates_tool_call_fragments(monkeypatch):
+    """id, name and arguments each arrive in pieces and must be reassembled."""
+    out, result = _stream_tools(
+        monkeypatch,
+        _tool_frame(0, call_id="call_1", name="get_ticket", arguments=""),
+        _tool_frame(0, arguments='{"ticket_'),
+        _tool_frame(0, arguments='id": 4'),
+        _tool_frame(0, arguments="2}"),
+    )
+    assert out == []  # a tool-calling hop yields no text
+    assert len(result.tool_calls) == 1
+    call = result.tool_calls[0]
+    assert (call.id, call.name) == ("call_1", "get_ticket")
+    assert call.arguments == '{"ticket_id": 42}'
+
+
+def test_stream_keeps_parallel_tool_calls_apart(monkeypatch):
+    """Interleaved indexes must not bleed into each other."""
+    out, result = _stream_tools(
+        monkeypatch,
+        _tool_frame(0, call_id="a", name="get_ticket", arguments='{"ticket_id":'),
+        _tool_frame(1, call_id="b", name="get_agent_runs", arguments='{"ticket_id":'),
+        _tool_frame(0, arguments=" 1}"),
+        _tool_frame(1, arguments=" 2}"),
+    )
+    assert [(c.id, c.name, c.arguments) for c in result.tool_calls] == [
+        ("a", "get_ticket", '{"ticket_id": 1}'),
+        ("b", "get_agent_runs", '{"ticket_id": 2}'),
+    ]
+
+
+def test_stream_keys_tool_calls_by_id_when_index_is_absent(monkeypatch):
+    """Not every OpenAI-compatible gateway sends `index`. Defaulting a missing
+    one to 0 would merge two parallel calls into one corrupt blob."""
+    out, result = _stream_tools(
+        monkeypatch,
+        _tool_frame(None, call_id="a", name="get_ticket", arguments='{"ticket_id": 1}'),
+        _tool_frame(None, call_id="b", name="get_agent_runs", arguments='{"ticket_id": 2}'),
+    )
+    assert [(c.id, c.name) for c in result.tool_calls] == [
+        ("a", "get_ticket"), ("b", "get_agent_runs"),
+    ]
+    assert result.tool_calls[0].arguments == '{"ticket_id": 1}'
+
+
+def test_stream_orders_tool_calls_numerically_not_lexically(monkeypatch):
+    """Call 10 must not sort before call 2."""
+    frames = [_tool_frame(i, call_id=f"c{i}", name=f"t{i}", arguments="{}")
+              for i in (0, 2, 10)]
+    out, result = _stream_tools(monkeypatch, *frames)
+    assert [c.name for c in result.tool_calls] == ["t0", "t2", "t10"]
+
+
+def test_stream_drops_a_nameless_tool_call(monkeypatch):
+    """A stream cut off mid-call leaves a half-built buffer. A call with no name
+    cannot be dispatched, and passing it on would report the truncation as the
+    model asking for a tool that doesn't exist."""
+    out, result = _stream_tools(
+        monkeypatch,
+        _tool_frame(0, call_id="whole", name="get_ticket", arguments="{}"),
+        _tool_frame(1, call_id="truncated", arguments='{"tick'),
+    )
+    assert [c.name for c in result.tool_calls] == ["get_ticket"]
+
+
+def test_stream_ignores_finish_reason_and_trusts_the_accumulated_calls(monkeypatch):
+    """Several gateways report finish_reason "stop" on a chunk that carries tool
+    calls, so the presence of calls is the ground truth."""
+    out, result = _stream_tools(
+        monkeypatch,
+        _tool_frame(0, call_id="a", name="get_ticket", arguments="{}",
+                    extra=', "finish_reason": "stop"'),
+    )
+    assert result.finish_reason == "stop"
+    assert [c.name for c in result.tool_calls] == ["get_ticket"]
+
+
+def test_stream_mixes_text_and_tool_calls(monkeypatch):
+    """A hop may say something before asking for a tool; the text is still ours."""
+    out, result = _stream_tools(
+        monkeypatch,
+        '{"choices": [{"delta": {"content": "Let me look."}}]}',
+        _tool_frame(0, call_id="a", name="get_ticket", arguments="{}"),
+    )
+    assert out == ["Let me look."]
+    assert result.text == "Let me look."
+    assert [c.name for c in result.tool_calls] == ["get_ticket"]
+
+
+def test_stream_declares_tools_only_when_it_has_them(monkeypatch):
+    """The text-only path must send a byte-identical request to the pre-tools one."""
+    sent = {}
+
+    def fake_stream(method, url, **kwargs):
+        import httpx
+        sent.clear()
+        sent.update(kwargs.get("json") or {})
+        return _StreamCtx(httpx.Response(200, text=_sse_body("[DONE]"),
+                                         request=httpx.Request(method, url)))
+
+    monkeypatch.setattr(chat_provider.httpx, "stream", fake_stream)
+
+    list(chat_provider.stream(_cfg(), "s", [], chat_provider.StreamResult()))
+    assert "tools" not in sent and "tool_choice" not in sent
+
+    declared = [{"type": "function", "function": {"name": "get_ticket"}}]
+    list(chat_provider.stream(_cfg(), "s", [], chat_provider.StreamResult(),
+                              tools=declared))
+    assert sent["tools"] == declared
+    assert sent["tool_choice"] == "auto"
+
+
+# --- Phase 3: the tools, and the identity invariant ---------------------------
+# `dispatch(name, args, *, db, user, ...)` is the whole security model: `args` is
+# model-supplied, everything after the `*` is caller-bound. These tests are about
+# that line — that nothing in `args` can widen what a tool can see.
+
+def _db():
+    from database import SessionLocal
+    return SessionLocal()
+
+
+def _user_row(db, user):
+    from models import User as UserModel
+    return db.query(UserModel).filter(UserModel.id == user.id).one()
+
+
+def _dispatch(user, name, args, *, proposals=None, limit=100_000):
+    """Run one tool the way the router does — identity bound, args untrusted."""
+    from chat import tools as chat_tools
+    db = _db()
+    try:
+        return chat_tools.dispatch(
+            name, args, db=db, user=_user_row(db, user),
+            proposals=proposals if proposals is not None else [],
+            budget=chat_budget.Budget(limit),
+        )
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("injected", ["user_id", "created_by", "assigned_to", "db", "user"])
+def test_dispatch_ignores_identity_keys_in_args(client, make_user, injected):
+    """The model chooses *what* to ask about, never *who is asking*. An `args`
+    key that names an identity is inert — it is simply never read."""
+    owner, stranger = make_user(), make_user()
+    mine = _create(client, owner.key, title="Mine to find")
+    theirs = _create(client, stranger.key, title="Theirs to find")
+
+    out = _dispatch(owner, "search_tickets",
+                    {"query": "to find", injected: stranger.id})
+    assert f"| {mine['id']} |" in out
+    assert f"| {theirs['id']} |" not in out
+    assert "Theirs to find" not in out
+
+
+def test_search_starts_from_the_read_boundary(client, make_user):
+    owner, stranger, admin = make_user(), make_user(), make_user(role="admin")
+    theirs = _create(client, stranger.key, title="Strangers ticket")
+
+    assert f"| {theirs['id']} |" not in _dispatch(owner, "search_tickets",
+                                                  {"query": "Strangers"})
+    assert f"| {theirs['id']} |" in _dispatch(admin, "search_tickets",
+                                              {"query": "Strangers"})
+
+
+def test_assigned_to_me_uses_the_bound_user(client, make_user):
+    """The one filter that involves identity takes it from the binding."""
+    owner, other = make_user(), make_user()
+    mine = _create(client, owner.key, title="Assigned here", assigned_to=owner.id)
+    _create(client, owner.key, title="Assigned elsewhere", assigned_to=other.id)
+
+    out = _dispatch(owner, "search_tickets", {"assigned_to_me": True})
+    assert f"| {mine['id']} |" in out
+    assert "Assigned elsewhere" not in out
+
+
+@pytest.mark.parametrize("tool", ["get_ticket", "get_agent_runs"])
+def test_a_tool_cannot_reach_another_users_ticket(client, make_user, tool):
+    from chat import tools as chat_tools
+    owner, stranger = make_user(), make_user()
+    theirs = _create(client, stranger.key, title="Confidential title")
+
+    out = _dispatch(owner, tool, {"ticket_id": theirs["id"]})
+    assert out == chat_tools.NOT_FOUND
+    assert "Confidential" not in out
+
+
+@pytest.mark.parametrize("tool", ["get_ticket", "get_agent_runs"])
+def test_missing_and_unreadable_are_the_same_answer(client, make_user, tool):
+    """Otherwise the assistant confirms which ticket ids exist."""
+    owner, stranger = make_user(), make_user()
+    theirs = _create(client, stranger.key)
+    assert (_dispatch(owner, tool, {"ticket_id": theirs["id"]})
+            == _dispatch(owner, tool, {"ticket_id": 99_999_999}))
+
+
+def test_get_ticket_returns_the_pack_for_your_own_ticket(client, make_user):
+    owner = make_user()
+    mine = _create(client, owner.key, title="Readable", description="The body text")
+    out = _dispatch(owner, "get_ticket", {"ticket_id": mine["id"]})
+    assert f"#{mine['id']}" in out and "The body text" in out
+
+
+def test_search_reports_no_match_rather_than_nothing(client, make_user):
+    """An empty tool result reads as a failure to some models, which then retry
+    the identical call and burn a hop."""
+    owner = make_user()
+    assert _dispatch(owner, "search_tickets",
+                     {"query": "zzz-nothing-matches-zzz"}) == "No tickets matched."
+
+
+def test_search_limit_is_clamped_whatever_the_model_asks(client, make_user):
+    from chat import tools as chat_tools
+    owner = make_user()
+    for i in range(3):
+        _create(client, owner.key, title=f"Clamp probe {i}")
+    out = _dispatch(owner, "search_tickets", {"query": "Clamp probe", "limit": 5000})
+    rows = out.count("\n") - 1
+    assert 0 < rows <= chat_tools.SEARCH_LIMIT
+
+
+def test_search_escapes_like_wildcards(client, make_user):
+    """`_` is an ordinary character in a search string, not "any character"."""
+    owner = make_user()
+    _create(client, owner.key, title="under_score match")
+    _create(client, owner.key, title="underXscore miss")
+    out = _dispatch(owner, "search_tickets", {"query": "under_score"})
+    assert "under_score match" in out and "underXscore miss" not in out
+
+
+def test_an_unknown_tool_is_an_error_string_not_an_exception(make_user):
+    out = _dispatch(make_user(), "frobnicate", {})
+    assert out.startswith("Error: no such tool")
+
+
+@pytest.mark.parametrize("args", [
+    {"ticket_id": "not a number"},
+    {"ticket_id": True},
+    {},
+])
+def test_bad_arguments_are_error_strings(make_user, args):
+    out = _dispatch(make_user(), "get_ticket", args)
+    assert out.startswith("Error:")
+
+
+def test_a_raising_handler_does_not_leak_its_exception(make_user, monkeypatch):
+    """SQLAlchemy exception text carries table and column names, and this string
+    is about to be sent to a third-party provider."""
+    from chat import tools as chat_tools
+
+    def boom(*a, **kw):
+        raise RuntimeError("SELECT tickets.secret_column FROM tickets")
+
+    monkeypatch.setitem(chat_tools._HANDLERS, "get_ticket", boom)
+    out = _dispatch(make_user(), "get_ticket", {"ticket_id": 1})
+    assert out.startswith("Error:")
+    assert "secret_column" not in out
+
+
+def test_get_resolver_status_is_administrators_only(make_user):
+    """`GET /resolvers` is require_admin; the tool must not be a wider door."""
+    assert "administrators only" in _dispatch(make_user(), "get_resolver_status", {})
+    assert "administrators only" not in _dispatch(
+        make_user(role="admin"), "get_resolver_status", {})
+
+
+def test_resolver_status_projects_only_the_non_secret_config(make_user):
+    """`effective_config` is written by the resolver bot itself, so a buggy or
+    compromised one that heartbeats an extra key must not leak it through chat."""
+    from models import ResolverInstance
+    bot = make_user()
+    db = _db()
+    try:
+        db.add(ResolverInstance(
+            bot_user_id=bot.id, name="probe", agent="claude", model="m",
+            effective_config={"max_attempts": 4, "api_key": "sk-leak-me",
+                              "stingray_api_key": "sk-also-leak"},
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    out = _dispatch(make_user(role="admin"), "get_resolver_status", {})
+    assert "probe" in out
+    assert "sk-leak-me" not in out and "sk-also-leak" not in out
+
+
+# --- Phase 3: proposed actions, which execute nothing -------------------------
+
+def _propose(user, kind, payload, *, proposals=None, rationale="because"):
+    sink = proposals if proposals is not None else []
+    out = _dispatch(user, "propose_action",
+                    {"kind": kind, "payload": payload, "rationale": rationale},
+                    proposals=sink)
+    return out, sink
+
+
+def test_a_proposal_is_recorded_and_nothing_is_written(client, make_user):
+    """**The load-bearing test of this phase.** The write surface is zero: a
+    proposal records a suggestion and the user's click does the work."""
+    from models import Comment, Ticket
+    owner = make_user()
+    mine = _create(client, owner.key, title="Anchor", description="d")
+
+    sink = []
+    before_tickets = {t.id for t in _db().query(Ticket).all()}
+
+    for kind, payload in [
+        ("create_ticket", {"title": "Proposed ticket", "description": "why"}),
+        ("add_comment", {"ticket_id": mine["id"], "body": "Proposed comment"}),
+        ("set_status", {"ticket_id": mine["id"], "status": "resolved"}),
+        ("request_fix", {"ticket_id": mine["id"]}),
+    ]:
+        out, sink = _propose(owner, kind, payload, proposals=sink)
+        assert out == "proposed", out
+
+    assert [p["kind"] for p in sink] == [
+        "create_ticket", "add_comment", "set_status", "request_fix"]
+
+    db = _db()
+    try:
+        # No ticket was created, no comment posted, no status moved.
+        assert {t.id for t in db.query(Ticket).all()} == before_tickets
+        assert not db.query(Comment).filter(
+            Comment.body == "Proposed comment").all()
+        assert db.query(Ticket).filter(Ticket.id == mine["id"]).one().status == "open"
+    finally:
+        db.close()
+
+
+def test_a_proposal_payload_is_whitelisted(client, make_user):
+    """Everything in the payload comes from the model, which may be echoing an
+    instruction injected into a ticket. Unknown keys are dropped, not passed on."""
+    owner = make_user()
+    _, sink = _propose(owner, "create_ticket", {
+        "title": "Clean", "description": "d",
+        "id": 1, "created_by": 999, "archived": True, "assigned_to": 999,
+    })
+    assert set(sink[0]["payload"]) == {"type", "title", "description", "priority", "tags"}
+
+
+def test_a_proposal_strips_reserved_tags(client, make_user):
+    """The model cannot know which tags are app-managed, and one would make the
+    create endpoint reject the whole ticket when the user clicks Confirm."""
+    owner = make_user()
+    _, sink = _propose(owner, "create_ticket", {
+        "title": "Tagged", "tags": ["backend", "dangerous", "repo:x", "rev:abc"],
+    })
+    assert sink[0]["payload"]["tags"] == ["backend"]
+
+
+@pytest.mark.parametrize("kind,payload", [
+    ("create_ticket", {"title": "T", "priority": "urgent"}),
+    ("create_ticket", {"title": "T", "type": "not-a-type"}),
+    ("create_ticket", {"description": "no title"}),
+    ("set_status", {"ticket_id": None, "status": "wat"}),
+    ("add_comment", {"ticket_id": None, "body": ""}),
+])
+def test_an_invalid_proposal_is_refused_rather_than_carded(client, make_user, kind, payload):
+    """A card that 422s when the user clicks Confirm is worse than no card."""
+    owner = make_user()
+    if payload.get("ticket_id", "absent") is None:
+        payload["ticket_id"] = _create(client, owner.key)["id"]
+    out, sink = _propose(owner, kind, payload)
+    assert out.startswith("Error:"), out
+    assert sink == []
+
+
+def test_an_unknown_proposal_kind_is_refused(make_user):
+    out, sink = _propose(make_user(), "delete_everything", {"ticket_id": 1})
+    assert out.startswith("Error: `kind`")
+    assert sink == []
+
+
+def test_a_proposal_naming_an_unreadable_ticket_is_refused(client, make_user):
+    """Confirm would 404 anyway — but a card *naming* an id discloses that the
+    id exists."""
+    from chat import tools as chat_tools
+    owner, stranger = make_user(), make_user()
+    theirs = _create(client, stranger.key)
+    out, sink = _propose(owner, "add_comment",
+                         {"ticket_id": theirs["id"], "body": "hello"})
+    assert out == chat_tools.NOT_FOUND
+    assert sink == []
+
+
+def test_proposals_are_capped_per_turn(client, make_user):
+    """An injected description should not be able to produce a wall of cards."""
+    from chat import tools as chat_tools
+    owner = make_user()
+    sink = []
+    for i in range(chat_tools.MAX_PROPOSALS + 3):
+        out, sink = _propose(owner, "create_ticket",
+                             {"title": f"Spam {i}"}, proposals=sink)
+    assert len(sink) == chat_tools.MAX_PROPOSALS
+    assert out.startswith("Error:")
+
+
+def test_a_proposal_rationale_is_clipped(client, make_user):
+    from chat import tools as chat_tools
+    owner = make_user()
+    _, sink = _propose(owner, "create_ticket", {"title": "T"},
+                       rationale="x" * 5000)
+    assert len(sink[0]["rationale"]) <= chat_tools.RATIONALE_CAP
+
+
+# --- Phase 3: the multi-hop turn ---------------------------------------------
+# Driven through the real route, so what is asserted is the frame sequence the
+# browser sees and the rows the thread ends up with.
+
+def _call(call_id, name, arguments="{}"):
+    return chat_provider.ToolCall(id=call_id, name=name, arguments=arguments)
+
+
+def _turn(client, user, streamer, *, hops, ticket_id=None, **fragments):
+    """One full turn with scripted tool hops. Returns (events, convo_id)."""
+    streamer.hops = hops
+    streamer.hop_fragments = fragments.pop("hop_fragments", {})
+    convo = _new_convo(client, user.key, ticket_id=ticket_id)
+    r = _send(client, user.key, convo["id"], "What is going on?")
+    assert r.status_code == 200, r.text
+    return _sse_events(r), convo["id"]
+
+
+def test_a_tool_hop_emits_call_and_result_frames(client, make_user, enabled, streamer):
+    owner = make_user()
+    mine = _create(client, owner.key, title="Hopped")
+    events, _ = _turn(client, owner, streamer,
+                      hops=[[_call("c1", "get_ticket", f'{{"ticket_id": {mine["id"]}}}')]])
+
+    names = [name for name, _ in events]
+    assert names == ["tool_call", "tool_result", "token", "token", "token", "done"]
+    call = dict(events)["tool_call"]
+    assert call["name"] == "get_ticket" and call["args"] == {"ticket_id": mine["id"]}
+    assert dict(events)["tool_result"]["name"] == "get_ticket"
+
+
+def test_the_tool_messages_are_appended_in_wire_order(client, make_user, enabled, streamer):
+    """An assistant message carrying tool_calls, then one role:"tool" per call in
+    the same order with matching ids — anything else is a 400 from the provider."""
+    owner = make_user()
+    mine = _create(client, owner.key)
+    _turn(client, owner, streamer, hops=[[
+        _call("c1", "get_ticket", f'{{"ticket_id": {mine["id"]}}}'),
+        _call("c2", "search_tickets", '{"limit": 3}'),
+    ]])
+
+    second = streamer.calls[1]["messages"]
+    assistant, first_tool, second_tool = second[-3], second[-2], second[-1]
+    assert assistant["role"] == "assistant"
+    assert [c["id"] for c in assistant["tool_calls"]] == ["c1", "c2"]
+    # Echoed verbatim: some providers validate that the round-trip is identical.
+    assert assistant["tool_calls"][0]["function"]["arguments"] == \
+        f'{{"ticket_id": {mine["id"]}}}'
+    assert (first_tool["role"], first_tool["tool_call_id"]) == ("tool", "c1")
+    assert (second_tool["role"], second_tool["tool_call_id"]) == ("tool", "c2")
+
+
+def test_every_hop_under_the_cap_is_offered_tools(client, make_user, enabled, streamer):
+    """Tools are withheld only on the *final permitted* call — see the cap test."""
+    owner = make_user()
+    _turn(client, owner, streamer, hops=[[_call("c1", "search_tickets")]])
+    assert len(streamer.calls) == 2
+    assert all(c["tools"] for c in streamer.calls)
+
+
+def test_usage_is_summed_across_hops(client, make_user, enabled, streamer):
+    """Every hop is a separate bill; one stored row has to carry the total."""
+    owner = make_user()
+    events, convo_id = _turn(client, owner, streamer,
+                             hops=[[_call("c1", "search_tickets")]])
+    usage = dict(events)["done"]["usage"]
+    # Two provider calls at 900/100 each.
+    assert (usage["input_tokens"], usage["output_tokens"]) == (1800, 200)
+
+    r = client.get(f"/chat/conversations/{convo_id}", headers={"X-API-Key": owner.key})
+    answer = r.json()["messages"][-1]
+    assert (answer["input_tokens"], answer["output_tokens"]) == (1800, 200)
+    assert answer["cost_usd"] == pytest.approx(
+        chat_budget.estimate_cost(1800, 200, 3.0, 15.0))
+
+
+def test_what_was_streamed_is_what_is_stored(client, make_user, enabled, streamer):
+    """An intermediate hop's preamble has already been appended in the browser.
+    Dropping it would make a reloaded thread differ from what the user watched."""
+    owner = make_user()
+    events, convo_id = _turn(
+        client, owner, streamer,
+        hops=[[_call("c1", "search_tickets")]],
+        hop_fragments={0: ["Let me ", "check."]},
+    )
+    streamed = "".join(d["text"] for name, d in events if name == "token")
+    r = client.get(f"/chat/conversations/{convo_id}", headers={"X-API-Key": owner.key})
+    assert streamed == r.json()["messages"][-1]["content"]
+    assert streamed.startswith("Let me check.")
+
+
+def test_tool_hops_are_not_persisted_as_messages(client, make_user, enabled, streamer):
+    """Only the question and the final answer become rows. A stored role:"tool"
+    message would be replayed by `_history` and orphaned by its trimming."""
+    owner = make_user()
+    _, convo_id = _turn(client, owner, streamer, hops=[
+        [_call("c1", "search_tickets")],
+        [_call("c2", "search_tickets")],
+    ])
+    messages = client.get(f"/chat/conversations/{convo_id}",
+                          headers={"X-API-Key": owner.key}).json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+
+
+def test_the_hop_cap_ends_the_turn_with_an_answer_not_an_error(
+        client, make_user, monkeypatch, streamer):
+    """Exceeding the cap must be a plain message. The final call is made with no
+    tools declared, so the model has to answer from what it already gathered."""
+    monkeypatch.setenv("CHAT_MAX_TOOL_HOPS", "2")
+    for key, value in CONFIGURED.items():
+        monkeypatch.setenv(key, value)
+    chat_config.load.cache_clear()
+    try:
+        owner = make_user()
+        # Asks for a tool on every hop, including the tools-free final one.
+        events, convo_id = _turn(client, owner, streamer,
+                                 hops=[[_call(f"c{i}", "search_tickets")] for i in range(6)])
+        names = [name for name, _ in events]
+        assert "error" not in names
+        assert names[-1] == "done"
+        # max_tool_hops + 1 provider calls, hard.
+        assert len(streamer.calls) == 3
+        assert streamer.calls[-1]["tools"] is None
+        assert dict(events)["done"]["meta"]["tool_hops_capped"] is True
+    finally:
+        chat_config.load.cache_clear()
+
+
+def test_zero_hops_disables_tools_entirely(client, make_user, monkeypatch, streamer):
+    """The free kill-switch: one text call, and a request identical to the
+    pre-tools one."""
+    monkeypatch.setenv("CHAT_MAX_TOOL_HOPS", "0")
+    for key, value in CONFIGURED.items():
+        monkeypatch.setenv(key, value)
+    chat_config.load.cache_clear()
+    try:
+        owner = make_user()
+        events, _ = _turn(client, owner, streamer, hops=[])
+        assert len(streamer.calls) == 1
+        assert streamer.calls[0]["tools"] is None
+        assert [n for n, _ in events][-1] == "done"
+    finally:
+        chat_config.load.cache_clear()
+
+
+def test_malformed_tool_arguments_reach_the_model_as_an_error(
+        client, make_user, enabled, streamer):
+    owner = make_user()
+    _turn(client, owner, streamer, hops=[[_call("c1", "get_ticket", "{not json")]])
+    tool_message = streamer.calls[1]["messages"][-1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["content"].startswith("Error:")
+
+
+def test_an_unknown_tool_name_does_not_break_the_stream(
+        client, make_user, enabled, streamer):
+    owner = make_user()
+    events, _ = _turn(client, owner, streamer, hops=[[_call("c1", "frobnicate")]])
+    assert [n for n, _ in events][-1] == "done"
+    assert streamer.calls[1]["messages"][-1]["content"].startswith("Error: no such tool")
+
+
+def test_a_tool_result_is_clipped_to_the_shared_budget(
+        client, make_user, monkeypatch, streamer):
+    """One budget across all hops is what stops six get_ticket calls multiplying
+    the prompt."""
+    monkeypatch.setenv("CHAT_CONTEXT_BUDGET", "300")
+    for key, value in CONFIGURED.items():
+        monkeypatch.setenv(key, value)
+    chat_config.load.cache_clear()
+    try:
+        owner = make_user()
+        _create(client, owner.key, title="Budget probe",
+                description="x" * 5000)
+        _turn(client, owner, streamer,
+              hops=[[_call("c1", "search_tickets", '{"query": "Budget probe"}')]])
+        content = streamer.calls[1]["messages"][-1]["content"]
+        assert 0 < len(content) <= 300
+    finally:
+        chat_config.load.cache_clear()
+
+
+# --- Phase 3: what the turn stores -------------------------------------------
+
+def test_meta_carries_the_tool_calls_and_the_done_frame_matches(
+        client, make_user, enabled, streamer):
+    """The `done` frame carries the *same blob that was stored*, so a turn
+    rendered live and the same turn after a reload are identical."""
+    owner = make_user()
+    events, convo_id = _turn(client, owner, streamer,
+                             hops=[[_call("c1", "search_tickets")]])
+    meta = dict(events)["done"]["meta"]
+    assert [c["name"] for c in meta["tool_calls"]] == ["search_tickets"]
+    assert meta["tool_calls"][0]["summary"]
+
+    stored = client.get(f"/chat/conversations/{convo_id}",
+                        headers={"X-API-Key": owner.key}).json()["messages"][-1]
+    assert stored["meta"] == meta
+
+
+def test_a_toolless_turn_stores_exactly_the_old_meta(
+        client, make_user, enabled, streamer):
+    """Tool keys are conditional so a plain turn is unchanged by this phase."""
+    owner = make_user()
+    events, _ = _turn(client, owner, streamer, hops=[])
+    assert set(dict(events)["done"]["meta"]) == {"ticket_id", "context_chars"}
+
+
+def test_a_proposal_reaches_meta_through_the_turn(client, make_user, enabled, streamer):
+    owner = make_user()
+    payload = '{"kind": "create_ticket", "payload": {"title": "From the model"}, "rationale": "r"}'
+    events, convo_id = _turn(client, owner, streamer,
+                             hops=[[_call("c1", "propose_action", payload)]])
+    stored = client.get(f"/chat/conversations/{convo_id}",
+                        headers={"X-API-Key": owner.key}).json()["messages"][-1]
+    proposals = stored["meta"]["proposed_actions"]
+    assert len(proposals) == 1
+    assert proposals[0]["kind"] == "create_ticket"
+    assert proposals[0]["payload"]["title"] == "From the model"
+    assert stored["meta"] == dict(events)["done"]["meta"]
+
+
+def test_the_tools_see_the_caller_not_the_thread_owner(client, make_user, enabled, streamer):
+    """The User the tools enforce against is re-loaded in the stream session, so
+    a detached instance can never be what a tool checks."""
+    owner, stranger = make_user(), make_user()
+    theirs = _create(client, stranger.key, title="Not for the caller")
+    _turn(client, owner, streamer,
+          hops=[[_call("c1", "get_ticket", f'{{"ticket_id": {theirs["id"]}}}')]])
+    content = streamer.calls[1]["messages"][-1]["content"]
+    assert content == "Ticket not found."
+    assert "Not for the caller" not in content
+
+
+def test_ask_still_declares_no_tools(client, make_user, enabled, recorder):
+    """The one-shot path stays a single completion; `ChatAskResponse` has nowhere
+    to put tool records."""
+    owner = make_user()
+    r = _ask(client, owner.key, question="hello")
+    assert r.status_code == 200, r.text
+    assert len(recorder) == 1

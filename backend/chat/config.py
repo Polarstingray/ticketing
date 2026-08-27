@@ -99,6 +99,15 @@ class ChatConfig:
     # (OpenAI's `stream_options`). Most compatible gateways accept or ignore it;
     # a strict one rejects the unknown field outright, hence the escape hatch.
     stream_usage: bool
+    # How many times the assistant may call a tool and come back for another turn
+    # before it must answer from what it has. The ceiling on provider calls per
+    # question is this + 1: the last call is made with no tools declared, so the
+    # model *cannot* ask for more and has to answer in prose. 0 disables tools
+    # entirely, which makes the request byte-identical to the pre-tools one.
+    #
+    # Defaulted (and last) on purpose: tests construct ChatConfig(**base) from an
+    # explicit dict, and a required field would break every one of them.
+    max_tool_hops: int = 6
 
     @property
     def enabled(self) -> bool:
@@ -138,4 +147,5 @@ def load() -> ChatConfig:
         daily_usd_limit=_float_env("CHAT_DAILY_USD_LIMIT", 0.0),
         history_turns=_int_env("CHAT_HISTORY_TURNS", 10),
         stream_usage=_bool_env("CHAT_STREAM_USAGE", True),
+        max_tool_hops=_int_env("CHAT_MAX_TOOL_HOPS", 6),
     )

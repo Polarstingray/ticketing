@@ -231,9 +231,15 @@ export const api = {
   getConversation: (id) => request("GET", `/chat/conversations/${id}`),
   deleteConversation: (id) => request("DELETE", `/chat/conversations/${id}`),
   // Streams the answer. onEvent receives { event, data } for each SSE frame:
-  // "token" ({ text }), "done" ({ message_id, usage, spent_today_usd, title })
-  // and "error" ({ detail, status }). An error *frame* is a mid-turn failure;
-  // a pre-stream refusal throws with an HTTP status instead.
+  // "token" ({ text }), "tool_call" ({ name, args }), "tool_result"
+  // ({ name, summary }), "done" ({ message_id, usage, meta, spent_today_usd,
+  // title }) and "error" ({ detail, status }). An error *frame* is a mid-turn
+  // failure; a pre-stream refusal throws with an HTTP status instead.
+  //
+  // `done.meta` is the same blob the server stored on the message, so a turn
+  // rendered live and the same turn re-fetched later have identical shape.
+  // `flush()` above dispatches on the event name alone, so these needed no
+  // change there.
   sendChatMessage: (id, body, onEvent, opts) =>
     stream(`/chat/conversations/${id}/messages`, body, onEvent, opts),
 

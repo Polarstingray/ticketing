@@ -282,3 +282,112 @@
   color: var(--text-dim);
   font-size: 11px;
 }
+
+/* --- Tool calls and proposed actions (phase 3) ---------------------------- */
+
+/* The collapsed "what I looked at" disclosure on a finished turn. Native
+   <details>, so the caret and keyboard behaviour come from the browser. */
+.tools {
+  margin-bottom: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.tools summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.toolList,
+.toolLive {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  list-style: none;
+}
+
+.toolList li,
+.toolLive li {
+  margin-top: 2px;
+}
+
+.toolList code,
+.toolLive code {
+  font-size: 11px;
+  color: var(--text);
+}
+
+/* The live version, shown while the turn is still streaming. */
+.toolLive {
+  align-self: flex-start;
+  padding-left: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* One card the user confirms. Deliberately plain: everything inside it may have
+   originated in a ticket, so it must read as data rather than as the app
+   speaking. See the note in ProposedAction.jsx. */
+.proposal {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.proposalKind {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.proposalTitle {
+  margin-top: 4px;
+  font-weight: 600;
+}
+
+.proposalFields {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.proposalBody {
+  margin-top: 6px;
+  max-height: 140px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.proposalWhy {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.proposalActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.proposalLink {
+  color: var(--accent);
+}
+
+.proposalDone {
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.proposalError {
+  margin-top: 8px;
+  color: var(--danger);
+  font-size: 12px;
+}
