@@ -372,7 +372,13 @@ Four PRs, each independently mergeable and useful:
    run (`LOG_TAIL_CAP`), newest first: a ticket retried three times has three
    failures and the last is the one being asked about. The code fences are
    charged *and* sit outside the clip, so a truncated tail cannot leave the rest
-   of the prompt inside an unterminated code block.
+   of the prompt inside an unterminated code block — and they are *sized from the
+   content* (`context.fence_for`), because a transcript is the one section most
+   likely to contain ``` itself, and a fence a transcript can close from the
+   inside turns agent-authored text into pack structure. The rendering is one
+   function (`context.log_tail_block`) used by both the pack and the tool; the
+   row limit keeps the *newest* `MAX_RUNS`, since taking the oldest would drop
+   exactly the failures the tails explain.
 
 ## What phase 2 settled that the plan hadn't
 
