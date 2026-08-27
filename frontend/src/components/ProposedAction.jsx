@@ -59,6 +59,10 @@ export default function ProposedAction({ proposal }) {
   const [error, setError] = useState("");
   const [created, setCreated] = useState(null);
 
+  // Dismissing hides the card for as long as the thread stays open, with no
+  // undo. It is not persisted either, so reopening the thread brings the card
+  // back — the proposal lives in the message's stored `meta`, and nothing here
+  // writes to it.
   if (state === "dismissed") return null;
 
   async function confirm() {
