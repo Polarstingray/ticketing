@@ -22,9 +22,14 @@
   font-weight: 600;
   font-size: 15px;
   white-space: nowrap;
+  /* Flex so the mark centres against the wordmark; an inline <svg> would
+     otherwise sit on the baseline and read as slightly sunk. */
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .logo {
-  margin-right: 4px;
+  flex: none;
 }
 
 .nav {

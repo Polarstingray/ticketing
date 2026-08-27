@@ -1,0 +1,87 @@
+// Inline SVG icons.
+//
+// Inline rather than <img> or a build plugin: these are UI chrome, not content,
+// so they need to take their color from whatever they sit in. Drawing them with
+// `currentColor` means one file works in both themes and inside a button that
+// changes color on hover — an <img> would need a separate asset per color, and a
+// loader plugin would be a dependency for three icons.
+//
+// Each takes `size` (px, default 16) and spreads the rest onto the <svg>, so a
+// caller can pass a className or aria attributes. They are `aria-hidden` by
+// default because every current caller is a button that already carries its own
+// aria-label; a caller using one as the *only* label should pass `aria-hidden={false}`
+// and a `<title>`.
+
+function Icon({ size = 16, viewBox, children, ...rest }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox={viewBox}
+      width={size}
+      height={size}
+      aria-hidden="true"
+      focusable="false"
+      {...rest}
+    >
+      {children}
+    </svg>
+  );
+}
+
+export function ChatIcon(props) {
+  return (
+    <Icon viewBox="0 0 1024 1024" {...props}>
+      <path
+        fill="currentColor"
+        d="M160 826.88 273.536 736H800a64 64 0 0 0 64-64V256a64 64 0 0 0-64-64H224a64 64 0 0 0-64 64v570.88zM296 800 147.968 918.4A32 32 0 0 1 96 893.44V256a128 128 0 0 1 128-128h576a128 128 0 0 1 128 128v416a128 128 0 0 1-128 128H296z"
+      />
+      <path
+        fill="currentColor"
+        d="M352 512h320q32 0 32 32t-32 32H352q-32 0-32-32t32-32zm0-192h320q32 0 32 32t-32 32H352q-32 0-32-32t32-32z"
+      />
+    </Icon>
+  );
+}
+
+export function TrashIcon(props) {
+  return (
+    <Icon viewBox="0 0 24 24" fill="none" {...props}>
+      <path
+        d="M18 6L17.1991 18.0129C17.129 19.065 17.0939 19.5911 16.8667 19.99C16.6666 20.3412 16.3648 20.6235 16.0011 20.7998C15.588 21 15.0607 21 14.0062 21H9.99377C8.93927 21 8.41202 21 7.99889 20.7998C7.63517 20.6235 7.33339 20.3412 7.13332 19.99C6.90607 19.5911 6.871 19.065 6.80086 18.0129L6 6M4 6H20M16 6L15.7294 5.18807C15.4671 4.40125 15.3359 4.00784 15.0927 3.71698C14.8779 3.46013 14.6021 3.26132 14.2905 3.13878C13.9376 3 13.523 3 12.6936 3H11.3064C10.477 3 10.0624 3 9.70951 3.13878C9.39792 3.26132 9.12208 3.46013 8.90729 3.71698C8.66405 4.00784 8.53292 4.40125 8.27064 5.18807L8 6M14 10V17M10 10V17"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Icon>
+  );
+}
+
+// The brand mark. Unlike the other two this keeps its own palette — it is a
+// logo, not chrome, and the greys read on both themes.
+export function StingrayIcon(props) {
+  return (
+    <Icon viewBox="0 0 512 512" {...props}>
+      <path
+        fill="#ACAAB0"
+        d="M58.769,435.813C46.015,423.058,38.99,406.1,38.99,388.062c0-18.037,7.024-34.996,19.779-47.75l14.691-14.692c6.869-6.869,10.653-15.999,10.651-25.712c0-9.713-3.783-18.844-10.65-25.711c-14.177-14.177-37.245-14.177-51.422,0L0,252.158c26.33-26.33,69.171-26.329,95.5-0.001c12.755,12.755,19.78,29.714,19.78,47.752c-0.001,18.038-7.025,34.996-19.78,47.752l-14.691,14.691c-6.867,6.868-10.651,15.999-10.65,25.712c0,9.713,3.783,18.845,10.651,25.713c14.175,14.177,37.245,14.177,51.422-0.001L162.008,384l22.038,22.039l-29.775,29.775C127.941,462.143,85.1,462.143,58.769,435.813z"
+      />
+      <path
+        fill="#D8D8DA"
+        d="M481.179,233.791c-36.731-36.731-7.343-66.115-44.078-102.846C400.37,94.214,370.987,123.6,334.255,86.87c-40.574-40.576-106.356-40.573-146.926-0.002c-20.661,20.66-30.792,47.861-30.41,74.94l-0.017,249.34l249.337-0.018c27.079,0.379,54.277-9.75,74.94-30.412c40.571-40.571,40.572-106.351,0-146.924L481.179,233.791z"
+      />
+      <path
+        fill="#C6C5CA"
+        d="M481.572,233.399l-0.001-0.001c-36.688-36.687-7.419-66.043-43.95-102.713l-280.07,280.071l249.08-0.019c27.079,0.379,54.277-9.75,74.94-30.412C522.142,339.754,522.143,273.974,481.572,233.399z"
+      />
+      <path
+        fill="#58575D"
+        d="M341.079,175.543l-0.002-0.003c-8.098-8.097-8.098-21.277-0.001-29.379c8.11-8.104,21.288-8.1,29.388-0.002c8.097,8.102,8.097,21.281,0.005,29.38C362.362,183.645,349.181,183.645,341.079,175.543z"
+      />
+      <path
+        fill="#454449"
+        d="M392.506,226.971l-0.004-0.004c-8.101-8.1-8.101-21.283,0-29.386c8.114-8.096,21.288-8.092,29.383-0.004c8.105,8.111,8.103,21.292,0.003,29.39C413.788,235.066,400.609,235.067,392.506,226.971z"
+      />
+    </Icon>
+  );
+}
