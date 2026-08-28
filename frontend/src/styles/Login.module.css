@@ -23,10 +23,15 @@
   font-size: 18px;
   font-weight: 600;
   margin-bottom: 22px;
-  text-align: center;
+  /* Was `text-align: center` on an inline glyph; now a centred flex row, so the
+     mark aligns to the wordmark instead of the baseline. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
-.title span {
-  margin-right: 6px;
+.logo {
+  flex: none;
 }
 
 .demoHint {
