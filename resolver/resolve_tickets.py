@@ -1798,8 +1798,6 @@ def command_block(command: "commands.Command | None") -> list[str]:
     ]
 
 
-
-
 def plan_prompt(ticket: dict, repo: Path, revise_notes: str | None,
                 command: "commands.Command | None" = None) -> str:
     p = [
