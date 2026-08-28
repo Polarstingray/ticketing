@@ -144,6 +144,10 @@ function qs(params) {
 
 export const api = {
   get: (path) => request("GET", path),
+  // Unauthenticated (the Login page needs it before a session exists).
+  // { read_only, demo_username, demo_password } — the latter two are null
+  // unless the deployment opted into showing them (the public demo).
+  appConfig: () => request("GET", "/app-config"),
   post: (path, body) => request("POST", path, body),
   patch: (path, body) => request("PATCH", path, body),
   del: (path) => request("DELETE", path),
