@@ -1,9 +1,12 @@
 """Ticket routes: list/filter, create, retrieve, update, delete."""
+import secrets
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import and_, case, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from activity import record_activity
@@ -30,6 +33,7 @@ from models import (
     AgentRun,
     AgentRunStatus,
     Ticket,
+    TicketLease,
     TicketPriority,
     TicketStatus,
     TicketType,
@@ -38,12 +42,17 @@ from models import (
 )
 from notifications import notify_assignment, notify_new_ticket_admins
 from schemas import (
+    MAX_TAGS,
     ActivityOut,
     AgentRunCreate,
     AgentRunOut,
     AgentRunTotals,
+    ClaimRequest,
     CostRollup,
     CostRollupChild,
+    LeaseExtend,
+    LeaseOut,
+    LeaseRelease,
     PaginatedTickets,
     TagFacet,
     TagFacets,
@@ -430,6 +439,191 @@ def list_activity(
     )
 
 
+# --- Leases ------------------------------------------------------------------
+# An explicit, expiring claim on a ticket. See models.TicketLease for why this
+# exists at all; what lives here is the policy around it.
+#
+# Expiry is *lazy*: stale rows are swept at the top of a claim rather than by a
+# background task. A lease only matters at the moment someone tries to take one,
+# so the sweep is exactly as timely as it needs to be and the app keeps its "no
+# extra moving parts" shape. Reads (`_live_lease`) additionally ignore rows whose
+# `expires_at` has passed, so an unswept row is never mistaken for a live claim.
+
+# Mirror of the claim in the ticket's tag list. Not authoritative — it exists so
+# a human reading the ticket, and the resolver's own pre-lease tag logic, can see
+# that a worker holds it. `resolver:` tags are deliberately not reserved
+# server-side, so this needs no special authority to write.
+CLAIM_MIRROR_TAG = "resolver:claimed"
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """DB datetimes come back naive-UTC while ``utcnow()`` is aware; normalize
+    before comparing the two in Python (the same dance ``auth._expired`` does)."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _expire_stale_leases(db: Session) -> None:
+    """Drop every lease whose TTL has run out.
+
+    ``<=`` matches ``_live_lease``'s boundary exactly. If the two disagreed, a
+    lease expiring on this very second would read as dead but survive the sweep,
+    and the claim that followed would trip the unique constraint instead of
+    succeeding.
+    """
+    deleted = (
+        db.query(TicketLease)
+        .filter(TicketLease.expires_at <= utcnow())
+        .delete(synchronize_session=False)
+    )
+    if deleted:
+        db.commit()
+
+
+def _live_lease(db: Session, ticket_id: int) -> TicketLease | None:
+    """This ticket's lease if one is held and still within its TTL.
+
+    Checks the expiry in Python rather than in SQL so a row the lazy sweep has
+    not reached yet still reads as expired — the caller must never see a lapsed
+    claim as live, whatever order requests happen to arrive in.
+    """
+    lease = db.query(TicketLease).filter(TicketLease.ticket_id == ticket_id).first()
+    if lease is None:
+        return None
+    if _naive_utc(lease.expires_at) <= _naive_utc(utcnow()):
+        return None
+    return lease
+
+
+def _set_claim_mirror(ticket: Ticket, held: bool) -> None:
+    """Add/remove the advisory claim tag. JSON columns need reassignment for
+    SQLAlchemy to notice the change, so build a new list either way."""
+    tags = [t for t in (ticket.tags or []) if t != CLAIM_MIRROR_TAG]
+    if held and len(tags) < MAX_TAGS:
+        tags.append(CLAIM_MIRROR_TAG)
+    ticket.tags = tags
+
+
+def _lease_ticket_or_404(ticket_id: int, db: Session, user: User) -> Ticket:
+    """The ticket, if this caller may work it.
+
+    Claiming is gated on the same authority as modifying: a lease is a promise to
+    write results back, so being able to take one without being able to act on
+    the ticket would be worse than useless — it would let any member freeze the
+    queue's tickets out from under their assignees. 404 rather than 403 for a
+    ticket the caller cannot see, matching ``get_ticket``.
+    """
+    ticket = _get_ticket_or_404(ticket_id, db)
+    if not can_modify_ticket(user, ticket):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
+    return ticket
+
+
+def _held_lease_or_error(ticket_id: int, token: str, db: Session) -> TicketLease:
+    """The live lease on ``ticket_id``, proving the caller presented its token.
+
+    404 when there is nothing (or nothing live) to act on — which is what a
+    worker whose lease already expired sees, and why release/extend on a lapsed
+    claim is an ordinary answer rather than a server error. 403 when a lease
+    exists but the token is wrong: that is a *different* worker's claim, and
+    saying so is the point.
+    """
+    lease = _live_lease(db, ticket_id)
+    if lease is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="No active lease on this ticket")
+    if not secrets.compare_digest(lease.token, token):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Lease token does not match the current holder")
+    return lease
+
+
+@router.post("/{ticket_id}/claim", response_model=LeaseOut)
+def claim_ticket(
+    ticket_id: int,
+    payload: ClaimRequest | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Take an exclusive, expiring claim on a ticket, or 409 if someone holds it.
+
+    The unique constraint on ``ticket_leases.ticket_id`` — not the SELECT below —
+    is what makes this safe: two sweeps that both read "unclaimed" still cannot
+    both insert, and the loser's ``IntegrityError`` becomes the same 409 the
+    early check would have produced. The check is kept because it answers without
+    burning a failed write in the common case.
+    """
+    payload = payload or ClaimRequest()
+    _expire_stale_leases(db)
+    ticket = _lease_ticket_or_404(ticket_id, db, user)
+
+    existing = _live_lease(db, ticket_id)
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ticket is already claimed by user {existing.worker_id}",
+        )
+
+    lease = TicketLease(
+        ticket_id=ticket.id,
+        worker_id=user.id,
+        token=secrets.token_urlsafe(32),
+        expires_at=utcnow() + timedelta(seconds=payload.ttl_seconds),
+    )
+    db.add(lease)
+    try:
+        db.flush()
+    except IntegrityError:
+        # Lost the race to another claimant between the SELECT and the INSERT.
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Ticket is already claimed")
+    _set_claim_mirror(ticket, True)
+    db.commit()
+    db.refresh(lease)
+    return lease
+
+
+@router.post("/{ticket_id}/release", status_code=status.HTTP_204_NO_CONTENT)
+def release_ticket(
+    ticket_id: int,
+    payload: LeaseRelease,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Give up a claim early, so the ticket is workable again without waiting out
+    its TTL. Idempotent-ish: releasing a lease that already expired is a 404, not
+    an error the caller has to handle specially."""
+    ticket = _lease_ticket_or_404(ticket_id, db, user)
+    lease = _held_lease_or_error(ticket_id, payload.token, db)
+    db.delete(lease)
+    _set_claim_mirror(ticket, False)
+    db.commit()
+    return None
+
+
+@router.post("/{ticket_id}/lease/extend", response_model=LeaseOut)
+def extend_lease(
+    ticket_id: int,
+    payload: LeaseExtend,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Push a live claim's expiry out — the heartbeat a long-running worker sends.
+
+    Deliberately cannot resurrect an expired lease: once the TTL lapses the
+    ticket is back in the queue and may already have been re-claimed, so a worker
+    that slept through its own heartbeat must go round again via ``/claim``.
+    """
+    _lease_ticket_or_404(ticket_id, db, user)
+    lease = _held_lease_or_error(ticket_id, payload.token, db)
+    lease.expires_at = utcnow() + timedelta(seconds=payload.ttl_seconds)
+    db.commit()
+    db.refresh(lease)
+    return lease
+
+
 @router.post(
     "/{ticket_id}/agent-runs",
     response_model=AgentRunOut,
@@ -448,10 +642,24 @@ def create_agent_run(
     the ticket's assignee, so it passes; a random member who can't touch the
     ticket can't forge runs against it. (Admins also pass, which is fine for
     backfills/manual entry.)
+
+    A caller holding a lease may additionally send its ``lease_token``, which is
+    refused with 409 once the lease has lapsed. That is the write-side half of
+    the claim: without it a worker that stalled past its TTL — and whose ticket
+    another worker has since picked up — would still be able to post results for
+    a run nobody is waiting for. The field is optional, so pre-lease callers are
+    unaffected.
     """
     ticket = _get_ticket_or_404(ticket_id, db)
     if not can_modify_ticket(user, ticket):
         raise HTTPException(status_code=403, detail="Not permitted to modify this ticket")
+    if payload.lease_token is not None:
+        lease = _live_lease(db, ticket_id)
+        if lease is None or not secrets.compare_digest(lease.token, payload.lease_token):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Lease has expired or is held by another worker",
+            )
 
     run = AgentRun(
         ticket_id=ticket.id,
