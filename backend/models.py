@@ -14,7 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, synonym
 
 from database import Base
 
@@ -379,25 +379,29 @@ class ResolverSettings(Base):
     updated_by = Column(Integer, nullable=True)
 
 
-class ResolverInstance(Base):
-    """A running resolver's self-reported identity + observed state.
+class AgentInstance(Base):
+    """A running agent's self-reported identity + observed state.
 
     Distinct from :class:`ResolverSettings` on purpose: settings are the
-    *admin-authored overrides*, whereas this is what a resolver *reports about
-    itself* at the start of each sweep (which ``.env`` file it runs, its agent
-    and model, and a snapshot of the non-secret config it's actually using).
-    Written by the resolver bot itself (``POST /resolvers/heartbeat``), read by
-    the admin resolver-manager UI. ``last_seen_at`` is bumped each heartbeat, so
-    a stopped resolver simply goes stale. **No secrets** — ``effective_config``
-    carries only the same non-secret tunable set as ResolverSettings.
+    *admin-authored overrides*, whereas this is what a worker *reports about
+    itself* (which ``.env`` file it runs, its agent and model, and a snapshot of
+    the non-secret config it's actually using). ``last_seen_at`` is bumped each
+    heartbeat, so a stopped worker simply goes stale. **No secrets** —
+    ``effective_config`` carries only non-secret tunables.
+
+    Originally ``ResolverInstance``, one row per resolver bot. Nothing in the
+    shape was resolver-specific, so it is now the registry for *any* worker: our
+    own resolvers (``POST /resolvers/heartbeat``) and third-party agents
+    authenticating with an ``agent``-scoped key (``POST /agents/heartbeat``).
+    Both are read by the admin resolver-manager UI.
     """
-    __tablename__ = "resolver_instances"
+    __tablename__ = "agent_instances"
     __table_args__ = (
-        UniqueConstraint("bot_user_id", name="uq_resolver_instance_bot"),
+        UniqueConstraint("user_id", name="uq_agent_instance_user"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    bot_user_id = Column(Integer, nullable=False, index=True)  # the resolver's own user id
+    user_id = Column(Integer, nullable=False, index=True)  # the worker's own user id
     label = Column(String, nullable=False, default="")   # RESOLVER_ENV_FILE, e.g. ".env.gemini"
     name = Column(String, nullable=False, default="")     # clean name, e.g. "gemini"
     agent = Column(String, nullable=False, default="")    # claude | opencode | ...
@@ -405,6 +409,15 @@ class ResolverInstance(Base):
     effective_config = Column(JSON, nullable=False, default=dict)  # non-secret snapshot
     last_seen_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    # The column was `bot_user_id` while this was resolver-only. Kept as a synonym
+    # (usable in queries and in the constructor) so resolver-side callers reading
+    # "which bot is this" keep working against the widened name.
+    bot_user_id = synonym("user_id")
+
+
+# Back-compat alias for the pre-#56 name; the table and semantics are the same.
+ResolverInstance = AgentInstance
 
 
 class ChatRole(str, enum.Enum):
