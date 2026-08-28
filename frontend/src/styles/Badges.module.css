@@ -117,3 +117,25 @@
 .statusOption:focus-visible {
   background: var(--surface);
 }
+
+/* AssigneeDropdown reuses the status dropdown's shell (.statusDropdown /
+   .statusTrigger / .statusMenu / .statusOption); these are the only
+   differences — a neutral pill, since users have no palette, and a wider menu
+   because display names run longer than status labels. */
+.assigneeTrigger,
+.assigneeOption {
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+/* Long display names truncate rather than stretching the row. */
+.assigneeName {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.assigneeMenu {
+  min-width: 200px;
+  max-height: 260px;
+  overflow-y: auto;
+}

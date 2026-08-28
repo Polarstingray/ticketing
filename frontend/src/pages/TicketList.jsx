@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { PriorityBadge, StatusDropdown, TypeBadge } from "../components/Badges";
+import { AssigneeDropdown, PriorityBadge, StatusDropdown, TypeBadge } from "../components/Badges";
 import FilterPanel from "../components/FilterPanel";
 import Tag from "../components/Tag";
 import {
@@ -154,6 +154,20 @@ export default function TicketList() {
     setBusyId(id);
     try {
       const updated = await api.updateTicket(id, { status });
+      if (!mounted.current) return;
+      setTickets((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)));
+      setError("");
+    } catch (e) {
+      if (mounted.current) setError(e.message);
+    } finally {
+      if (mounted.current) setBusyId(null);
+    }
+  }
+
+  async function changeAssignee(id, userId) {
+    setBusyId(id);
+    try {
+      const updated = await api.updateTicket(id, { assigned_to: userId });
       if (!mounted.current) return;
       setTickets((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)));
       setError("");
@@ -379,7 +393,19 @@ export default function TicketList() {
                         Archive
                       </button>
                     )}
-                    <span className={styles.assignee}>{userName(t.assigned_to)}</span>
+                    {/* Only admins can list users, so a non-admin's `users` is
+                        empty and there is nobody to pick from — fall back to the
+                        read-only label rather than an empty menu. */}
+                    {users.length > 0 ? (
+                      <AssigneeDropdown
+                        assignedTo={t.assigned_to}
+                        users={users}
+                        disabled={busyId === t.id}
+                        onChange={(uid) => changeAssignee(t.id, uid)}
+                      />
+                    ) : (
+                      <span className={styles.assignee}>{userName(t.assigned_to)}</span>
+                    )}
                     {t.due_date && (
                       <span className={styles.date}>Due {formatDate(t.due_date)}</span>
                     )}

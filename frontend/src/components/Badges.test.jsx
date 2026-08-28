@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
-import { StatusBadge, PriorityBadge, StatusDropdown, TypeBadge } from "./Badges";
+import { AssigneeDropdown, StatusBadge, PriorityBadge, StatusDropdown, TypeBadge } from "./Badges";
 
 describe("badges", () => {
   it("renders a human label for a known status", () => {
@@ -73,6 +73,82 @@ describe("StatusDropdown", () => {
 
   it("stays shut while the row's request is in flight", () => {
     const { trigger } = open("open", { disabled: true });
+    expect(trigger).toBeDisabled();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+});
+
+describe("AssigneeDropdown", () => {
+  const USERS = [
+    { id: 5, display_name: "Ada Lovelace" },
+    { id: 7, display_name: "Grace Hopper" },
+  ];
+
+  function open(assignedTo = null, props = {}) {
+    const onChange = vi.fn();
+    render(
+      <AssigneeDropdown assignedTo={assignedTo} users={USERS} onChange={onChange} {...props} />
+    );
+    const trigger = screen.getByRole("button", { name: /Change assignee/i });
+    fireEvent.click(trigger);
+    return { onChange, trigger };
+  }
+
+  it("labels the trigger with the current assignee, or Unassigned", () => {
+    const { trigger } = open(5);
+    expect(trigger).toHaveAccessibleName("Assignee: Ada Lovelace. Change assignee");
+  });
+
+  it("falls back to the raw id for a user it can't name", () => {
+    const { trigger } = open(99);
+    expect(trigger).toHaveAccessibleName("Assignee: #99. Change assignee");
+  });
+
+  it("offers every user plus Unassigned and reports the pick", () => {
+    const { onChange, trigger } = open();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Unassigned",
+      "Ada Lovelace",
+      "Grace Hopper",
+    ]);
+
+    fireEvent.click(screen.getByRole("option", { name: "Grace Hopper" }));
+
+    expect(onChange).toHaveBeenCalledWith(7);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("sends null when the ticket is handed back to nobody", () => {
+    const { onChange } = open(5);
+    fireEvent.click(screen.getByRole("option", { name: "Unassigned" }));
+    expect(onChange).toHaveBeenCalledWith(null);
+  });
+
+  it("treats re-picking the current assignee as a no-op", () => {
+    const { onChange } = open(5);
+    fireEvent.click(screen.getByRole("option", { name: "Ada Lovelace" }));
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("closes on Escape, on an outside mousedown, and on focus-out", () => {
+    const { trigger } = open();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+
+    fireEvent.click(trigger);
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+
+    fireEvent.click(trigger);
+    fireEvent.focusOut(trigger, { relatedTarget: document.body });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("stays shut while the row's request is in flight", () => {
+    const { trigger } = open(null, { disabled: true });
     expect(trigger).toBeDisabled();
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });

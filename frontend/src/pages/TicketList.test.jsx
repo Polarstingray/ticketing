@@ -495,6 +495,96 @@ describe("TicketList assignee labels", () => {
     const row = (await screen.findByText("First ticket")).closest("a");
     expect(within(row).getByText("Ada Lovelace")).toBeInTheDocument();
   });
+
+  it("falls back to a read-only label when the user list is out of reach", async () => {
+    // Only admins may list users; a non-admin gets a 403 and an empty list, so
+    // there is nobody to reassign to.
+    api.listUsers.mockResolvedValue([]);
+    api.listTickets.mockResolvedValue({ items: [ticket({ assigned_to: 5 })], total: 1 });
+    renderList();
+
+    const row = (await screen.findByText("First ticket")).closest("a");
+    expect(within(row).getByText("#5")).toBeInTheDocument();
+    expect(
+      within(row).queryByRole("button", { name: /Change assignee/i })
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("TicketList row assignment", () => {
+  beforeEach(() => {
+    api.listUsers.mockResolvedValue([
+      { id: 5, display_name: "Ada Lovelace" },
+      { id: 7, display_name: "Grace Hopper" },
+    ]);
+  });
+
+  function assigneeTrigger(name = /Change assignee/i) {
+    return screen.getByRole("button", { name });
+  }
+
+  function pickAssignee(name) {
+    fireEvent.click(assigneeTrigger());
+    fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name }));
+  }
+
+  it("reassigns from the row and merges the response without refetching", async () => {
+    api.listTickets.mockResolvedValue({ items: [ticket({ assigned_to: null })], total: 1 });
+    renderList();
+    await screen.findByRole("button", { name: /Assignee: Unassigned/i });
+    const listCalls = api.listTickets.mock.calls.length;
+
+    pickAssignee("Grace Hopper");
+
+    await waitFor(() => expect(api.updateTicket).toHaveBeenCalledWith(1, { assigned_to: 7 }));
+    expect(
+      await screen.findByRole("button", { name: /Assignee: Grace Hopper/i })
+    ).toBeInTheDocument();
+    expect(api.listTickets.mock.calls.length).toBe(listCalls);
+  });
+
+  it("clears the assignee when Unassigned is picked", async () => {
+    api.listTickets.mockResolvedValue({ items: [ticket({ assigned_to: 5 })], total: 1 });
+    renderList();
+    await screen.findByRole("button", { name: /Assignee: Ada Lovelace/i });
+
+    pickAssignee("Unassigned");
+
+    await waitFor(() => expect(api.updateTicket).toHaveBeenCalledWith(1, { assigned_to: null }));
+    expect(
+      await screen.findByRole("button", { name: /Assignee: Unassigned/i })
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a failed reassignment and leaves the badge alone", async () => {
+    api.updateTicket.mockRejectedValue(new Error("Assignment rejected"));
+    api.listTickets.mockResolvedValue({ items: [ticket({ assigned_to: 5 })], total: 1 });
+    renderList();
+    await screen.findByRole("button", { name: /Assignee: Ada Lovelace/i });
+
+    pickAssignee("Grace Hopper");
+
+    expect(await screen.findByText("Assignment rejected")).toBeInTheDocument();
+    expect(assigneeTrigger(/Assignee: Ada Lovelace/i)).toBeInTheDocument();
+  });
+
+  it("disables the row's status dropdown too while a reassignment is in flight", async () => {
+    let resolveUpdate;
+    api.updateTicket.mockReturnValue(new Promise((r) => { resolveUpdate = r; }));
+    api.listTickets.mockResolvedValue({ items: [ticket({ assigned_to: null })], total: 1 });
+    renderList();
+    await screen.findByRole("button", { name: /Assignee: Unassigned/i });
+
+    pickAssignee("Ada Lovelace");
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Change status/i })).toBeDisabled()
+    );
+    expect(assigneeTrigger()).toBeDisabled();
+
+    resolveUpdate(ticket({ assigned_to: 5 }));
+    await waitFor(() => expect(assigneeTrigger()).toBeEnabled());
+  });
 });
 
 describe("TicketList unread-comment dot", () => {
