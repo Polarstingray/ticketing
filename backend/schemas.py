@@ -628,8 +628,9 @@ class ApiKeyMeta(BaseModel):
 class ApiKeyCreate(BaseModel):
     name: str = Field(min_length=1)
     expires_in_days: Optional[int] = Field(default=None, ge=1)
-    # Capability grants for this key (currently only "cli", which permits repo:
-    # tags). Admin-only — enforced in routers/users.create_api_key.
+    # Capability grants for this key: "cli" (permits the repo:/rev:/branch: aiming
+    # tags) or "agent" (permits the parent:/review-by: routing tags and registering
+    # in the agent registry). Admin-only — enforced in routers/users.create_api_key.
     scopes: list[str] = Field(default_factory=list)
 
     @field_validator("scopes")
@@ -771,6 +772,35 @@ class ResolverRosterEntry(BaseModel):
     model: Optional[str] = None
     last_seen_at: Optional[UTCDateTime] = None
     effective_config: Optional[ResolverSettingsValues] = None
+
+
+class AgentHeartbeat(BaseModel):
+    """A third-party agent's self-report. Same shape as ``ResolverHeartbeat``,
+    except ``effective_config`` is a free-form dict: an external worker's config
+    is its own, not our resolver's tunable set. ``extra="forbid"`` still rejects
+    unknown top-level keys, and callers are reminded here as in the resolver
+    case that this row is world-readable to admins — **no secrets**."""
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = ""       # deployment label, e.g. "prod-us-east"
+    name: str = ""        # clean identity name, e.g. "triage-bot"
+    agent: str = ""       # the worker's own agent/runtime name
+    model: str = ""
+    effective_config: dict = Field(default_factory=dict)
+
+
+class AgentRosterEntry(BaseModel):
+    """One row in the agent registry: every worker that has ever sent a
+    heartbeat, ours and third-party alike."""
+    user_id: int
+    username: str
+    display_name: str
+    is_resolver_bot: bool = False
+    name: Optional[str] = None
+    label: Optional[str] = None
+    agent: Optional[str] = None
+    model: Optional[str] = None
+    last_seen_at: Optional[UTCDateTime] = None
 
 
 # --- Chat assistant ----------------------------------------------------------

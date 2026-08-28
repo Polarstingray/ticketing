@@ -35,8 +35,8 @@ from sqlalchemy.orm import Session
 from auth import can_view_ticket, is_admin
 from control_tags import is_reserved_tag
 from models import (
+    AgentInstance,
     AgentRun,
-    ResolverInstance,
     Ticket,
     TicketPriority,
     TicketStatus,
@@ -300,7 +300,7 @@ def _get_resolver_status(args: dict, *, db: Session, user: User, budget: Budget,
 
     from schemas import ResolverSettingsValues  # local: avoids a router import cycle
 
-    rows = db.query(ResolverInstance).order_by(ResolverInstance.bot_user_id.asc()).all()
+    rows = db.query(AgentInstance).order_by(AgentInstance.user_id.asc()).all()
     if not rows:
         return "No resolver has ever checked in."
 
@@ -322,7 +322,7 @@ def _get_resolver_status(args: dict, *, db: Session, user: User, budget: Budget,
                 settings = "(unreadable)"
         seen = inst.last_seen_at.isoformat() if inst.last_seen_at else "—"
         lines.append(
-            f"| #{inst.bot_user_id} | {_cell(inst.name, '—')} | {_cell(inst.agent, '—')} | "
+            f"| #{inst.user_id} | {_cell(inst.name, '—')} | {_cell(inst.agent, '—')} | "
             f"{_cell(inst.model, '—')} | {seen} | {clip(_cell(settings, '—'), 200)} |"
         )
     return budget.take("\n".join(lines))

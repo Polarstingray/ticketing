@@ -668,12 +668,19 @@ self-granted scope would be no boundary at all.
 
 | scope | grants |
 |---|---|
-| `cli` | may set `repo:<name>` tags — and no other reserved tag |
+| `cli` | may set the *aiming* tags `repo:<name>`, `rev:<sha>`, `branch:<name>` — and no other reserved tag |
+| `agent` | may set the *routing* tags `parent:<id>`, `review-by:<id>`, and register via `POST /agents/heartbeat` — and nothing else |
 
 A scope is carried by the **key**, not the user, so revoking the key revokes the
-capability, and the same user's browser session does not inherit it. It exists so the
+capability, and the same user's browser session does not inherit it. `cli` exists so the
 `stingray` CLI can tag the repo a review belongs to (which is what lets a resolver bot
 check the code out) without its owner being an admin.
+
+`agent` is for a **third-party worker**, and is narrower than `cli` rather than a
+superset: an external agent needs to record how its work relates to other work, never to
+point this app's automation at a checkout of its choosing. See
+[docs/external-agents.md](docs/external-agents.md) for the full register → subscribe →
+claim → report flow.
 
 Unknown scope names are rejected with `422`.
 

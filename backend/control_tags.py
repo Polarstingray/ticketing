@@ -18,6 +18,12 @@ trust boundary); a frontend-only restriction would be bypassable.
 
 The bot is intentionally a non-admin ``member`` (least privilege), so it is
 recognized here by user id via ``RESOLVER_BOT_USER_ID`` rather than by role.
+
+A *third-party* agent is neither an admin nor listed in ``RESOLVER_BOT_USER_ID``,
+and adding it to either would hand it the whole control surface. It is trusted
+instead by an ``agent``-scoped API key (see ``SCOPE_AGENT`` below), which confers
+a deliberately small slice of these tags — enough to link and hand back work, not
+enough to aim the automation at arbitrary code.
 """
 import os
 
@@ -58,6 +64,12 @@ RESOLVER_BOT_USER_IDS: frozenset[int] = frozenset(
 # decorative.
 SCOPE_CLI = "cli"
 
+# `agent` identifies a third-party worker that picks up tickets on its own (an
+# external agent, not one of our resolver bots). It is *narrower* than `cli`, not a
+# superset: an external worker needs to record how its work relates to other work,
+# never to point the automation at a checkout.
+SCOPE_AGENT = "agent"
+
 # Which reserved tag prefixes each scope unlocks. `cli` gets the three *aiming* tags
 # and nothing else: `repo:` names the checkout to review, and `rev:`/`branch:` pin it
 # to a commit — all three merely say "look here", and the resolver's PROJECTS_ROOT
@@ -65,7 +77,19 @@ SCOPE_CLI = "cli"
 # that would let a caller hijack the automation rather than merely aim it: `claude:*`
 # (workflow phase), `dangerous`/`fix` (safety gates), `delegate` (autonomous
 # fan-out), and `parent:`/`review-by:` (PR handoff routing).
-SCOPE_TAG_PREFIXES: dict[str, tuple[str, ...]] = {SCOPE_CLI: ("repo:", "rev:", "branch:")}
+#
+# `agent` gets exactly the two *routing* tags `cli` is denied: `parent:<id>` links a
+# sub-task back to the ticket that spawned it and `review-by:<id>` records who its
+# finished work is handed back to. Both describe the agent's own bookkeeping, and
+# the worst a forged one does is misfile a handoff. Deliberately excluded are
+# `repo:`/`rev:`/`branch:` — those aim our automation at code of the caller's
+# choosing, which is the exact hijack this module exists to prevent, and an external
+# agent brings its own checkout — as well as `claude:*`, `dangerous`, `fix` and
+# `delegate`, which drive *our* resolver's state machine and safety gates.
+SCOPE_TAG_PREFIXES: dict[str, tuple[str, ...]] = {
+    SCOPE_CLI: ("repo:", "rev:", "branch:"),
+    SCOPE_AGENT: ("parent:", "review-by:"),
+}
 
 ALL_SCOPES = frozenset(SCOPE_TAG_PREFIXES)
 
