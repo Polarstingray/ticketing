@@ -2647,22 +2647,33 @@ def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summar
                  reimplementable=True)
             return
         pr_body = f"{summary}\n\nResolves Stingray #{tid}."
+        pr_create_out = ""
         rc, out = run(["gh", "pr", "create", "--title", f"Resolve #{tid}: {ticket['title']}",
                        "--body", pr_body, "--head", branch, "--base", base_branch],
                       cwd=wt, timeout=cfg.git_net_timeout)
         if rc == 0:
             url = out.strip().splitlines()[-1] if out.strip() else ""
+            if not url.startswith("https://"):
+                url = ""
         else:
+            pr_create_out = out
             # `gh pr create` fails when a PR already exists for the branch — in
             # that case `gh pr view` gives us the existing URL. Any other failure
-            # leaves url blank and we fall back to the local-branch message.
-            url = run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
-                      cwd=wt)[1].strip()
+            # leaves url blank and we fail the ticket instead.
+            view_rc, view_out = run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
+                                    cwd=wt, timeout=cfg.git_net_timeout)
+            url = view_out.strip() if view_rc == 0 else ""
+            if url and not url.startswith("https://"):
+                url = ""
         if url:
             body = f"{IMPL_MARKER} — {url}\n\n{summary}\n\nChanged files:\n```\n{stat}\n```"
         else:
-            body = (f"{IMPL_MARKER} and pushed to branch `{branch}`, but opening a PR "
-                    f"failed.\n\n{summary}\n\nChanged files:\n```\n{stat}\n```")
+            pr_detail = f"\n\n`gh pr create` output:\n```\n{tail(pr_create_out)}\n```" if rc != 0 else ""
+            fail(client, ticket,
+                 f"Pushed to branch `{branch}` but `gh pr create` failed.{pr_detail}\n\n"
+                 f"{summary}\n\nChanged files:\n```\n{stat}\n```",
+                 reimplementable=True)
+            return
     else:
         reason = ("`gh` is not authenticated — run `gh auth login` to get PRs"
                   if origin else "no GitHub remote configured")
