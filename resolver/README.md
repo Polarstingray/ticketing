@@ -637,9 +637,11 @@ timer that fires twice, or a manual re-run, is harmless; `--force` overrides.
 
 The resolver claims work by sweeping tickets **assigned to its own bot user**
 (`RESOLVER_BOT_USER_ID`), so the way to run several resolvers is to give each its
-own bot user and route tickets by assignment. No shared coordination is needed —
-the `flock` only serializes sweeps **on one machine**, and distinct bot ids mean
-two resolvers never see the same ticket.
+own bot user and route tickets by assignment. Distinct bot ids mean two resolvers
+never see the same ticket, and the `flock` serializes sweeps **on one machine**.
+Where those two do overlap — an event-woken sweep, or an external agent working
+the same queue — the server-side [lease](#reliability) is the arbiter, so this
+no longer rests on assignment discipline alone.
 
 This covers both common shapes:
 
@@ -916,6 +918,19 @@ logrotate? Leave `CRON_LOG` unset and add a stanza with `copytruncate`.)
 
 ## Reliability
 
+- **Ticket leases:** before touching a ticket the sweep takes an exclusive,
+  expiring claim on it (`POST /tickets/{id}/claim`); a ticket someone else holds
+  answers `409` and is skipped with `already claimed by another worker`. That is
+  what makes the queue safe to share — with a second sweep woken by an event, or
+  with a third-party agent — rather than relying on `flock` and one bot id.
+  A background thread heartbeats the claim while the ticket is being worked, and
+  it is released in a `finally` on every exit path, including failures and quota
+  backoff. If the resolver dies mid-ticket the claim simply **lapses** after its
+  TTL (10 minutes) and the next sweep re-claims, instead of the ticket sitting
+  under `resolver:planning` forever. Agent-run writes carry the lease token, so a
+  worker that stalled past its TTL can't post results over whoever took over.
+  A backend that predates the lease endpoints is treated as "no contention", so
+  the two can be upgraded separately.
 - **API retries:** transient Stingray failures (connection reset, timeout, HTTP
   429/500/502/503/504) are retried with exponential backoff (`STINGRAY_MAX_RETRIES`,
   honoring `Retry-After`), so a network blip mid-sweep can't strand a ticket in a

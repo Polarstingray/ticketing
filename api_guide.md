@@ -298,6 +298,63 @@ Response `200`: array of [activity objects](#activity-object).
 
 ---
 
+### Leases (claiming a ticket)
+
+A **lease** is an exclusive, expiring claim on one ticket. It exists so that two workers —
+two resolver sweeps, or a resolver and a third-party agent — can't pick up the same ticket
+and do the work twice. The lease row is the source of truth; the `resolver:claimed` tag
+mirrored onto the ticket is advisory, for humans reading it.
+
+The claim carries a **TTL**. A worker that dies mid-ticket therefore has its claim lapse and
+the ticket returns to the queue, rather than being stranded forever under an in-flight
+`resolver:*` tag. A worker with a long job keeps its claim by heartbeating (`extend`) before
+the TTL runs out; if it stops heartbeating it loses the ticket. An expired lease **cannot be
+resurrected** — go round again via `claim`.
+
+`ttl_seconds` is 5–3600 (default 300). **Permission:** the same authority as modifying the
+ticket (admin, creator, or assignee); anyone else gets `404`.
+
+#### `POST /tickets/{id}/claim`
+```bash
+curl -s -X POST "$BASE/tickets/1/claim" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' -d '{"ttl_seconds": 600}'
+```
+Response `200`:
+```json
+{ "ticket_id": 1, "worker_id": 2, "token": "gT4…", "expires_at": "2026-01-01T12:10:00+00:00" }
+```
+`409` if another worker already holds a live lease (the detail names the holder) — the
+correct response is to move on to the next ticket. `404` if the ticket doesn't exist or the
+caller may not work it.
+
+Keep the `token`: it is returned only to the claimant and is required to release or extend.
+
+#### `POST /tickets/{id}/lease/extend`
+The heartbeat. Pushes `expires_at` out from *now*.
+```bash
+curl -s -X POST "$BASE/tickets/1/lease/extend" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' -d '{"token":"gT4…","ttl_seconds":600}'
+```
+Response `200`: the lease object, as above. `404` if the lease has already expired or was
+released; `403` if the token belongs to a different holder.
+
+#### `POST /tickets/{id}/release`
+Give the claim back early, so the ticket is workable again without waiting out the TTL.
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST "$BASE/tickets/1/release" \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' -d '{"token":"gT4…"}'
+```
+Response `204`. `404` if there is no live lease (it had already expired — not an error worth
+handling), `403` on a token mismatch.
+
+#### Writing results under a lease
+`POST /tickets/{id}/agent-runs` accepts an optional `lease_token`. Send it and the write is
+refused with `409` once the lease has lapsed, which is what stops a worker that stalled past
+its TTL from posting results over whoever re-claimed its ticket. Omit it and the endpoint
+behaves exactly as before (the assignee check alone).
+
+---
+
 ### Events
 
 #### `GET /events/stream`

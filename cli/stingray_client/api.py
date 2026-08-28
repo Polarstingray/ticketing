@@ -22,6 +22,11 @@ import requests
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
+def _status_of(exc: requests.HTTPError) -> int | None:
+    """The status code an HTTPError carries, or None if it has no response."""
+    return None if exc.response is None else exc.response.status_code
+
+
 class NotJsonError(Exception):
     """The server answered, but not with JSON.
 
@@ -169,6 +174,56 @@ class StingrayClient:
     def cost_rollup(self, ticket_id: int) -> dict:
         """A ticket's own agent-run cost plus that of its delegated children."""
         return self._request("GET", f"/tickets/{ticket_id}/cost-rollup").json()
+
+    # --- leases ----------------------------------------------------------
+    # An explicit claim on a ticket, so two workers can't pick up the same one.
+    # All three return None rather than raising on the "somebody else got there
+    # first / my claim already lapsed" answers: those are ordinary outcomes of a
+    # contended queue, and a worker has to branch on them either way.
+
+    def claim_ticket(self, ticket_id: int, ttl_seconds: int = 300) -> dict | None:
+        """Take an exclusive lease on a ticket. ``None`` means another worker
+        holds it (HTTP 409) — the caller should move on to the next ticket."""
+        try:
+            return self._request(
+                "POST", f"/tickets/{ticket_id}/claim",
+                json={"ttl_seconds": ttl_seconds},
+            ).json()
+        except requests.HTTPError as exc:
+            if _status_of(exc) == 409:
+                return None
+            raise
+
+    def extend_lease(self, ticket_id: int, token: str,
+                     ttl_seconds: int = 300) -> dict | None:
+        """Push a held lease's expiry out (the heartbeat of a long job).
+
+        ``None`` means the lease is gone — it lapsed, or another worker has since
+        claimed the ticket. An expired lease deliberately cannot be resurrected,
+        so the caller must treat this as "I no longer own this ticket".
+        """
+        try:
+            return self._request(
+                "POST", f"/tickets/{ticket_id}/lease/extend",
+                json={"token": token, "ttl_seconds": ttl_seconds},
+            ).json()
+        except requests.HTTPError as exc:
+            if _status_of(exc) in (403, 404):
+                return None
+            raise
+
+    def release_ticket(self, ticket_id: int, token: str) -> bool:
+        """Give a claim back early. False if there was nothing to release (it had
+        already expired) or the token isn't the holder's — neither is worth
+        raising over on a cleanup path that runs in a ``finally``."""
+        try:
+            self._request("POST", f"/tickets/{ticket_id}/release",
+                          json={"token": token})
+            return True
+        except requests.HTTPError as exc:
+            if _status_of(exc) in (403, 404):
+                return False
+            raise
 
     # --- identity --------------------------------------------------------
     def list_users(self) -> list[dict]:

@@ -93,6 +93,23 @@ def test_creates_webhook_tables():
         os.unlink(path)
 
 
+def test_creates_ticket_leases_table():
+    """On a DB predating the TicketLease model, run_migrations creates the
+    ticket_leases table and is idempotent on a second call."""
+    engine, path = _legacy_engine()
+    try:
+        assert "ticket_leases" not in _tables(engine)
+        run_migrations(engine)
+        assert "ticket_leases" in _tables(engine)
+        assert {"ticket_id", "worker_id", "token", "expires_at"} <= _columns(
+            engine, "ticket_leases"
+        )
+        run_migrations(engine)  # idempotent
+        assert "ticket_leases" in _tables(engine)
+    finally:
+        os.unlink(path)
+
+
 def test_skips_absent_tables():
     """With no tables at all, migrations are a no-op (create_all makes new
     tables; there's nothing to ALTER)."""
