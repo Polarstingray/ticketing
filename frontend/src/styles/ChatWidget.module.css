@@ -11,8 +11,13 @@
   border-radius: 50%;
   border: 1px solid var(--border);
   background: var(--accent);
+  /* The icon draws with currentColor, so this is what colors it. */
   color: #fff;
-  font-size: 20px;
+  /* Flex-centre rather than line-height: an inline <svg> sits on the text
+     baseline, which leaves it visibly low in a round button. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   box-shadow: 0 6px 20px rgb(0 0 0 / 40%);
 }
@@ -144,6 +149,8 @@
   cursor: pointer;
   padding: 4px 6px;
   border-radius: 4px;
+  display: flex;
+  align-items: center;
 }
 
 .threadDelete:hover {

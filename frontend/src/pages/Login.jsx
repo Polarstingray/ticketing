@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { StingrayIcon } from "../components/icons";
 import { Navigate, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth/AuthContext";
@@ -44,7 +45,7 @@ export default function Login() {
     <div className={styles.wrap}>
       <form className={styles.box} onSubmit={onSubmit}>
         <div className={styles.title}>
-          <span>🐟</span> Stingray Tickets
+          <StingrayIcon size={20} className={styles.logo} /> Stingray Tickets
         </div>
         <div className="field">
           <label>Username</label>
