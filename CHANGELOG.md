@@ -9,6 +9,40 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 
 ## [Unreleased]
 
+### Added
+- **Explicit claim/lease API for ticket workers.** Claiming a ticket used to be implicit:
+  the resolver took everything assigned to its bot id and stamped `resolver:*` tags on it,
+  which is safe only because systemd runs exactly one sweep per bot. Opening the queue to
+  third-party agents — or waking resolvers on events — makes two workers picking up the
+  same ticket a live race. `POST /tickets/{id}/claim` now takes an exclusive lease (`409`
+  if someone else holds it), with `POST /tickets/{id}/lease/extend` as the heartbeat and
+  `POST /tickets/{id}/release` to hand it back early. Two properties do the work: a unique
+  constraint on `ticket_leases.ticket_id` means two concurrent claims cannot both win
+  however their reads interleave, and every claim carries a **TTL**, so a worker that dies
+  mid-ticket has its claim lapse instead of stranding the ticket under `resolver:planning`
+  forever. An expired lease deliberately cannot be resurrected by a late heartbeat, and
+  agent-run writes may carry their `lease_token` so a worker presumed dead can't post
+  results over whoever re-claimed its ticket. The resolver's sweep claims before
+  processing, heartbeats in the background, and releases in a `finally`; the `resolver:*`
+  tags stay on as a human-readable mirror, but the lease row is the source of truth. A
+  backend that predates the endpoints is treated as "no contention" rather than a locked
+  queue, so the two halves can be deployed separately.
+- **External agent identity.** A third-party agent can now authenticate as itself without
+  being listed in `RESOLVER_BOT_USER_ID` or promoted to admin. A new admin-granted
+  `agent` API-key scope confers exactly the two *routing* control tags — `parent:<id>` and
+  `review-by:<id>` — and deliberately **not** the *aiming* ones (`repo:`, `rev:`,
+  `branch:`), which point automation at a checkout of the caller's choosing, nor the
+  workflow/safety tags (`claude:*`, `dangerous`, `fix`, `delegate`). It is narrower than
+  the existing `cli` scope, not a superset.
+
+  The resolver registry is generalized to match: `resolver_instances` becomes
+  `agent_instances` (keyed on `user_id` rather than `bot_user_id`), with an agent-neutral
+  `POST /agents/heartbeat` alongside the resolver-only `POST /resolvers/heartbeat`, and an
+  admin `GET /agents` listing every worker that has checked in. Registered third-party
+  workers appear under **Resolvers → External agents** with a freshness dot and a
+  last-seen time. Documented end-to-end (register → subscribe → claim → report) in
+  [docs/external-agents.md](docs/external-agents.md).
+
 ## [1.2.0]
 
 ### Added

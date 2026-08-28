@@ -1,7 +1,11 @@
 .wrap {
   display: flex;
+  /* Column, not row: the demo-credentials hint is a second child alongside the
+     form, and a row would place it beside the box rather than under it. */
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 16px;
   min-height: 100vh;
   padding: 20px;
 }
@@ -28,4 +32,14 @@
 }
 .logo {
   flex: none;
+}
+
+.demoHint {
+  width: 100%;
+  max-width: 360px;
+  font-size: 13px;
+  text-align: center;
+}
+.demoHint code {
+  font-size: 12px;
 }

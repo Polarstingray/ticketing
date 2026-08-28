@@ -266,6 +266,12 @@ class AgentRunCreate(BaseModel):
     log_tail: str = Field(default="", max_length=20_000)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    # Optional proof that the poster still holds the ticket's lease. Omitting it
+    # keeps the pre-lease behavior (the assignee gate alone), so existing callers
+    # are unaffected; supplying it makes the write fail once the lease has lapsed,
+    # which is what stops a worker that was presumed dead — and whose ticket has
+    # since been re-claimed — from writing results over its replacement's.
+    lease_token: Optional[str] = Field(default=None, max_length=100)
 
 
 class AgentRunOut(BaseModel):
@@ -314,6 +320,42 @@ class CostRollup(BaseModel):
     own: AgentRunTotals
     children: List[CostRollupChild]
     total: AgentRunTotals
+
+
+# --- Ticket leases -----------------------------------------------------------
+# Bounds on a lease's lifetime. The floor keeps a claim from expiring before the
+# holder's first heartbeat can land; the ceiling keeps a crashed worker from
+# stranding a ticket for hours, which is the whole point of putting a TTL on the
+# claim in the first place.
+MIN_LEASE_TTL = 5
+MAX_LEASE_TTL = 3600
+DEFAULT_LEASE_TTL = 300
+
+
+class ClaimRequest(BaseModel):
+    """How long the claimant wants the lease for. Workers extend rather than
+    asking for a long TTL up front — see :class:`models.TicketLease`."""
+    ttl_seconds: int = Field(default=DEFAULT_LEASE_TTL, ge=MIN_LEASE_TTL, le=MAX_LEASE_TTL)
+
+
+class LeaseRelease(BaseModel):
+    """Proof of holding the lease being dropped."""
+    token: str = Field(min_length=1, max_length=100)
+
+
+class LeaseExtend(LeaseRelease):
+    ttl_seconds: int = Field(default=DEFAULT_LEASE_TTL, ge=MIN_LEASE_TTL, le=MAX_LEASE_TTL)
+
+
+class LeaseOut(BaseModel):
+    """A granted lease. ``token`` is returned only to the worker that claimed
+    (or extended) it; there is no endpoint that hands it to anyone else."""
+    model_config = ConfigDict(from_attributes=True)
+
+    ticket_id: int
+    worker_id: int
+    token: str
+    expires_at: UTCDateTime
 
 
 # --- Notifications -----------------------------------------------------------
@@ -628,8 +670,9 @@ class ApiKeyMeta(BaseModel):
 class ApiKeyCreate(BaseModel):
     name: str = Field(min_length=1)
     expires_in_days: Optional[int] = Field(default=None, ge=1)
-    # Capability grants for this key (currently only "cli", which permits repo:
-    # tags). Admin-only — enforced in routers/users.create_api_key.
+    # Capability grants for this key: "cli" (permits the repo:/rev:/branch: aiming
+    # tags) or "agent" (permits the parent:/review-by: routing tags and registering
+    # in the agent registry). Admin-only — enforced in routers/users.create_api_key.
     scopes: list[str] = Field(default_factory=list)
 
     @field_validator("scopes")
@@ -771,6 +814,35 @@ class ResolverRosterEntry(BaseModel):
     model: Optional[str] = None
     last_seen_at: Optional[UTCDateTime] = None
     effective_config: Optional[ResolverSettingsValues] = None
+
+
+class AgentHeartbeat(BaseModel):
+    """A third-party agent's self-report. Same shape as ``ResolverHeartbeat``,
+    except ``effective_config`` is a free-form dict: an external worker's config
+    is its own, not our resolver's tunable set. ``extra="forbid"`` still rejects
+    unknown top-level keys, and callers are reminded here as in the resolver
+    case that this row is world-readable to admins — **no secrets**."""
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = ""       # deployment label, e.g. "prod-us-east"
+    name: str = ""        # clean identity name, e.g. "triage-bot"
+    agent: str = ""       # the worker's own agent/runtime name
+    model: str = ""
+    effective_config: dict = Field(default_factory=dict)
+
+
+class AgentRosterEntry(BaseModel):
+    """One row in the agent registry: every worker that has ever sent a
+    heartbeat, ours and third-party alike."""
+    user_id: int
+    username: str
+    display_name: str
+    is_resolver_bot: bool = False
+    name: Optional[str] = None
+    label: Optional[str] = None
+    agent: Optional[str] = None
+    model: Optional[str] = None
+    last_seen_at: Optional[UTCDateTime] = None
 
 
 # --- Chat assistant ----------------------------------------------------------

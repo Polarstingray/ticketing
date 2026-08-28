@@ -109,6 +109,11 @@ def fake_cfg(tmp_path):
         allow_delegation=False,
         workers=[],
         max_delegations=10,
+        # Connection details for the ticket-lease client `sweep` builds per
+        # ticket. Tests stub the client itself; these just have to exist.
+        stingray_url="http://stingray.test",
+        api_key="test-key",
+        stingray_max_retries=1,
     )
 
 
