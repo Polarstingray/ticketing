@@ -18,6 +18,7 @@
      page must use one of these, and new layers belong in this list. */
   --z-sticky: 10; /* sticky chrome: topbar, filter panel */
   --z-dropdown: 200; /* menus anchored to a control (StatusDropdown) */
+  --z-chat: 300; /* the chat popup and its launcher, above page chrome */
 }
 
 * {
