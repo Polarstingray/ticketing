@@ -144,6 +144,10 @@ function qs(params) {
 
 export const api = {
   get: (path) => request("GET", path),
+  // Unauthenticated (the Login page needs it before a session exists).
+  // { read_only, demo_username, demo_password } — the latter two are null
+  // unless the deployment opted into showing them (the public demo).
+  appConfig: () => request("GET", "/app-config"),
   post: (path, body) => request("POST", path, body),
   patch: (path, body) => request("PATCH", path, body),
   del: (path) => request("DELETE", path),
@@ -242,6 +246,10 @@ export const api = {
     ),
   // The resolver-manager roster: each resolver bot + its live self-reported state.
   listResolvers: () => request("GET", "/resolvers"),
+  // The agent registry (admin): every worker that has ever sent a heartbeat,
+  // our resolver bots and third-party agents alike. Read-only — an external
+  // agent carries its own config, so there is nothing here to edit.
+  listAgents: () => request("GET", "/agents"),
 
   // Chat assistant (optional — hidden entirely when chatConfig().enabled is
   // false). Returns { enabled, model, daily_usd_limit, spent_today_usd }.

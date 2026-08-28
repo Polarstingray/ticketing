@@ -1674,6 +1674,21 @@ def _strip_residual_abs_paths(text: str | None, allowed_root: "Path | None") -> 
     return _PLAN_PATH.sub(_repl, text)
 
 
+def _scrub_wt_paths(text: str | None, wt: Path) -> str | None:
+    """Remove absolute worktree/WORK_DIR path strings from agent summaries.
+
+    The implement agent may embed its working-directory path in its closing
+    summary. That path is a resolver implementation detail; replace every
+    occurrence of str(wt) and str(WORK_DIR) with the empty string so only
+    repo-relative paths remain visible to readers."""
+    if not text:
+        return text
+    for prefix in (str(wt), str(WORK_DIR)):
+        if prefix in text:
+            text = text.replace(prefix, "")
+    return text
+
+
 def _files_mentioned_in_plan(plan: str, repo: Path, limit: int = 20) -> list[str]:
     """Repo-relative paths named in the approved plan that actually exist under
     `repo`. The existence filter is the safety guard — it keeps a hallucinated or
@@ -1852,6 +1867,8 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         render_code_blocks(ticket),
         "",
         "When done, output a short summary of what you changed and the test results.",
+        "Use repo-relative paths only (e.g. `src/foo.py:10-20`) — do NOT name your",
+        "working directory or include any absolute path in the summary.",
     ]
     return "\n".join(x for x in p if x is not None)
 
@@ -2275,6 +2292,7 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                           f"#{tid}: tests still failing after repairs — publishing flagged")
         if verify_banner:
             summary = verify_banner + summary
+        summary = _scrub_wt_paths(summary, wt) or ""
 
         # A /scaffold run writes a handout that is deliberately gitignored, so it
         # must be lifted out of the worktree before the commit — see
@@ -2436,6 +2454,7 @@ def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path |
             else:
                 fail(client, ticket, f"Delegation failed.\n\n```\n{tail(summary)}\n```")
             return
+        summary = _scrub_wt_paths(summary, wt) or ""
         filed = filed_tickets_in_log(log_path)
         client.add_comment(tid, _delegation_rollup(client, cfg, filed, summary))
         set_state(client, ticket, [], status="in_review", assigned_to=ticket["created_by"])
@@ -2782,22 +2801,33 @@ def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summar
                  reimplementable=True)
             return
         pr_body = f"{summary}\n\nResolves Stingray #{tid}."
+        pr_create_out = ""
         rc, out = run(["gh", "pr", "create", "--title", f"Resolve #{tid}: {ticket['title']}",
                        "--body", pr_body, "--head", branch, "--base", base_branch],
                       cwd=wt, timeout=cfg.git_net_timeout)
         if rc == 0:
             url = out.strip().splitlines()[-1] if out.strip() else ""
+            if not url.startswith("https://"):
+                url = ""
         else:
+            pr_create_out = out
             # `gh pr create` fails when a PR already exists for the branch — in
             # that case `gh pr view` gives us the existing URL. Any other failure
-            # leaves url blank and we fall back to the local-branch message.
-            url = run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
-                      cwd=wt)[1].strip()
+            # leaves url blank and we fail the ticket instead.
+            view_rc, view_out = run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
+                                    cwd=wt, timeout=cfg.git_net_timeout)
+            url = view_out.strip() if view_rc == 0 else ""
+            if url and not url.startswith("https://"):
+                url = ""
         if url:
             body = f"{IMPL_MARKER} — {url}\n\n{summary}\n\nChanged files:\n```\n{stat}\n```"
         else:
-            body = (f"{IMPL_MARKER} and pushed to branch `{branch}`, but opening a PR "
-                    f"failed.\n\n{summary}\n\nChanged files:\n```\n{stat}\n```")
+            pr_detail = f"\n\n`gh pr create` output:\n```\n{tail(pr_create_out)}\n```" if rc != 0 else ""
+            fail(client, ticket,
+                 f"Pushed to branch `{branch}` but `gh pr create` failed.{pr_detail}\n\n"
+                 f"{summary}\n\nChanged files:\n```\n{stat}\n```",
+                 reimplementable=True)
+            return
     else:
         reason = ("`gh` is not authenticated — run `gh auth login` to get PRs"
                   if origin else "no GitHub remote configured")
