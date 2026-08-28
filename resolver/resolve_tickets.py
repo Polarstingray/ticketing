@@ -427,8 +427,11 @@ def render_code_blocks(ticket: dict) -> str:
     parts = ["\nRelevant code (flagged by the reporter):"]
     for b in blocks:
         loc = f"{b.get('filename')}:{b.get('line_start')}-{b.get('line_end')}"
-        lang = b.get("language", "")
-        parts.append(f"\n{loc}\n```{lang}\n{b.get('content','')}\n```")
+        lang = re.sub(r'[^a-zA-Z0-9_-]', '', b.get("language", ""))
+        content = b.get("content", "")
+        max_run = max((len(m) for m in re.findall(r'`+', content)), default=0)
+        fence = '`' * max(3, max_run + 1)
+        parts.append(f"\n{loc}\n{fence}{lang}\n{content}\n{fence}")
     return "\n".join(parts)
 
 
