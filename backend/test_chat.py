@@ -1466,11 +1466,11 @@ def test_get_resolver_status_is_administrators_only(make_user):
 def test_resolver_status_projects_only_the_non_secret_config(make_user):
     """`effective_config` is written by the resolver bot itself, so a buggy or
     compromised one that heartbeats an extra key must not leak it through chat."""
-    from models import ResolverInstance
+    from models import AgentInstance
     bot = make_user()
     db = _db()
     try:
-        db.add(ResolverInstance(
+        db.add(AgentInstance(
             bot_user_id=bot.id, name="probe", agent="claude", model="m",
             effective_config={"max_attempts": 4, "api_key": "sk-leak-me",
                               "stingray_api_key": "sk-also-leak"},
@@ -1487,11 +1487,11 @@ def test_resolver_status_projects_only_the_non_secret_config(make_user):
 def test_resolver_status_escapes_pipes_in_its_cells(make_user):
     """Every cell is database text and none of it is constrained to exclude `|`,
     which would otherwise end the column and misalign the whole table."""
-    from models import ResolverInstance
+    from models import AgentInstance
     bot = make_user()
     db = _db()
     try:
-        db.add(ResolverInstance(
+        db.add(AgentInstance(
             bot_user_id=bot.id, name="a|b", agent="c|d", model="e|f",
             effective_config={"agent_model": "g|h"},
         ))

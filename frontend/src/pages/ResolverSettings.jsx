@@ -154,6 +154,7 @@ const RUNNING_FIELDS = [
 
 export default function ResolverSettings() {
   const [roster, setRoster] = useState([]);
+  const [agents, setAgents] = useState([]);
   const [selected, setSelected] = useState(null); // null = Global default, else bot_user_id
   const [form, setForm] = useState(null);
   const [secrets, setSecrets] = useState([]);
@@ -179,6 +180,17 @@ export default function ResolverSettings() {
     }
   }
 
+  async function loadAgents() {
+    try {
+      // Resolver bots are already listed above as settings scopes; this panel is
+      // about the workers that aren't ours, so they're filtered out here.
+      const all = await api.listAgents();
+      setAgents(all.filter((a) => !a.is_resolver_bot));
+    } catch {
+      // Non-fatal, same as the roster: liveness info is not load-bearing.
+    }
+  }
+
   async function select(botUserId) {
     setSelected(botUserId);
     setSaved(false);
@@ -195,6 +207,7 @@ export default function ResolverSettings() {
     (async () => {
       try {
         await loadRoster();
+        await loadAgents();
         const res = await api.getResolverSettings(); // global default first
         if (active) hydrate(res);
       } catch (e) {
@@ -290,6 +303,43 @@ export default function ResolverSettings() {
                 );
               })}
             </div>
+          </div>
+
+          {/* --- External agents (read-only liveness) ------------------------ */}
+          <div className="card">
+            <h2 className={styles.h2}>External agents</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Third-party workers authenticating with an <code>agent</code>-scoped API
+              key. They carry their own configuration, so there is nothing to edit here —
+              only who is live and when each last checked in.
+            </p>
+            {agents.length === 0 ? (
+              <p className="muted" style={{ margin: 0 }}>
+                No external agent has checked in yet.
+              </p>
+            ) : (
+              <div className={styles.roster}>
+                {agents.map((a) => {
+                  const fr = freshness(a.last_seen_at);
+                  return (
+                    <div
+                      key={a.user_id}
+                      className={`${styles.rosterRow} ${styles.agentRow}`}
+                    >
+                      <span className={`${styles.dot} ${styles[fr.cls]}`} title={fr.label} />
+                      <span className={styles.rosterName}>
+                        {a.name || a.display_name || a.username}
+                        {a.label && <span className={styles.rosterEnv}> {a.label}</span>}
+                      </span>
+                      <span className="muted">
+                        {a.agent || "—"} {a.model ? `· ${a.model}` : ""}
+                      </span>
+                      <span className={styles.rosterMeta}>{fr.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* --- Currently running (read-only, per selected resolver) -------- */}
