@@ -55,6 +55,11 @@
 
 .bell {
   margin-right: 4px;
+  /* The link is inline text, not flex, and everything else in it (Notifications,
+     the count badge) still needs to sit in that flow — so this corrects the
+     baseline sink of the one child that's an <svg> rather than adding flex to
+     .navLink, which would touch every plain-text link too. */
+  vertical-align: -3px;
 }
 .badge {
   display: inline-block;

@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useNotifications } from "../notifications/NotificationsContext";
 import ChatWidget from "./ChatWidget";
-import { StingrayIcon } from "./icons";
+import { BellIcon, StingrayIcon } from "./icons";
 import styles from "../styles/Layout.module.css";
 
 export default function Layout() {
@@ -42,7 +42,7 @@ export default function Layout() {
             </NavLink>
           )}
           <NavLink to="/notifications" className={linkClass}>
-            <span className={styles.bell}>🔔</span>
+            <BellIcon size={16} className={styles.bell} />
             Notifications
             {unreadCount > 0 && (
               <span className={styles.badge}>
