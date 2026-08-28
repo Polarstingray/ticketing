@@ -97,14 +97,16 @@ def _migrate_resolver_settings(engine: Engine) -> None:
     ResolverSettings.__table__.create(bind=engine, checkfirst=True)
 
 
-def _migrate_resolver_instances(engine: Engine) -> None:
-    """resolver_instances table — added with the resolver-manager registry.
+def _migrate_agent_instances(engine: Engine) -> None:
+    """agent_instances table — the resolver registry generalized to any agent.
 
-    A brand-new table, so `create_all` builds it on a fresh DB; this backfills
-    it on databases that predate the model. `checkfirst=True` no-ops when the
-    table already exists (idempotent)."""
-    from models import ResolverInstance
-    ResolverInstance.__table__.create(bind=engine, checkfirst=True)
+    Supersedes the earlier `resolver_instances` table, which was the same shape
+    keyed by `bot_user_id`. The old table is left on disk rather than renamed or
+    copied: every row in it is liveness state that the resolver re-reports on its
+    next heartbeat, so there is nothing worth migrating and nothing lost.
+    `checkfirst=True` no-ops when the table already exists (idempotent)."""
+    from models import AgentInstance
+    AgentInstance.__table__.create(bind=engine, checkfirst=True)
 
 
 
@@ -158,6 +160,16 @@ def _migrate_webhooks(engine: Engine) -> None:
     WebhookDelivery.__table__.create(bind=engine, checkfirst=True)
 
 
+def _migrate_ticket_leases(engine: Engine) -> None:
+    """ticket_leases table — added with the explicit claim/lease API.
+
+    A brand-new table, so `create_all` builds it on a fresh DB; this backfills
+    it on databases that predate the model. `checkfirst=True` no-ops when the
+    table already exists (idempotent)."""
+    from models import TicketLease
+    TicketLease.__table__.create(bind=engine, checkfirst=True)
+
+
 # Ordered list of migrations applied on startup (after create_all).
 MIGRATIONS = [
     _migrate_session_version,
@@ -167,12 +179,13 @@ MIGRATIONS = [
     _migrate_api_key_scopes,
     _migrate_agent_runs,
     _migrate_resolver_settings,
-    _migrate_resolver_instances,
+    _migrate_agent_instances,
     _migrate_saved_views,
     _migrate_chat_tables,
     _migrate_agent_run_log_tail,
     _migrate_outbox,
     _migrate_webhooks,
+    _migrate_ticket_leases,
 ]
 
 

@@ -31,6 +31,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -73,6 +74,7 @@ TAG_FIX = "fix"                             # on a code_review ticket: also appl
 TAG_ESCALATE = "claude"                     # free bot: manual "send this to Claude" tag
 TAG_DELEGATE = "delegate"                   # opt a ticket into resolver-to-resolver fan-out
 TAG_DELEGATING = "resolver:delegating"      # delegation/orchestration run in flight
+TAG_CLAIMED = "resolver:claimed"            # mirror of a live server-side lease (see Lease)
 REPO_TAG_PREFIX = "repo:"
 REV_TAG_PREFIX = "rev:"                     # rev:<sha> = the commit this ticket is pinned to
 BRANCH_TAG_PREFIX = "branch:"               # branch:<name> = the branch that commit is on
@@ -196,7 +198,15 @@ def run(cmd: list[str], cwd: str | Path | None = None, timeout: int | None = 120
 
 # --- ticket helpers ------------------------------------------------------
 def resolver_tags(ticket: dict) -> set[str]:
-    return {t for t in ticket.get("tags", []) if t.startswith(RESOLVER_PREFIX)}
+    """The ticket's resolver *workflow* tags — what `process` dispatches on.
+
+    `resolver:claimed` is excluded: it mirrors a live lease, not a phase, and
+    counting it would make every claimed ticket look mid-flight. That matters
+    where "no resolver tags at all" is read as "fresh ticket" (the escalation
+    check), which the mirror would otherwise silently disable.
+    """
+    return {t for t in ticket.get("tags", [])
+            if t.startswith(RESOLVER_PREFIX) and t != TAG_CLAIMED}
 
 
 def _should_escalate(cfg, ticket: dict) -> tuple[bool, str]:
@@ -292,9 +302,122 @@ def handback_user(client: StingrayClient, ticket: dict) -> int:
 def set_state(client: StingrayClient, ticket: dict, new_claude_tags: list[str],
               **fields) -> dict:
     """Replace the ticket's resolver:* tags with new_claude_tags (preserving
-    repo:/dangerous/other tags) and apply any other PATCH fields in one call."""
-    kept = [t for t in ticket.get("tags", []) if not t.startswith(RESOLVER_PREFIX)]
+    repo:/dangerous/other tags) and apply any other PATCH fields in one call.
+
+    ``resolver:claimed`` is the one resolver tag that survives, because it is not
+    a phase — it mirrors the lease row this worker actually holds, and the server
+    clears it on release. Letting a phase transition strip it would leave the
+    mirror lying about a claim that is still live.
+    """
+    kept = [t for t in ticket.get("tags", [])
+            if not t.startswith(RESOLVER_PREFIX) or t == TAG_CLAIMED]
     return client.update_ticket(ticket["id"], tags=kept + new_claude_tags, **fields)
+
+
+# --- ticket leases -------------------------------------------------------
+# Claiming used to be implicit: whatever was assigned to this bot was ours, which
+# holds only because systemd runs one sweep per bot id. `POST /tickets/{id}/claim`
+# makes it explicit and exclusive, so a second sweep — or a third-party agent —
+# is turned away by the database rather than by luck.
+#
+# The TTL is short relative to how long a ticket takes, and kept alive by a
+# heartbeat, on purpose: that is what makes a crashed worker's ticket return to
+# the queue instead of sitting under `resolver:planning` forever.
+LEASE_TTL_SECONDS = 600
+LEASE_HEARTBEAT_SECONDS = LEASE_TTL_SECONDS // 3
+
+# Tokens of the leases this process currently holds, keyed by ticket id. Read by
+# the agent-run poster (`lease_token_for`) so results carry proof the claim is
+# still live; the alternative was threading a token through every layer between
+# `sweep` and the three `create_agent_run` call sites.
+_HELD_LEASES: dict[int, str] = {}
+
+
+def lease_token_for(ticket_id: int) -> str | None:
+    """The lease token this process holds for a ticket, if any. ``None`` when
+    running without a lease (``--dry-run``, or an older server that 404s the
+    claim endpoint), in which case results post exactly as they did before."""
+    return _HELD_LEASES.get(ticket_id)
+
+
+class Lease:
+    """A held claim on one ticket, kept alive by a background heartbeat.
+
+    The heartbeat gets its own :class:`StingrayClient` rather than sharing the
+    sweep's: ``requests.Session`` is not thread-safe, and a torn request would be
+    a miserable bug to chase for the sake of saving one connection.
+
+    A heartbeat that comes back empty means the lease is gone — it lapsed while
+    an agent ran long, or another worker took over. There is nothing useful to do
+    about that from here (the agent is mid-flight and killing it would waste the
+    work), so it is logged loudly and the token is dropped, which makes the
+    ticket's subsequent result writes fail closed server-side.
+    """
+
+    def __init__(self, client: StingrayClient, ticket_id: int, token: str,
+                 ttl: int = LEASE_TTL_SECONDS):
+        self._client = client
+        self.ticket_id = ticket_id
+        self.token = token
+        self._ttl = ttl
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._beat, name=f"lease-{ticket_id}", daemon=True)
+        self._thread.start()
+
+    def _beat(self) -> None:
+        while not self._stop.wait(LEASE_HEARTBEAT_SECONDS):
+            try:
+                if self._client.extend_lease(self.ticket_id, self.token,
+                                             ttl_seconds=self._ttl) is None:
+                    log(f"#{self.ticket_id}: lease lost (expired or re-claimed) — "
+                        "results from this run will be refused")
+                    _HELD_LEASES.pop(self.ticket_id, None)
+                    return
+            except Exception as e:
+                # A wobble is survivable: the client already retried, and there
+                # is another heartbeat before the TTL runs out.
+                log(f"#{self.ticket_id}: lease heartbeat failed: {e!r}")
+
+    def release(self) -> None:
+        """Stop heartbeating and hand the claim back. Best-effort: this runs on
+        the failure path too, and a release that can't be delivered costs at most
+        one TTL of waiting rather than stranding the ticket."""
+        self._stop.set()
+        _HELD_LEASES.pop(self.ticket_id, None)
+        try:
+            self._client.release_ticket(self.ticket_id, self.token)
+        except Exception as e:
+            log(f"#{self.ticket_id}: lease release failed (it will expire): {e!r}")
+
+
+def acquire_lease(cfg: Config, ticket_id: int) -> tuple[bool, Lease | None]:
+    """Claim a ticket for this sweep.
+
+    Returns ``(may_process, lease)``:
+
+    * ``(False, None)`` — another worker holds it. Skip the ticket; it is theirs.
+    * ``(True, lease)`` — claimed, and the lease is heartbeating.
+    * ``(True, None)`` — the claim could not be *attempted* (a server that
+      predates the lease API 404s here, or is briefly unreachable). The sweep
+      falls back to its pre-lease behavior rather than refusing to work, which is
+      what lets the backend and the resolver be deployed one at a time. Only the
+      first case is contention; conflating the two would make an upgrade window
+      look like a permanently claimed queue.
+    """
+    client = StingrayClient(cfg.stingray_url, cfg.api_key,
+                            max_retries=cfg.stingray_max_retries,
+                            logger=audit.get_logger())
+    try:
+        granted = client.claim_ticket(ticket_id, ttl_seconds=LEASE_TTL_SECONDS)
+    except Exception as e:
+        log(f"#{ticket_id}: could not claim ({e!r}); proceeding without a lease")
+        return True, None
+    if granted is None:
+        return False, None
+    lease = Lease(client, ticket_id, granted["token"])
+    _HELD_LEASES[ticket_id] = lease.token
+    return True, lease
 
 
 def render_code_blocks(ticket: dict) -> str:
@@ -1278,6 +1401,10 @@ def run_agent_tracked(cfg: Config, client: StingrayClient, ticket: dict, prompt:
             log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
+            # Proof the claim is still live. The server refuses the write if
+            # it lapsed, so a worker presumed dead can't overwrite the
+            # results of whoever re-claimed its ticket. None when unleased.
+            lease_token=lease_token_for(ticket["id"]),
         )
     except Exception:
         audit.audit_event(
@@ -1547,6 +1674,21 @@ def _strip_residual_abs_paths(text: str | None, allowed_root: "Path | None") -> 
     return _PLAN_PATH.sub(_repl, text)
 
 
+def _scrub_wt_paths(text: str | None, wt: Path) -> str | None:
+    """Remove absolute worktree/WORK_DIR path strings from agent summaries.
+
+    The implement agent may embed its working-directory path in its closing
+    summary. That path is a resolver implementation detail; replace every
+    occurrence of str(wt) and str(WORK_DIR) with the empty string so only
+    repo-relative paths remain visible to readers."""
+    if not text:
+        return text
+    for prefix in (str(wt), str(WORK_DIR)):
+        if prefix in text:
+            text = text.replace(prefix, "")
+    return text
+
+
 def _files_mentioned_in_plan(plan: str, repo: Path, limit: int = 20) -> list[str]:
     """Repo-relative paths named in the approved plan that actually exist under
     `repo`. The existence filter is the safety guard — it keeps a hallucinated or
@@ -1725,6 +1867,8 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         render_code_blocks(ticket),
         "",
         "When done, output a short summary of what you changed and the test results.",
+        "Use repo-relative paths only (e.g. `src/foo.py:10-20`) — do NOT name your",
+        "working directory or include any absolute path in the summary.",
     ]
     return "\n".join(x for x in p if x is not None)
 
@@ -2148,6 +2292,7 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                           f"#{tid}: tests still failing after repairs — publishing flagged")
         if verify_banner:
             summary = verify_banner + summary
+        summary = _scrub_wt_paths(summary, wt) or ""
 
         # A /scaffold run writes a handout that is deliberately gitignored, so it
         # must be lifted out of the worktree before the commit — see
@@ -2309,6 +2454,7 @@ def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path |
             else:
                 fail(client, ticket, f"Delegation failed.\n\n```\n{tail(summary)}\n```")
             return
+        summary = _scrub_wt_paths(summary, wt) or ""
         filed = filed_tickets_in_log(log_path)
         client.add_comment(tid, _delegation_rollup(client, cfg, filed, summary))
         set_state(client, ticket, [], status="in_review", assigned_to=ticket["created_by"])
@@ -2467,6 +2613,10 @@ def run_critique(cfg, client: StingrayClient, ticket: dict, plan: str,
             log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
+            # Proof the claim is still live. The server refuses the write if
+            # it lapsed, so a worker presumed dead can't overwrite the
+            # results of whoever re-claimed its ticket. None when unleased.
+            lease_token=lease_token_for(ticket["id"]),
         )
     except Exception:
         audit.audit_event(
@@ -2580,6 +2730,10 @@ def do_review(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | No
             log_tail=failed_log_tail(log_path, ok),
             started_at=started.isoformat(),
             finished_at=datetime.now(timezone.utc).isoformat(),
+            # Proof the claim is still live. The server refuses the write if
+            # it lapsed, so a worker presumed dead can't overwrite the
+            # results of whoever re-claimed its ticket. None when unleased.
+            lease_token=lease_token_for(ticket["id"]),
         )
     except Exception:
         audit.audit_event(
@@ -2647,22 +2801,33 @@ def publish(cfg, client, ticket, repo, wt, branch, base_ref, base_branch, summar
                  reimplementable=True)
             return
         pr_body = f"{summary}\n\nResolves Stingray #{tid}."
+        pr_create_out = ""
         rc, out = run(["gh", "pr", "create", "--title", f"Resolve #{tid}: {ticket['title']}",
                        "--body", pr_body, "--head", branch, "--base", base_branch],
                       cwd=wt, timeout=cfg.git_net_timeout)
         if rc == 0:
             url = out.strip().splitlines()[-1] if out.strip() else ""
+            if not url.startswith("https://"):
+                url = ""
         else:
+            pr_create_out = out
             # `gh pr create` fails when a PR already exists for the branch — in
             # that case `gh pr view` gives us the existing URL. Any other failure
-            # leaves url blank and we fall back to the local-branch message.
-            url = run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
-                      cwd=wt)[1].strip()
+            # leaves url blank and we fail the ticket instead.
+            view_rc, view_out = run(["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
+                                    cwd=wt, timeout=cfg.git_net_timeout)
+            url = view_out.strip() if view_rc == 0 else ""
+            if url and not url.startswith("https://"):
+                url = ""
         if url:
             body = f"{IMPL_MARKER} — {url}\n\n{summary}\n\nChanged files:\n```\n{stat}\n```"
         else:
-            body = (f"{IMPL_MARKER} and pushed to branch `{branch}`, but opening a PR "
-                    f"failed.\n\n{summary}\n\nChanged files:\n```\n{stat}\n```")
+            pr_detail = f"\n\n`gh pr create` output:\n```\n{tail(pr_create_out)}\n```" if rc != 0 else ""
+            fail(client, ticket,
+                 f"Pushed to branch `{branch}` but `gh pr create` failed.{pr_detail}\n\n"
+                 f"{summary}\n\nChanged files:\n```\n{stat}\n```",
+                 reimplementable=True)
+            return
     else:
         reason = ("`gh` is not authenticated — run `gh auth login` to get PRs"
                   if origin else "no GitHub remote configured")
@@ -2713,7 +2878,10 @@ def quota_backoff(cfg: Config, client: StingrayClient, ticket: dict,
     except Exception as e:
         audit.get_logger().warning(
             "#%s: quota_backoff() could not post comment: %r", ticket["id"], e)
-    # Keep phase_tag so the next sweep knows where to resume.
+    # Keep phase_tag so the next sweep knows where to resume. The lease is not
+    # released here: `sweep`'s finally releases it on every exit path, so a
+    # parked ticket is re-claimable as soon as this sweep lets go of it, and a
+    # later sweep (past the quota window) resumes from the tag above.
     set_state(client, ticket, [phase_tag, TAG_QUOTA_BACKOFF])
     phase("quota-backoff", ticket,
           f"#{ticket['id']}: quota backoff ({eta_min}m) — preserving {phase_tag}")
@@ -3013,7 +3181,16 @@ def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
     """Process the bot's queue; return how many tickets were processed (used by
     main() to drop the log files of an empty sweep)."""
     if only is not None:
-        process(cfg, client, client.get_ticket(only), dry_run)
+        ticket = client.get_ticket(only)
+        may_process, lease = (True, None) if dry_run else acquire_lease(cfg, only)
+        if not may_process:
+            log(f"#{only}: already claimed by another worker; not processing")
+            return 0
+        try:
+            process(cfg, client, ticket, dry_run)
+        finally:
+            if lease is not None:
+                lease.release()
         return 1
     # Anything currently assigned to the bot is ours to act on, regardless of
     # status (after /approve the human reassigns but leaves status=in_review).
@@ -3028,6 +3205,14 @@ def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
         if max_tickets and processed >= max_tickets:
             log(f"reached max-tickets={max_tickets}; {len(tickets) - processed} left for next sweep")
             break
+        # The race guard. Two sweeps can see the same ticket — the queue is a
+        # plain "assigned to this bot" query — but only one wins the claim, and
+        # the loser moves on instead of duplicating the work. A skipped ticket
+        # doesn't count against max_tickets: nothing was done with it.
+        may_process, lease = (True, None) if dry_run else acquire_lease(cfg, ticket["id"])
+        if not may_process:
+            log(f"#{ticket['id']}: already claimed by another worker, skipping")
+            continue
         processed += 1
         try:
             process(cfg, client, ticket, dry_run)
@@ -3040,6 +3225,11 @@ def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
                 except Exception:
                     pass
         finally:
+            # Unconditional: a ticket parked in quota-backoff, handed back by
+            # fail(), or abandoned by a crash inside process() must all become
+            # re-claimable immediately rather than waiting out the TTL.
+            if lease is not None:
+                lease.release()
             audit.set_ticket(None)
     return processed
 

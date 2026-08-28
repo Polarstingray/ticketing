@@ -14,7 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, synonym
 
 from database import Base
 
@@ -207,6 +207,54 @@ class Ticket(Base):
     agent_runs = relationship(
         "AgentRun", cascade="all, delete-orphan"
     )
+    # SQLite's FK enforcement is off (see database._sqlite_pragmas), so the
+    # ondelete=CASCADE on TicketLease is documentation until it's turned on; this
+    # relationship is what actually clears a lease when a ticket is hard-deleted.
+    lease = relationship(
+        "TicketLease", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class TicketLease(Base):
+    """An exclusive, time-limited claim on a ticket held by one worker.
+
+    Claiming used to be implicit: the resolver took everything assigned to its
+    bot id and stamped ``resolver:*`` tags on it, which is only safe because
+    systemd runs exactly one sweep per bot. Opening the queue to third-party
+    agents (or waking resolvers on events) makes two workers picking up the same
+    ticket a live race, so the claim is made explicit here and the database — not
+    a tag — is the arbiter.
+
+    Two properties do the work:
+
+    * ``ticket_id`` is **unique**, so "at most one holder" is enforced by the
+      engine. Two concurrent claims cannot both win, however the SELECT that
+      precedes them interleaves; the loser takes an ``IntegrityError`` and is
+      answered 409.
+    * ``expires_at`` bounds the claim. A worker that dies mid-ticket previously
+      left ``resolver:planning`` on the ticket forever; now its lease simply
+      lapses and the next sweep re-claims. Holders keep a long job alive by
+      extending, which is a deliberate liveness/safety trade: a crashed worker
+      stops extending, so the ticket returns to the queue after at most one TTL.
+
+    ``token`` is an opaque secret handed to the claimant and required to release
+    or extend. Without it any caller who can see the ticket could drop a rival's
+    claim, which would make the lease decorative.
+
+    The ``resolver:*`` tags remain as a human-readable mirror (see
+    ``routers.tickets``), but this row is the source of truth.
+    """
+    __tablename__ = "ticket_leases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(
+        Integer, ForeignKey("tickets.id", ondelete="CASCADE"),
+        unique=True, nullable=False, index=True,
+    )
+    worker_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    token = Column(String, unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class AgentRun(Base):
@@ -331,25 +379,29 @@ class ResolverSettings(Base):
     updated_by = Column(Integer, nullable=True)
 
 
-class ResolverInstance(Base):
-    """A running resolver's self-reported identity + observed state.
+class AgentInstance(Base):
+    """A running agent's self-reported identity + observed state.
 
     Distinct from :class:`ResolverSettings` on purpose: settings are the
-    *admin-authored overrides*, whereas this is what a resolver *reports about
-    itself* at the start of each sweep (which ``.env`` file it runs, its agent
-    and model, and a snapshot of the non-secret config it's actually using).
-    Written by the resolver bot itself (``POST /resolvers/heartbeat``), read by
-    the admin resolver-manager UI. ``last_seen_at`` is bumped each heartbeat, so
-    a stopped resolver simply goes stale. **No secrets** — ``effective_config``
-    carries only the same non-secret tunable set as ResolverSettings.
+    *admin-authored overrides*, whereas this is what a worker *reports about
+    itself* (which ``.env`` file it runs, its agent and model, and a snapshot of
+    the non-secret config it's actually using). ``last_seen_at`` is bumped each
+    heartbeat, so a stopped worker simply goes stale. **No secrets** —
+    ``effective_config`` carries only non-secret tunables.
+
+    Originally ``ResolverInstance``, one row per resolver bot. Nothing in the
+    shape was resolver-specific, so it is now the registry for *any* worker: our
+    own resolvers (``POST /resolvers/heartbeat``) and third-party agents
+    authenticating with an ``agent``-scoped key (``POST /agents/heartbeat``).
+    Both are read by the admin resolver-manager UI.
     """
-    __tablename__ = "resolver_instances"
+    __tablename__ = "agent_instances"
     __table_args__ = (
-        UniqueConstraint("bot_user_id", name="uq_resolver_instance_bot"),
+        UniqueConstraint("user_id", name="uq_agent_instance_user"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    bot_user_id = Column(Integer, nullable=False, index=True)  # the resolver's own user id
+    user_id = Column(Integer, nullable=False, index=True)  # the worker's own user id
     label = Column(String, nullable=False, default="")   # RESOLVER_ENV_FILE, e.g. ".env.gemini"
     name = Column(String, nullable=False, default="")     # clean name, e.g. "gemini"
     agent = Column(String, nullable=False, default="")    # claude | opencode | ...
@@ -357,6 +409,15 @@ class ResolverInstance(Base):
     effective_config = Column(JSON, nullable=False, default=dict)  # non-secret snapshot
     last_seen_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    # The column was `bot_user_id` while this was resolver-only. Kept as a synonym
+    # (usable in queries and in the constructor) so resolver-side callers reading
+    # "which bot is this" keep working against the widened name.
+    bot_user_id = synonym("user_id")
+
+
+# Back-compat alias for the pre-#56 name; the table and semantics are the same.
+ResolverInstance = AgentInstance
 
 
 class ChatRole(str, enum.Enum):
