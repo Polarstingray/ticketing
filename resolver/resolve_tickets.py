@@ -1547,6 +1547,21 @@ def _strip_residual_abs_paths(text: str | None, allowed_root: "Path | None") -> 
     return _PLAN_PATH.sub(_repl, text)
 
 
+def _scrub_wt_paths(text: str | None, wt: Path) -> str | None:
+    """Remove absolute worktree/WORK_DIR path strings from agent summaries.
+
+    The implement agent may embed its working-directory path in its closing
+    summary. That path is a resolver implementation detail; replace every
+    occurrence of str(wt) and str(WORK_DIR) with the empty string so only
+    repo-relative paths remain visible to readers."""
+    if not text:
+        return text
+    for prefix in (str(wt), str(WORK_DIR)):
+        if prefix in text:
+            text = text.replace(prefix, "")
+    return text
+
+
 def _files_mentioned_in_plan(plan: str, repo: Path, limit: int = 20) -> list[str]:
     """Repo-relative paths named in the approved plan that actually exist under
     `repo`. The existence filter is the safety guard — it keeps a hallucinated or
@@ -1725,6 +1740,8 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         render_code_blocks(ticket),
         "",
         "When done, output a short summary of what you changed and the test results.",
+        "Use repo-relative paths only (e.g. `src/foo.py:10-20`) — do NOT name your",
+        "working directory or include any absolute path in the summary.",
     ]
     return "\n".join(x for x in p if x is not None)
 
@@ -2148,6 +2165,7 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                           f"#{tid}: tests still failing after repairs — publishing flagged")
         if verify_banner:
             summary = verify_banner + summary
+        summary = _scrub_wt_paths(summary, wt) or ""
 
         # A /scaffold run writes a handout that is deliberately gitignored, so it
         # must be lifted out of the worktree before the commit — see
@@ -2309,6 +2327,7 @@ def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path |
             else:
                 fail(client, ticket, f"Delegation failed.\n\n```\n{tail(summary)}\n```")
             return
+        summary = _scrub_wt_paths(summary, wt) or ""
         filed = filed_tickets_in_log(log_path)
         client.add_comment(tid, _delegation_rollup(client, cfg, filed, summary))
         set_state(client, ticket, [], status="in_review", assigned_to=ticket["created_by"])
