@@ -5,6 +5,7 @@
 #
 #   fly apps create stingray-tickets-demo
 #   fly secrets set SESSION_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+#   fly secrets set CHAT_API_KEY="sk-or-v1-..."   # an OpenRouter key — see below
 #   fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
 #   fly scale count 1     # REQUIRED — see below
 #
@@ -16,6 +17,24 @@
 #
 # No [mounts] section: the SQLite DB is ephemeral on purpose, so every machine
 # restart repaints a clean dataset (see deploy/demo/entrypoint.sh).
+#
+# The chat assistant is on here, against OpenRouter's openai/gpt-4o-mini (cheap,
+# and reliable at the tool-calling the assistant depends on — see
+# deploy/demo/Dockerfile for the model/price/cap tunables, all non-secret and set
+# there). CHAT_API_KEY is the one credential in this list, so it is NOT in this
+# file or the Dockerfile — set it with `fly secrets set` above. Two guardrails
+# make handing that assistant to strangers safe: READ_ONLY (backend/
+# read_only_guard.py) means nothing on this deployment writes, and
+# CHAT_DAILY_USD_LIMIT bounds the bill.
+#
+# That cap is looser than "$X/day" sounds, though: DEMO_RESET wipes
+# chat_messages on every cold boot along with everything else, and
+# spend.spent_today only sums what's in that table — so the cap really resets
+# on every machine restart, not just once at UTC midnight. Combined with
+# scale-to-zero, a bursty visit pattern (idle → visit → idle → visit) can burn
+# the cap more than once in a day. Accepted as-is: the exposure per boot cycle
+# is still bounded at the configured amount, and fixing it needs a spend
+# counter that survives the reseed, which is more than this demo needs.
 
 app = "stingray-tickets-demo"
 primary_region = "iad"
@@ -30,6 +49,17 @@ primary_region = "iad"
   DEMO_RESET = "true"
   # Used in notification emails/links; harmless if SMTP is off (it is here).
   PUBLIC_BASE_URL = "https://stingray-tickets-demo.fly.dev"
+  # Already the Dockerfile's default; repeated here so the deploy-time config is
+  # self-describing without having to open the image build too. CHAT_API_KEY is
+  # deliberately absent from both — see the header comment and `fly secrets set`.
+  READ_ONLY = "true"
+  SHOW_DEMO_CREDENTIALS = "true"
+  CHAT_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+  CHAT_API_MODEL = "openai/gpt-4o-mini"
+  CHAT_PRICE_IN = "0.15"
+  CHAT_PRICE_OUT = "0.60"
+  CHAT_DAILY_USD_LIMIT = "2.00"
+  CHAT_RATE_LIMIT = "5/minute"
   # The AI resolver is a separate process and is intentionally NOT deployed here:
   # it needs provider API keys and push access to a real repo. The demo ships
   # illustrative agent-run data instead.

@@ -8,10 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+import demo_config
 import dispatcher
 from database import Base, SessionLocal, engine
 from migrations import run_migrations
 from ratelimit import limiter
+from read_only_guard import read_only_guard
 from routers import auth as auth_router
 from routers import chat as chat_router
 from routers import comments as comments_router
@@ -80,6 +82,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Read-only mode (the public demo). A no-op unless READ_ONLY=true; see
+# read_only_guard.py for what's exempt and why.
+app.middleware("http")(read_only_guard)
+
 app.include_router(auth_router.router)
 app.include_router(tickets_router.router)
 app.include_router(chat_router.router)
@@ -98,3 +104,11 @@ app.include_router(webhooks_router.router)
 @app.get("/health", tags=["meta"])
 def health():
     return {"status": "ok"}
+
+
+@app.get("/app-config", tags=["meta"])
+def app_config():
+    """Whether this deployment is read-only, and demo credentials if the
+    operator opted into showing them. Unauthenticated: the Login page needs
+    this before a session cookie exists."""
+    return demo_config.load().public()
