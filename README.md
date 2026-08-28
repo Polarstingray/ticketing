@@ -22,19 +22,24 @@ optional resolver on a dev station that pulls bot-assigned tickets and opens PRs
 
 ## Live demo
 
-**[stingray-tickets-demo.fly.dev](https://stingray-tickets-demo.fly.dev)** — sign in as
-`admin` / `demopass123`. The API is browsable too, via live Swagger docs at
-**[/api/docs](https://stingray-tickets-demo.fly.dev/api/docs)**.
+**[stingray-tickets-demo.fly.dev](https://stingray-tickets-demo.fly.dev)** — sign in with
+the credentials shown on the login page (`admin` / `demopass123`). The API is browsable
+too, via live Swagger docs at **[/api/docs](https://stingray-tickets-demo.fly.dev/api/docs)**.
 
 Start with **“Review: batch the activity-feed queries”** — a code-review ticket the AI
 resolver worked, showing what each phase of the run cost. Then open **“Harden the
 resolver's git-worktree isolation”** to see cost roll up across the sub-tasks it
-delegated.
+delegated, and ask the **chat assistant** (bottom right) why the ticket's first
+implement run failed — it reads the resolver's transcript and can propose a follow-up
+ticket, which you can inspect but not actually file.
 
 > The agent-run data on the demo is **illustrative**: the resolver itself isn't deployed
 > there, since it needs provider API keys and push access to a real repo. Everything else
-> is the real app. The database is wiped and re-seeded on every restart, so poke at it —
-> you can't break anything that won't fix itself.
+> is the real app, including the chat assistant, which runs against a real model. The
+> instance is **read-only** — no ticket, comment, or setting can be created, edited or
+> deleted — so poke at it freely; the database is wiped and re-seeded on every restart
+> regardless. Everyone shares the one login, so the chat assistant's thread list is
+> shared too — don't be surprised by a question you didn't ask.
 
 ## Walkthrough
 
@@ -157,7 +162,7 @@ docker compose up --build -d
 ### Public demo instance
 
 [`deploy/demo/`](./deploy/demo) hosts a throwaway instance anyone can click around in.
-It differs from a real deployment in three deliberate ways:
+It differs from a real deployment in four deliberate ways:
 
 - **One container.** Hosts like Fly.io deploy a single image per app, so
   [`deploy/demo/Dockerfile`](./deploy/demo/Dockerfile) collapses the two compose services
@@ -168,6 +173,12 @@ It differs from a real deployment in three deliberate ways:
   instance, and the published login is throwaway by design.
 - **No resolver.** The AI resolver needs provider API keys and push access to a real repo,
   so it isn't deployed; the demo ships illustrative agent-run data instead.
+- **Read-only, with the chat assistant on.** `READ_ONLY=true` blocks every write (see
+  `backend/read_only_guard.py`) except signing in and the assistant's own conversation
+  history, so a stranger with the published login can't touch ticket data, another
+  visitor's work, or the admin account. The assistant runs for real, against OpenRouter's
+  `openai/gpt-4o-mini`, bounded by a daily USD cap — see the tunables (and the cap's one
+  caveat) in `deploy/demo/fly.toml`'s header comment.
 
 ```bash
 # Build/run it locally exactly as the host will (context is the repo root):
@@ -181,6 +192,11 @@ fly apps create stingray-tickets-demo
 # Required. Session cookies are signed with this; unset, each machine would sign
 # with its own key and the app would appear to log users out at random.
 fly secrets set SESSION_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+
+# Required for the chat assistant to come up — an OpenRouter key. Everything else
+# it needs (model, prices, the daily cap) is already baked into the Dockerfile,
+# since none of it is secret; this is the one credential that can't be.
+fly secrets set CHAT_API_KEY="sk-or-v1-..."
 
 fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile .
 
