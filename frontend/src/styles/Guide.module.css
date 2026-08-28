@@ -1,5 +1,97 @@
 .wrap {
-  max-width: 820px;
+  max-width: 1060px;
+}
+.layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 32px;
+}
+.sidebar {
+  width: 190px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 16px;
+  align-self: flex-start;
+}
+.sidebarTitle {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted, #888);
+  margin: 0 0 8px;
+}
+.toc {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+.toc li {
+  margin: 2px 0;
+}
+.toc a {
+  display: block;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 4px 8px;
+  border-left: 2px solid transparent;
+  border-radius: 0 4px 4px 0;
+}
+.toc a:hover {
+  background: var(--surface-2);
+  text-decoration: underline;
+}
+.tocActive {
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+.toggleAll {
+  font-size: 12px;
+  padding: 4px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+}
+.main {
+  flex: 1;
+  min-width: 0;
+}
+.section {
+  border-top: 1px solid var(--border);
+}
+.section:last-child {
+  border-bottom: 1px solid var(--border);
+}
+.sectionTitle {
+  font-size: 18px;
+  font-weight: 600;
+  padding: 14px 0;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sectionTitle::-webkit-details-marker {
+  display: none;
+}
+.sectionTitle::before {
+  content: "▸";
+  font-size: 12px;
+  color: var(--muted, #888);
+  transition: transform 0.12s ease-in-out;
+}
+.section[open] > .sectionTitle::before {
+  transform: rotate(90deg);
+}
+.sectionBody {
+  padding-bottom: 12px;
+}
+.sectionBody > :first-child {
+  margin-top: 0;
 }
 .doc {
   line-height: 1.6;
