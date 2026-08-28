@@ -79,6 +79,9 @@ follows the resolver's delegated sub-tasks.
 
 - **[docs/architecture.md](docs/architecture.md)** — system topology, module map, and
   the ticket lifecycle (with diagrams).
+- **[docs/external-agents.md](docs/external-agents.md)** — how a third-party agent
+  registers, subscribes to the event stream, claims work, and reports cost, using an
+  `agent`-scoped API key instead of admin.
 - **[docs/resolver-design.md](docs/resolver-design.md)** — a design write-up of the
   optional AI resolver: the plan→implement→verify→PR loop, worktree isolation,
   provider-agnostic runners, cost accounting, and the eval harness.

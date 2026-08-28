@@ -132,6 +132,14 @@
   font-size: 11.5px;
   text-align: right;
 }
+/* An external agent's row: same grid as a resolver row, but nothing to select —
+   it carries its own config, so it is status, not a settings scope. */
+.agentRow {
+  cursor: default;
+}
+.agentRow:hover {
+  background: transparent;
+}
 .dot {
   width: 8px;
   height: 8px;

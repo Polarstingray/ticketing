@@ -242,6 +242,10 @@ export const api = {
     ),
   // The resolver-manager roster: each resolver bot + its live self-reported state.
   listResolvers: () => request("GET", "/resolvers"),
+  // The agent registry (admin): every worker that has ever sent a heartbeat,
+  // our resolver bots and third-party agents alike. Read-only — an external
+  // agent carries its own config, so there is nothing here to edit.
+  listAgents: () => request("GET", "/agents"),
 
   // Chat assistant (optional — hidden entirely when chatConfig().enabled is
   // false). Returns { enabled, model, daily_usd_limit, spent_today_usd }.
