@@ -144,11 +144,11 @@ class LoginRequest(BaseModel):
 # --- Code blocks -------------------------------------------------------------
 
 class CodeBlock(BaseModel):
-    filename: str
+    filename: str = Field(max_length=300, pattern=r'^[^\x00-\x1f]*$')
     line_start: int = Field(ge=1)
     line_end: int = Field(ge=1)
-    content: str
-    language: str = "plaintext"
+    content: str = Field(max_length=102_400)
+    language: str = Field(default="plaintext", max_length=30, pattern=r'^[a-zA-Z0-9_-]*$')
 
 
 # --- Tickets -----------------------------------------------------------------
@@ -161,7 +161,7 @@ class TicketCreate(BaseModel):
     status: TicketStatus = TicketStatus.open
     assigned_to: Optional[int] = None
     due_date: Optional[datetime] = None
-    code_blocks: List[CodeBlock] = Field(default_factory=list)
+    code_blocks: List[CodeBlock] = Field(default_factory=list, max_length=20)
     tags: List[str] = Field(default_factory=list)
 
     @field_validator("tags")

@@ -126,7 +126,7 @@ def test_prompt_builders_inject_command_body():
                    rt.implement_prompt(_T, repo, "plan", command=cmd)):
         assert "DO THE AUDIT" in prompt          # premade prompt present
         assert 'standard "audit" command' in prompt
-        assert "Title: T" in prompt              # ticket context still present
+        assert "Title:\n```\nT\n```" in prompt    # ticket context still present (fenced)
 
 
 def test_orchestrate_prompt_back_compat_and_injection():
