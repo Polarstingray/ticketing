@@ -9,6 +9,23 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 
 ## [Unreleased]
 
+### Added
+- **External agent identity.** A third-party agent can now authenticate as itself without
+  being listed in `RESOLVER_BOT_USER_ID` or promoted to admin. A new admin-granted
+  `agent` API-key scope confers exactly the two *routing* control tags — `parent:<id>` and
+  `review-by:<id>` — and deliberately **not** the *aiming* ones (`repo:`, `rev:`,
+  `branch:`), which point automation at a checkout of the caller's choosing, nor the
+  workflow/safety tags (`claude:*`, `dangerous`, `fix`, `delegate`). It is narrower than
+  the existing `cli` scope, not a superset.
+
+  The resolver registry is generalized to match: `resolver_instances` becomes
+  `agent_instances` (keyed on `user_id` rather than `bot_user_id`), with an agent-neutral
+  `POST /agents/heartbeat` alongside the resolver-only `POST /resolvers/heartbeat`, and an
+  admin `GET /agents` listing every worker that has checked in. Registered third-party
+  workers appear under **Resolvers → External agents** with a freshness dot and a
+  last-seen time. Documented end-to-end (register → subscribe → claim → report) in
+  [docs/external-agents.md](docs/external-agents.md).
+
 ## [1.2.0]
 
 ### Added
