@@ -487,7 +487,9 @@ def render_code_blocks(ticket: dict) -> str:
     parts = ["\nRelevant code (flagged by the reporter):"]
     for b in blocks:
         loc = f"{b.get('filename')}:{b.get('line_start')}-{b.get('line_end')}"
-        lang = b.get("language", "")
+        # An info string is copied straight into the fence header, so strip anything
+        # that isn't a plain language token.
+        lang = re.sub(r"[^a-zA-Z0-9_-]", "", b.get("language", "") or "")
         content = b.get("content", "") or ""
         # Same breakout risk as the title/description: a block whose content holds a
         # ``` line would end the fence early. Size the fence to the content.
