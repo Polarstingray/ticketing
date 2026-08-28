@@ -20,7 +20,15 @@ API_KEY_TOUCH_INTERVAL = timedelta(seconds=60)
 
 # --- Configuration -----------------------------------------------------------
 
-SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-insecure-change-me")
+# No hardcoded fallback: a default baked into the source is a *public* signing
+# key, so anyone holding the repo could forge session cookies for any user. When
+# SESSION_SECRET is unset we mint a random one for this process instead — dev
+# still boots without configuration, but the key is not knowable, and sessions
+# simply do not survive a restart. startup.py turns the unset case into a fatal
+# error in production (and a warning in dev) via SESSION_SECRET_IS_EPHEMERAL.
+_env_session_secret = os.environ.get("SESSION_SECRET", "")
+SESSION_SECRET_IS_EPHEMERAL = not _env_session_secret
+SESSION_SECRET = _env_session_secret or secrets.token_urlsafe(48)
 SESSION_COOKIE = "session"
 SESSION_MAX_AGE = int(os.environ.get("SESSION_MAX_AGE", 60 * 60 * 24 * 14))  # 14 days
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
