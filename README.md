@@ -43,12 +43,12 @@ ticket, which you can inspect but not actually file.
 
 ## Walkthrough
 
-![Walkthrough: the backlog, a resolver-worked ticket's cost timeline, the delegation rollup, and a create → comment → resolve loop](docs/video/walkthrough.gif)
+![Walkthrough: the backlog, a resolver-worked ticket's cost timeline, the chat assistant, the delegation rollup, and a create → comment → resolve loop](docs/video/walkthrough.gif)
 
 No narration: sign in → the backlog → **filtering it down by tag** and re-sorting by
 priority → a code-review ticket **the AI resolver worked**, showing what each phase cost →
-the **delegation rollup** totalling the spend of sub-tasks it fanned out → a human
-create → comment → resolve loop.
+the **chat assistant** answering a question about that ticket → the **delegation rollup**
+totalling the spend of sub-tasks it fanned out → a human create → comment → resolve loop.
 ([Higher-quality MP4](docs/video/walkthrough.mp4) · recorded from the real app by
 [`frontend/scripts/record-walkthrough.mjs`](./frontend/scripts/record-walkthrough.mjs).)
 
@@ -209,7 +209,12 @@ The walkthrough and the screenshots at the top of this README both come from tha
 container, so they can be regenerated whenever the UI changes:
 
 ```bash
-docker run -d --name stingray-demo-rec -p 3200:3000 stingray-demo
+docker run -d --name stingray-demo-rec -p 3200:3000 \
+  -e CHAT_API_URL=https://openrouter.ai/api/v1/chat/completions \
+  -e CHAT_API_KEY="sk-or-v1-..." \
+  -e CHAT_API_MODEL=openai/gpt-4o-mini \
+  -e READ_ONLY=false \
+  stingray-demo
 
 cd frontend
 node scripts/capture-screenshots.mjs    # -> docs/img/*.png
