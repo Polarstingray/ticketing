@@ -2,17 +2,29 @@
  * Record the demo walkthrough as a video.
  *
  * Drives the demo container (deploy/demo/) with a real browser and captures a
- * ~90s tour: the board, filtering it down by tag and re-sorting, the resolver's
- * costed agent-run timeline, the delegation rollup, and one human
- * create → comment → resolve loop.
+ * ~100s tour: the board, filtering it down by tag and re-sorting, the resolver's
+ * costed agent-run timeline, the chat assistant answering a question about that
+ * ticket, the delegation rollup, and one human create → comment → resolve loop.
  *
  * This is a recording, not a test — it lives outside e2e/ so `npm run test:e2e`
  * (and CI) never picks it up. It expects the demo's seeded data, so point it at
  * a demo container, never a real instance:
  *
  *   docker build -f deploy/demo/Dockerfile -t stingray-demo .
- *   docker run -d --name stingray-demo-rec -p 3200:3000 stingray-demo
+ *   docker run -d --name stingray-demo-rec -p 3200:3000 \
+ *     -e CHAT_API_URL=https://openrouter.ai/api/v1/chat/completions \
+ *     -e CHAT_API_KEY="sk-or-v1-..." \
+ *     -e CHAT_API_MODEL=openai/gpt-4o-mini \
+ *     -e READ_ONLY=false \
+ *     stingray-demo
  *   cd frontend && node scripts/record-walkthrough.mjs
+ *
+ * The chat beat below waits on the real assistant response, so CHAT_API_KEY
+ * must be a working key when recording — without it the launcher never
+ * renders (config.enabled is false) and that beat throws. READ_ONLY=false is
+ * just as load-bearing: the image defaults to READ_ONLY=true (right, for the
+ * public Fly demo), and the scene 5 create → comment → resolve loop 403s
+ * without this override — it's only the Fly deploy that should stay read-only.
  *
  * Output: docs/video/walkthrough.webm (+ the raw Playwright capture).
  * Pacing is deliberate — the pauses are what make it watchable, so the wall-clock
@@ -82,6 +94,23 @@ async function main() {
   // Scroll the timeline into frame and let it sit — this is the differentiator.
   await page.getByRole("heading", { name: "Agent runs" }).scrollIntoViewIfNeeded();
   await pause(page, BEAT.settle * 2);
+
+  // --- 3b. The chat assistant: ask it about the ticket we're already on -------
+  await page.getByLabel("Open the assistant").click();
+  await page.getByLabel("Assistant").waitFor();
+  await pause(page, BEAT.tick);
+  await page
+    .getByLabel("Message")
+    .type("What's this ticket about, and what's the resolver's plan?", { delay: 30 });
+  await pause(page, BEAT.tick);
+  await page.getByRole("button", { name: "Send" }).click();
+  // Streaming swaps Send for Stop; wait for the real answer to finish before
+  // reading it back, then let the finished reply sit on screen.
+  await page.getByRole("button", { name: "Stop" }).waitFor();
+  await page.getByRole("button", { name: "Stop" }).waitFor({ state: "hidden", timeout: 60_000 });
+  await pause(page, BEAT.settle * 2);
+  await page.getByLabel("Close").click();
+  await pause(page, BEAT.tick);
 
   // --- 4. Delegation: cost rolling up across the fan-out ----------------------
   await page.getByRole("link", { name: /Tickets/ }).first().click();
