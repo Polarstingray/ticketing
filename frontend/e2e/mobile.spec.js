@@ -23,10 +23,16 @@ test("ticket list: no horizontal overflow", async ({ page }) => {
 test("ticket list: titles are not clipped to nothing", async ({ page }) => {
   await login(page);
 
+  // Create a ticket to inspect rather than depending on seed data or another
+  // spec having run first — those aren't guaranteed at this point.
+  await page.goto("/tickets/new");
+  await page.locator("form input[required]").fill(`Mobile clipping check ${Date.now()}`);
+  await page.getByRole("button", { name: "Create ticket" }).click();
+  await expect(page).toHaveURL(/\/tickets\/\d+$/);
+
+  await page.goto("/tickets");
   const titles = page.locator("[class*='rowTitle']");
-  const count = await titles.count();
-  // Fail loudly if there are no tickets — the test environment needs seed data.
-  expect(count).toBeGreaterThan(0);
+  await expect(titles.first()).toBeVisible();
   const box = await titles.first().boundingBox();
   expect(box?.width).toBeGreaterThan(50);
 });
