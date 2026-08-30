@@ -19,7 +19,7 @@ export default function Sidebar() {
   // Close on outside click or Escape, same convention as StatusDropdown/AssigneeDropdown.
   useEffect(() => {
     if (!expanded) return;
-    function onPointerDown(e) {
+    function onMouseDown(e) {
       if (!rootRef.current?.contains(e.target)) setExpanded(false);
     }
     function onKey(e) {
@@ -28,10 +28,10 @@ export default function Sidebar() {
         toggleRef.current?.focus();
       }
     }
-    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("mousedown", onMouseDown);
     document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("mousedown", onMouseDown);
       document.removeEventListener("keydown", onKey);
     };
   }, [expanded]);
