@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Stingray Tickets", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="Stingray Tickets", version="1.3.0", lifespan=lifespan)
 
 # Rate limiting (slowapi). Routers reach the limiter via app.state.limiter / the
 # shared ratelimit module; RateLimitExceeded is rendered as HTTP 429 with a
