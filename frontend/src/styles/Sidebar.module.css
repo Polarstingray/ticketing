@@ -1,11 +1,22 @@
 /* Always a fixed-width icon rail — the expanded panel overlays it rather than
-   pushing .content, so this width never changes. */
+   pushing .content, so this width never changes.
+
+   z-index lives here, not just on .navExpanded: position:sticky makes .sidebar
+   its own stacking context, and a z-index set only on the child would merely
+   win *inside* that context. .content sits later in the DOM and has its own
+   positioned descendants (sticky filter panel, open dropdowns, sticky table
+   headers) that establish separate stacking contexts of their own — without an
+   explicit z-index here, .sidebar's whole subtree has no defined priority
+   against those and loses to some, wins against others, depending on DOM
+   order. Matching --z-dropdown (the anchored-popup layer) makes the expanded
+   panel consistently outrank ordinary page content. */
 .sidebar {
   flex: none;
   width: 56px;
   position: sticky;
   top: var(--topbar-h);
   height: calc(100vh - var(--topbar-h));
+  z-index: var(--z-dropdown);
   border-right: 1px solid var(--border);
   background: var(--surface);
   padding: 8px;
