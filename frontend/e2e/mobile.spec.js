@@ -23,13 +23,18 @@ test("ticket list: no horizontal overflow", async ({ page }) => {
 test("ticket list: titles are not clipped to nothing", async ({ page }) => {
   await login(page);
 
-  // At least one ticket row title should be visible and have non-zero width.
+  // Create a ticket to inspect rather than depending on seed data or another
+  // spec having run first — those aren't guaranteed at this point.
+  await page.goto("/tickets/new");
+  await page.locator("form input[required]").fill(`Mobile clipping check ${Date.now()}`);
+  await page.getByRole("button", { name: "Create ticket" }).click();
+  await expect(page).toHaveURL(/\/tickets\/\d+$/);
+
+  await page.goto("/tickets");
   const titles = page.locator("[class*='rowTitle']");
-  const count = await titles.count();
-  if (count > 0) {
-    const box = await titles.first().boundingBox();
-    expect(box?.width).toBeGreaterThan(50);
-  }
+  await expect(titles.first()).toBeVisible();
+  const box = await titles.first().boundingBox();
+  expect(box?.width).toBeGreaterThan(50);
 });
 
 test("hamburger opens and closes nav drawer", async ({ page }) => {
@@ -51,6 +56,17 @@ test("hamburger opens and closes nav drawer", async ({ page }) => {
   // Clicking a nav link closes the drawer.
   await page.getByRole("link", { name: "Profile" }).click();
   await expect(page).toHaveURL(/\/profile/);
+  await expect(hamburger).toHaveAttribute("aria-expanded", "false");
+});
+
+test("hamburger: Escape closes the nav drawer", async ({ page }) => {
+  await login(page);
+
+  const hamburger = page.getByRole("button", { name: "Menu" });
+  await hamburger.click();
+  await expect(hamburger).toHaveAttribute("aria-expanded", "true");
+
+  await page.keyboard.press("Escape");
   await expect(hamburger).toHaveAttribute("aria-expanded", "false");
 });
 

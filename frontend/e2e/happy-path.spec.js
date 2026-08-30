@@ -3,6 +3,15 @@ import { test, expect } from "@playwright/test";
 // A stable title so we can find the ticket again on the list page.
 const TITLE = "Batch the activity-feed queries";
 
+// Below 900px the nav lives in a hamburger drawer that's closed by default;
+// open it first so the links inside are clickable.
+async function openMobileNavIfCollapsed(page) {
+  const hamburger = page.getByRole("button", { name: "Menu" });
+  if (await hamburger.isVisible()) {
+    await hamburger.click();
+  }
+}
+
 test("log in, create a ticket, comment, and resolve it", async ({ page }) => {
   // --- Login -----------------------------------------------------------------
   await page.goto("/login");
@@ -55,6 +64,7 @@ test("log in, create a ticket, comment, and resolve it", async ({ page }) => {
   await expect(page.getByText(/changed status .* to Resolved/).first()).toBeVisible();
 
   // --- Back to the list ------------------------------------------------------
+  await openMobileNavIfCollapsed(page);
   await page.getByRole("link", { name: /Tickets/ }).first().click();
   await expect(page).toHaveURL(/\/tickets$/);
   await expect(page.getByText(TITLE).first()).toBeVisible();
