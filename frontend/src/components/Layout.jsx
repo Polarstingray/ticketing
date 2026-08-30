@@ -3,7 +3,20 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useNotifications } from "../notifications/NotificationsContext";
 import ChatWidget from "./ChatWidget";
-import { BellIcon, StingrayIcon } from "./icons";
+import Sidebar from "./Sidebar";
+import {
+  BellIcon,
+  DashboardIcon,
+  GuideIcon,
+  HookIcon,
+  MenuIcon,
+  NewIcon,
+  RobotIcon,
+  SettingsIcon,
+  StingrayIcon,
+  UserIcon,
+  UsersIcon,
+} from "./icons";
 import styles from "../styles/Layout.module.css";
 
 export default function Layout() {
@@ -59,9 +72,7 @@ export default function Layout() {
           aria-controls="main-nav"
           onClick={() => setMenuOpen((o) => !o)}
         >
-          <span className={styles.hamburgerLine} />
-          <span className={styles.hamburgerLine} />
-          <span className={styles.hamburgerLine} />
+          <MenuIcon size={20} />
         </button>
         <div className={styles.brand}>
           <StingrayIcon size={20} className={styles.logo} />
@@ -69,23 +80,15 @@ export default function Layout() {
         </div>
         <nav id="main-nav" className={`${styles.nav} ${menuOpen ? styles.navOpen : ""}`}>
           <NavLink to="/tickets" className={linkClass}>
+            <DashboardIcon size={16} className={styles.navIcon} />
             Tickets
           </NavLink>
           <NavLink to="/tickets/new" className={linkClass}>
+            <NewIcon size={16} className={styles.navIcon} />
             New
           </NavLink>
-          {user?.role === "admin" && (
-            <NavLink to="/admin/users" className={linkClass}>
-              Users
-            </NavLink>
-          )}
-          {user?.role === "admin" && (
-            <NavLink to="/admin/resolver-settings" className={linkClass}>
-              Resolvers
-            </NavLink>
-          )}
           <NavLink to="/notifications" className={linkClass}>
-            <BellIcon size={16} className={styles.bell} />
+            <BellIcon size={16} className={styles.navIcon} />
             Notifications
             {unreadCount > 0 && (
               <span className={styles.badge}>
@@ -93,17 +96,54 @@ export default function Layout() {
               </span>
             )}
           </NavLink>
-          <NavLink to="/profile" className={linkClass}>
+          <NavLink to="/guide" className={linkClass}>
+            <GuideIcon size={16} className={styles.navIcon} />
+            Guide
+          </NavLink>
+          {/* Below: items that live in the sidebar on desktop. Hidden here at
+              desktop widths (.sidebarOnly) so they aren't shown twice; the
+              sidebar takes over at that breakpoint. Kept in this same drawer
+              nav so mobile has a single unified menu, not a second one. */}
+          <div className={styles.navDivider} aria-hidden="true" />
+          {user?.role === "admin" && (
+            <NavLink
+              to="/admin/users"
+              className={({ isActive }) => `${linkClass({ isActive })} ${styles.sidebarOnly}`}
+            >
+              <UsersIcon size={16} className={styles.navIcon} />
+              Users
+            </NavLink>
+          )}
+          {user?.role === "admin" && (
+            <NavLink
+              to="/admin/resolver-settings"
+              className={({ isActive }) => `${linkClass({ isActive })} ${styles.sidebarOnly}`}
+            >
+              <RobotIcon size={16} className={styles.navIcon} />
+              Resolvers
+            </NavLink>
+          )}
+          <NavLink
+            to="/profile"
+            className={({ isActive }) => `${linkClass({ isActive })} ${styles.sidebarOnly}`}
+          >
+            <UserIcon size={16} className={styles.navIcon} />
             Profile
           </NavLink>
-          <NavLink to="/settings" className={linkClass} end>
+          <NavLink
+            to="/settings"
+            end
+            className={({ isActive }) => `${linkClass({ isActive })} ${styles.sidebarOnly}`}
+          >
+            <SettingsIcon size={16} className={styles.navIcon} />
             Settings
           </NavLink>
-          <NavLink to="/settings/webhooks" className={linkClass}>
+          <NavLink
+            to="/settings/webhooks"
+            className={({ isActive }) => `${linkClass({ isActive })} ${styles.sidebarOnly}`}
+          >
+            <HookIcon size={16} className={styles.navIcon} />
             Webhooks
-          </NavLink>
-          <NavLink to="/guide" className={linkClass}>
-            Guide
           </NavLink>
           {/* In the mobile drawer the userbox moves here so it's reachable. */}
           <div className={styles.drawerUserbox}>
@@ -116,9 +156,12 @@ export default function Layout() {
           <button onClick={handleLogout}>Log out</button>
         </div>
       </header>
-      <main className={styles.content}>
-        <Outlet />
-      </main>
+      <div className={styles.body}>
+        <Sidebar />
+        <main className={styles.content}>
+          <Outlet />
+        </main>
+      </div>
       {/* Present on every authenticated page; renders nothing when the
           deployment has no model configured. */}
       <ChatWidget />
