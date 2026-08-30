@@ -9,7 +9,18 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-30
+
 ### Added
+- **Collapsible sidebar with icon nav.** Users, Resolvers, Profile, Settings, and
+  Webhooks move out of the top bar into a new left sidebar, GitHub-style: a fixed icon
+  rail with a menu-icon toggle at the top that expands into an overlay panel (it covers
+  the rail rather than pushing page content, with a close button in its top-right corner),
+  closing on outside click, Escape, or navigating to a link. Tickets, New, Notifications,
+  and Guide stay in the top bar; every nav item — top bar and sidebar alike — now carries
+  an icon. On mobile the sidebar disappears entirely and its items merge into the existing
+  hamburger drawer, so there's a single unified mobile menu rather than a second one, with
+  a divider separating the two groups.
 - **Explicit claim/lease API for ticket workers.** Claiming a ticket used to be implicit:
   the resolver took everything assigned to its bot id and stamped `resolver:*` tags on it,
   which is safe only because systemd runs exactly one sweep per bot. Opening the queue to
@@ -357,5 +368,7 @@ The version of record is the `version` in `backend/main.py` and `frontend/packag
 - Docker Compose deployment (nginx-served SPA proxying `/api`), SQLite with online backups,
   and CI running backend/resolver tests, lint, and the frontend build.
 
-[Unreleased]: https://github.com/Polarstingray/ticketing/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Polarstingray/ticketing/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/Polarstingray/ticketing/compare/v1.1.0...v1.3.0
+[1.1.0]: https://github.com/Polarstingray/ticketing/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Polarstingray/ticketing/releases/tag/v1.0.0

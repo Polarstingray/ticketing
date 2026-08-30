@@ -54,11 +54,11 @@ primary_region = "iad"
   # deliberately absent from both — see the header comment and `fly secrets set`.
   READ_ONLY = "true"
   SHOW_DEMO_CREDENTIALS = "true"
-  CHAT_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-  CHAT_API_MODEL = "openai/gpt-4o-mini"
-  CHAT_PRICE_IN = "0.15"
-  CHAT_PRICE_OUT = "0.60"
-  CHAT_DAILY_USD_LIMIT = "2.00"
+  CHAT_API_URL = "https://api.mistral.ai/v1/chat/completions"
+  CHAT_API_MODEL = "ministral-3b-latest"
+  CHAT_PRICE_IN = "0.00010"
+  CHAT_PRICE_OUT = "0.00010"
+  CHAT_DAILY_USD_LIMIT = "1.00"
   CHAT_RATE_LIMIT = "5/minute"
   # The AI resolver is a separate process and is intentionally NOT deployed here:
   # it needs provider API keys and push access to a real repo. The demo ships
