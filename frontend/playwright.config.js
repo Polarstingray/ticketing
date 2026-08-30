@@ -33,7 +33,10 @@ export default defineConfig({
     trace: "on-first-retry",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    { name: "mobile", use: { ...devices["Pixel 5"] } },
+  ],
   // Dedicated ports (not the dev defaults 8000/5173) so a running dev stack — or
   // another app squatting on :8000 — doesn't collide with the E2E run.
   webServer: [

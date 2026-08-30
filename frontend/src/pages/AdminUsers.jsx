@@ -143,46 +143,48 @@ export default function AdminUsers() {
         </form>
       )}
 
-      <table className={styles.table}>
-        <thead>
-          <tr>
-            <th>Username</th>
-            <th>Display name</th>
-            <th>Email</th>
-            <th>Role</th>
-            <th>Created</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((u) => (
-            <tr key={u.id}>
-              <td>{u.username}</td>
-              <td>{u.display_name}</td>
-              <td className={styles.dim}>{u.email}</td>
-              <td>
-                <select
-                  value={u.role}
-                  disabled={u.id === me.id}
-                  onChange={(e) => changeRole(u, e.target.value)}
-                  className={styles.roleSelect}
-                >
-                  <option value="member">member</option>
-                  <option value="admin">admin</option>
-                </select>
-              </td>
-              <td className={styles.dim}>{formatDate(u.created_at)}</td>
-              <td style={{ textAlign: "right" }}>
-                {u.id !== me.id && (
-                  <button className="danger" onClick={() => removeUser(u)}>
-                    Delete
-                  </button>
-                )}
-              </td>
+      <div className={styles.tableScroll}>
+        <table className={styles.table}>
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Display name</th>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Created</th>
+              <th></th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {users.map((u) => (
+              <tr key={u.id}>
+                <td>{u.username}</td>
+                <td>{u.display_name}</td>
+                <td className={styles.dim}>{u.email}</td>
+                <td>
+                  <select
+                    value={u.role}
+                    disabled={u.id === me.id}
+                    onChange={(e) => changeRole(u, e.target.value)}
+                    className={styles.roleSelect}
+                  >
+                    <option value="member">member</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </td>
+                <td className={styles.dim}>{formatDate(u.created_at)}</td>
+                <td style={{ textAlign: "right" }}>
+                  {u.id !== me.id && (
+                    <button className="danger" onClick={() => removeUser(u)}>
+                      Delete
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

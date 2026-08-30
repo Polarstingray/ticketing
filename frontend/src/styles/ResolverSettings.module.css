@@ -196,3 +196,21 @@
   color: var(--text-dim);
   font-size: 12px;
 }
+
+@media (max-width: 640px) {
+  .field {
+    grid-template-columns: 1fr;
+  }
+  .rosterRow {
+    grid-template-columns: 12px 1fr;
+    grid-template-rows: auto auto;
+  }
+  .rosterGlobal {
+    grid-template-columns: 1fr;
+  }
+  .rosterEnv,
+  .rosterMeta {
+    grid-column: 2;
+    text-align: left;
+  }
+}
