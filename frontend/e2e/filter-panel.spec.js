@@ -18,6 +18,16 @@ async function login(page) {
 // them positionally the way happy-path.spec.js does.
 const TAG_FIELD = 'label:text-is("Tags (comma-separated)") + input';
 
+// Below 900px the filter panel lives in a collapsed drawer toggled by a
+// "Filters" disclosure button; open it first so the controls inside are
+// reachable.
+async function openFilterPanelIfCollapsed(page) {
+  const disclosure = page.getByRole("button", { name: /^Filters/ });
+  if (await disclosure.isVisible()) {
+    await disclosure.click();
+  }
+}
+
 async function createTicket(page, title, tags, priority) {
   await page.goto("/tickets/new");
   await page.locator("form input[required]").fill(title);
@@ -46,6 +56,7 @@ test("filter the dashboard by several tags, share the URL, and save the view", a
   await expect(list).toHaveCount(3);
 
   // --- Select two tags; "All" is the default, so this narrows to the overlap ---
+  await openFilterPanelIfCollapsed(page);
   await page.getByRole("checkbox", { name: TAG_A, exact: true }).check();
   await expect(page.locator("a", { hasText: RUN })).toHaveCount(2);
 
@@ -68,6 +79,10 @@ test("filter the dashboard by several tags, share the URL, and save the view", a
   await page.reload();
   await expect(page.getByText(both)).toBeVisible();
   await expect(page.locator("a", { hasText: RUN })).toHaveCount(1);
+
+  // The reload resets the panel's local open/closed state, so it's collapsed
+  // again on mobile.
+  await openFilterPanelIfCollapsed(page);
 
   // --- Save it, clear, and get back to it -------------------------------------
   const viewName = `Overlap ${RUN}`;
@@ -100,6 +115,7 @@ test("a filtered view survives opening a ticket and going back", async ({ page }
   await page.goBack();
   // The filter came back with the URL rather than being lost to component state.
   await expect(page).toHaveURL(new RegExp(`tag=${TAG_A}`));
+  await openFilterPanelIfCollapsed(page);
   await expect(page.getByRole("checkbox", { name: TAG_A, exact: true })).toBeChecked();
 });
 

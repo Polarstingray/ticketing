@@ -132,6 +132,11 @@
   color: var(--text-dim);
 }
 
+.tableScroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* --- delivery log ---------------------------------------------------------- */
 .linkBtn {
   background: none;
