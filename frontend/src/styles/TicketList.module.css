@@ -261,9 +261,76 @@
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 640px) {
   .assignee,
   .date {
+    display: none;
+  }
+
+  /* Stack the row so the side panel doesn't eat the title. */
+  .row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  /* Title wraps to two lines instead of ellipsizing to nothing. */
+  .rowTitle {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* Side controls flow beneath the title. */
+  .rowSide {
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-start;
+    flex-shrink: 1;
+  }
+
+  /* Tags wrap freely — never clip them. */
+  .rowMeta {
+    max-height: none;
+  }
+
+  /* Long tag chips can't push the page wide. */
+  .chip {
+    max-width: 100%;
+  }
+
+  /* Head controls: sort takes full width, density + new-ticket share next line. */
+  .head h1 {
+    font-size: 18px;
+  }
+  .sort {
+    flex: 1 1 100%;
+  }
+  .sort select {
+    min-width: 0;
+    flex: 1;
+  }
+
+  /* Compact mode on mobile: single-line scannable rows. */
+  .rowCompact {
+    flex-direction: row;
+    align-items: center;
+    padding: 6px 12px;
+  }
+  .rowCompact .rowTitle {
+    white-space: nowrap;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .rowCompact .rowSide {
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+  }
+  .rowCompact .rowSide > *:not(:first-child):not(:nth-child(2)) {
     display: none;
   }
 }
