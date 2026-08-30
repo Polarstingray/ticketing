@@ -45,7 +45,7 @@ export default function Sidebar() {
         ref={toggleRef}
         type="button"
         className={styles.toggle}
-        aria-label="Menu"
+        aria-label="Toggle sidebar"
         aria-expanded={expanded}
         onClick={() => setExpanded((e) => !e)}
       >
@@ -56,7 +56,7 @@ export default function Sidebar() {
           <button
             type="button"
             className={styles.close}
-            aria-label="Close menu"
+            aria-label="Close sidebar"
             onClick={() => setExpanded(false)}
           >
             ×
