@@ -398,3 +398,13 @@
   color: var(--danger);
   font-size: 12px;
 }
+
+@media (max-width: 640px) {
+  .panel {
+    right: 8px;
+    left: 8px;
+    bottom: 8px;
+    width: auto;
+    height: min(70vh, calc(100vh - var(--topbar-h) - 16px));
+  }
+}

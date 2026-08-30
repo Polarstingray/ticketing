@@ -250,4 +250,20 @@
   .sidebar {
     position: static;
   }
+  .commentHead {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .titleRow h1 {
+    font-size: 18px;
+    overflow-wrap: anywhere;
+  }
+  .meta {
+    grid-template-columns: 1fr;
+  }
+  .meta dd {
+    text-align: left;
+  }
 }

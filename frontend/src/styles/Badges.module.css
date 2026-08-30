@@ -130,7 +130,7 @@
 }
 /* Long display names truncate rather than stretching the row. */
 .assigneeName {
-  max-width: 140px;
+  max-width: min(140px, 40vw);
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -138,4 +138,25 @@
   min-width: 200px;
   max-height: 260px;
   overflow-y: auto;
+}
+
+/* Keep menus inside the viewport on narrow screens. */
+.statusMenu {
+  max-width: calc(100vw - 24px);
+}
+
+@media (max-width: 640px) {
+  /* Menus open inward from the left so they don't run off the right edge. */
+  .statusMenu {
+    left: 0;
+    right: auto;
+  }
+
+  /* Bigger tap targets for status options. */
+  .statusTrigger {
+    min-height: 32px;
+  }
+  .statusOption {
+    padding: 8px 6px;
+  }
 }
