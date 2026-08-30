@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useNotifications } from "../notifications/NotificationsContext";
@@ -12,17 +12,29 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const hamburgerRef = useRef(null);
 
   // Close the drawer whenever the route changes.
   useEffect(() => {
     setMenuOpen(false);
   }, [location.pathname]);
 
-  // Close the drawer on Escape.
+  // Lock body scroll while the drawer is open.
+  useEffect(() => {
+    document.body.style.overflow = menuOpen ? "hidden" : "";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [menuOpen]);
+
+  // Close the drawer on Escape; return focus to the hamburger button.
   useEffect(() => {
     if (!menuOpen) return;
     function onKey(e) {
-      if (e.key === "Escape") setMenuOpen(false);
+      if (e.key === "Escape") {
+        setMenuOpen(false);
+        hamburgerRef.current?.focus();
+      }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -40,6 +52,7 @@ export default function Layout() {
     <div className={styles.shell}>
       <header className={styles.topbar}>
         <button
+          ref={hamburgerRef}
           className={styles.hamburger}
           aria-label="Menu"
           aria-expanded={menuOpen}

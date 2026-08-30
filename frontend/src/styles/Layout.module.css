@@ -101,9 +101,10 @@
   flex-direction: column;
   justify-content: center;
   gap: 5px;
-  width: 36px;
-  height: 36px;
-  padding: 6px;
+  /* 44×44 meets WCAG 2.5.5 touch target size. */
+  width: 44px;
+  height: 44px;
+  padding: 10px;
   background: none;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -121,6 +122,10 @@
 /* Userbox inside the nav drawer (mobile only). */
 .drawerUserbox {
   display: none;
+}
+
+.brandText {
+  /* shown by default; hidden at 640px */
 }
 
 @media (max-width: 900px) {

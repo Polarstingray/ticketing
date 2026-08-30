@@ -7,11 +7,21 @@ async function loginAs(page, username, password) {
   await page.getByRole("button", { name: "Sign in" }).click();
 }
 
+// Below 900px the nav (including "Log out") lives in a hamburger drawer that's
+// closed by default; open it first so the links/buttons inside are clickable.
+async function openMobileNavIfCollapsed(page) {
+  const hamburger = page.getByRole("button", { name: "Menu" });
+  if (await hamburger.isVisible()) {
+    await hamburger.click();
+  }
+}
+
 test("resolver manager: admin edits the global default, it persists", async ({ page }) => {
   await loginAs(page, "admin", "adminpass123");
   await expect(page).toHaveURL(/\/tickets$/);
 
   // The admin-only "Resolvers" nav link deep-links to the manager.
+  await openMobileNavIfCollapsed(page);
   await page.getByRole("link", { name: "Resolvers" }).click();
   await expect(page).toHaveURL(/\/admin\/resolver-settings$/);
   await expect(page.getByRole("heading", { name: "Resolvers", level: 1 })).toBeVisible();
@@ -57,10 +67,13 @@ test("resolver manager: roster lists a resolver and edits are scoped to it", asy
   expect(hb.status()).toBe(200);
 
   // The roster shows the resolver by its reported name + env-file label.
+  await openMobileNavIfCollapsed(page);
   await page.getByRole("link", { name: "Resolvers" }).click();
   const row = page.getByRole("button", { name: new RegExp(`gemini-${uniq}`) });
   await expect(row).toBeVisible();
-  await expect(page.getByText(".env.gemini")).toBeVisible();
+  // Scoped to this row: other resolver bots created elsewhere in the suite can
+  // share the same ".env.gemini" label.
+  await expect(row.getByText(".env.gemini")).toBeVisible();
 
   // Select it and save a value scoped to THIS resolver.
   await row.click();
@@ -90,6 +103,7 @@ test("resolver manager: a non-admin is redirected away", async ({ page }) => {
   });
   expect(res.status()).toBe(201);
 
+  await openMobileNavIfCollapsed(page);
   await page.getByRole("button", { name: "Log out" }).click();
   await loginAs(page, username, "member123");
   await expect(page).toHaveURL(/\/tickets$/);
