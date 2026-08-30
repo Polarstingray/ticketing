@@ -53,13 +53,24 @@
   color: var(--text);
 }
 
-.bell {
+.navIcon {
   margin-right: 4px;
   /* The link is inline text, not flex, and everything else in it (Notifications,
      the count badge) still needs to sit in that flow — so this corrects the
      baseline sink of the one child that's an <svg> rather than adding flex to
      .navLink, which would touch every plain-text link too. */
   vertical-align: -3px;
+}
+
+/* Items that moved into the sidebar on desktop: hidden in the top-bar/drawer
+   nav at desktop widths (the sidebar owns them there), shown again inside the
+   drawer below 900px so mobile keeps a single, unified menu. */
+.sidebarOnly {
+  display: none;
+}
+
+.navDivider {
+  display: none;
 }
 .badge {
   display: inline-block;
@@ -87,8 +98,15 @@
   font-size: 13px;
 }
 
+/* Row below the topbar: the sidebar and the routed page content. */
+.body {
+  display: flex;
+  flex: 1;
+}
+
 .content {
   flex: 1;
+  min-width: 0;
   width: 100%;
   max-width: 1080px;
   margin: 0 auto;
@@ -98,9 +116,8 @@
 /* Hamburger: hidden on desktop, shown below 900px. */
 .hamburger {
   display: none;
-  flex-direction: column;
+  align-items: center;
   justify-content: center;
-  gap: 5px;
   /* 44×44 meets WCAG 2.5.5 touch target size. */
   width: 44px;
   height: 44px;
@@ -110,13 +127,7 @@
   border-radius: var(--radius);
   cursor: pointer;
   flex-shrink: 0;
-}
-.hamburgerLine {
-  display: block;
-  width: 100%;
-  height: 2px;
-  background: var(--text);
-  border-radius: 1px;
+  color: var(--text);
 }
 
 /* Userbox inside the nav drawer (mobile only). */
@@ -153,6 +164,18 @@
   .navLink {
     padding: 10px 16px;
     border-radius: 0;
+  }
+
+  /* The sidebar disappears at this breakpoint (Sidebar.module.css), so its
+     items reappear here in the merged drawer. */
+  .sidebarOnly {
+    display: flex;
+    align-items: center;
+  }
+  .navDivider {
+    display: block;
+    margin: 6px 16px;
+    border-top: 1px solid var(--border);
   }
 
   /* The desktop userbox is hidden; the one inside the drawer is shown. */
