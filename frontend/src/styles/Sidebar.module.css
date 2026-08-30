@@ -87,7 +87,6 @@
   border-right: 1px solid var(--border);
   box-shadow: 4px 0 16px rgba(0, 0, 0, 0.35);
   padding: 52px 8px 8px;
-  z-index: var(--z-dropdown);
 }
 .navExpanded .label {
   display: inline;
