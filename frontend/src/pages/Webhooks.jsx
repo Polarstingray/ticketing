@@ -114,6 +114,7 @@ function DeliveryLog({ webhookId }) {
       ) : page.items.length === 0 ? (
         <p className="muted">No deliveries yet.</p>
       ) : (
+        <div className={styles.tableScroll}>
         <table className={styles.table}>
           <thead>
             <tr>
@@ -165,6 +166,7 @@ function DeliveryLog({ webhookId }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
 
       <div className={styles.pager}>

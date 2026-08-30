@@ -147,3 +147,9 @@
   margin-top: 3px;
   flex: none;
 }
+
+@media (max-width: 640px) {
+  .info {
+    grid-template-columns: 1fr;
+  }
+}
