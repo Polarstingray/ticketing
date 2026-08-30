@@ -19,6 +19,9 @@
   --z-sticky: 10; /* sticky chrome: topbar, filter panel */
   --z-dropdown: 200; /* menus anchored to a control (StatusDropdown) */
   --z-chat: 300; /* the chat popup and its launcher, above page chrome */
+  /* Responsive breakpoints (used consistently across all modules):
+     900px — tablet: filter rail collapses, hamburger nav appears
+     640px — phone: ticket rows stack, single-column layouts, bigger tap targets */
 }
 
 * {
@@ -146,4 +149,21 @@ label {
   display: flex;
   gap: 10px;
   align-items: center;
+}
+
+@media (max-width: 640px) {
+  button,
+  input,
+  select {
+    /* Nudge vertical padding so interactive controls meet ~40px tap height. */
+    min-height: 40px;
+  }
+  /* Inline-flow buttons (chipClear, small action buttons) should not be forced to 40px. */
+  button[style*="padding"],
+  .chip button {
+    min-height: unset;
+  }
+  body {
+    overflow-wrap: anywhere;
+  }
 }

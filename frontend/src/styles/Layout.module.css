@@ -94,3 +94,86 @@
   margin: 0 auto;
   padding: 24px 20px 64px;
 }
+
+/* Hamburger: hidden on desktop, shown below 900px. */
+.hamburger {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  /* 44×44 meets WCAG 2.5.5 touch target size. */
+  width: 44px;
+  height: 44px;
+  padding: 10px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.hamburgerLine {
+  display: block;
+  width: 100%;
+  height: 2px;
+  background: var(--text);
+  border-radius: 1px;
+}
+
+/* Userbox inside the nav drawer (mobile only). */
+.drawerUserbox {
+  display: none;
+}
+
+.brandText {
+  /* shown by default; hidden at 640px */
+}
+
+@media (max-width: 900px) {
+  .hamburger {
+    display: flex;
+  }
+
+  /* Nav collapses off-screen by default; .navOpen reveals it as a drawer. */
+  .nav {
+    display: none;
+    position: absolute;
+    top: var(--topbar-h);
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    z-index: var(--z-sticky);
+    padding: 8px 0 12px;
+    gap: 2px;
+  }
+  .navOpen {
+    display: flex;
+  }
+  .navLink {
+    padding: 10px 16px;
+    border-radius: 0;
+  }
+
+  /* The desktop userbox is hidden; the one inside the drawer is shown. */
+  .userbox {
+    display: none;
+  }
+  .drawerUserbox {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+}
+
+@media (max-width: 640px) {
+  .brandText {
+    display: none;
+  }
+  .content {
+    padding: 16px 12px 48px;
+  }
+}
