@@ -18,6 +18,7 @@ const NotificationsContext = createContext({
   unreadTicketIds: EMPTY_TICKET_IDS,
   refresh: () => {},
   pageTitleEnabled: false,
+  refreshPreferences: () => {},
 });
 
 const POLL_MS = 30000;
@@ -30,6 +31,21 @@ export function NotificationsProvider({ children }) {
   const [unreadCount, setUnreadCount] = useState(0);
   const [unreadTicketIds, setUnreadTicketIds] = useState(EMPTY_TICKET_IDS);
   const [pageTitleEnabled, setPageTitleEnabled] = useState(false);
+
+  const refreshPreferences = useCallback(async () => {
+    if (!user) { setPageTitleEnabled(false); return; }
+    try {
+      const { items } = await api.getNotificationPreferences();
+      const pageTitleItems = items.filter((i) => i.channel === "page_title");
+      // Sparse/opt-out model: no rows means enabled; enabled if any row is enabled.
+      const anyEnabled = pageTitleItems.length === 0 || pageTitleItems.some((i) => i.enabled);
+      setPageTitleEnabled(anyEnabled);
+    } catch (e) {
+      // On error, default to enabled to maintain the opt-out invariant.
+      console.error("Failed to fetch notification preferences:", e);
+      setPageTitleEnabled(true);
+    }
+  }, [user]);
 
   const refresh = useCallback(async () => {
     let count;
@@ -76,14 +92,8 @@ export function NotificationsProvider({ children }) {
 
   // Fetch page_title preference once per login session.
   useEffect(() => {
-    if (!user) { setPageTitleEnabled(false); return; }
-    api.getNotificationPreferences().then(({ items }) => {
-      const pageTitleItems = items.filter((i) => i.channel === "page_title");
-      // Sparse/opt-out model: no rows means enabled; enabled if any row is enabled.
-      const anyEnabled = pageTitleItems.length === 0 || pageTitleItems.some((i) => i.enabled);
-      setPageTitleEnabled(anyEnabled);
-    }).catch(() => {});
-  }, [user]);
+    refreshPreferences();
+  }, [refreshPreferences]);
 
   // Update document.title whenever unread count or page_title preference changes.
   useEffect(() => {
@@ -91,10 +101,11 @@ export function NotificationsProvider({ children }) {
     document.title = pageTitleEnabled && unreadCount > 0
       ? `● (${unreadCount}) ${base}`
       : base;
+    return () => { document.title = base; };
   }, [unreadCount, pageTitleEnabled]);
 
   return (
-    <NotificationsContext.Provider value={{ unreadCount, unreadTicketIds, refresh, pageTitleEnabled }}>
+    <NotificationsContext.Provider value={{ unreadCount, unreadTicketIds, refresh, pageTitleEnabled, refreshPreferences }}>
       {children}
     </NotificationsContext.Provider>
   );
