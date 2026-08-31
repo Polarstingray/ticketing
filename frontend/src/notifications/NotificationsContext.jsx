@@ -17,6 +17,7 @@ const NotificationsContext = createContext({
   unreadCount: 0,
   unreadTicketIds: EMPTY_TICKET_IDS,
   refresh: () => {},
+  pageTitleEnabled: false,
 });
 
 const POLL_MS = 30000;
@@ -28,6 +29,7 @@ export function NotificationsProvider({ children }) {
   const { user } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
   const [unreadTicketIds, setUnreadTicketIds] = useState(EMPTY_TICKET_IDS);
+  const [pageTitleEnabled, setPageTitleEnabled] = useState(false);
 
   const refresh = useCallback(async () => {
     let count;
@@ -72,8 +74,27 @@ export function NotificationsProvider({ children }) {
     return () => clearInterval(id);
   }, [user, refresh]);
 
+  // Fetch page_title preference once per login session.
+  useEffect(() => {
+    if (!user) { setPageTitleEnabled(false); return; }
+    api.getNotificationPreferences().then(({ items }) => {
+      const pageTitleItems = items.filter((i) => i.channel === "page_title");
+      // Sparse/opt-out model: no rows means enabled; enabled if any row is enabled.
+      const anyEnabled = pageTitleItems.length === 0 || pageTitleItems.some((i) => i.enabled);
+      setPageTitleEnabled(anyEnabled);
+    }).catch(() => {});
+  }, [user]);
+
+  // Update document.title whenever unread count or page_title preference changes.
+  useEffect(() => {
+    const base = "Stingray Tickets";
+    document.title = pageTitleEnabled && unreadCount > 0
+      ? `● (${unreadCount}) ${base}`
+      : base;
+  }, [unreadCount, pageTitleEnabled]);
+
   return (
-    <NotificationsContext.Provider value={{ unreadCount, unreadTicketIds, refresh }}>
+    <NotificationsContext.Provider value={{ unreadCount, unreadTicketIds, refresh, pageTitleEnabled }}>
       {children}
     </NotificationsContext.Provider>
   );

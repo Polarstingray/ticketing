@@ -10,6 +10,7 @@ const TYPES = [
 const CHANNELS = [
   { value: "in_app", label: "In-app" },
   { value: "email", label: "Email" },
+  { value: "page_title", label: "Page title" },
 ];
 
 function key(type, channel) {
