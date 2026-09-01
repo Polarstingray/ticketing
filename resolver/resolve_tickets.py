@@ -879,7 +879,10 @@ def do_consolidate(cfg: Config, client: StingrayClient, ticket: dict, repo: Path
                             "-c", f"user.email={cfg.git_author_email}",
                             "merge", "--no-edit", "-m", f"Merge PR #{n}", f"pr-{n}"])
             if rc != 0:
-                run(["git", "-C", str(wt), "merge", "--abort"])
+                abort_rc, _ = run(["git", "-C", str(wt), "merge", "--abort"])
+                if abort_rc != 0:
+                    finish(f"Could not abort merge of PR #{n} — worktree may be corrupted.")
+                    return
                 skipped.append((n, tail(mout, 400)))
                 continue
             merged.append(n)
@@ -889,7 +892,7 @@ def do_consolidate(cfg: Config, client: StingrayClient, ticket: dict, repo: Path
             finish(f"Nothing merged cleanly — every PR conflicted.\n\n{lines}")
             return
 
-        rc, push_out = run(["git", "-C", str(wt), "push", "-u", "origin", branch],
+        rc, push_out = run(["git", "-C", str(wt), "push", "--force-with-lease", "-u", "origin", branch],
                            timeout=cfg.git_net_timeout)
         if rc != 0:
             finish(f"Merged {len(merged)} PR(s) locally but the push to `{branch}` "
@@ -897,6 +900,8 @@ def do_consolidate(cfg: Config, client: StingrayClient, ticket: dict, repo: Path
             return
 
         title = "Consolidate PRs " + ", ".join(f"#{n}" for n in merged)
+        if len(title) > 200:
+            title = title[:197] + "…"
         pr_body_lines = [f"Consolidation of open PRs for Stingray #{tid}.", "",
                          "Merged:"] + [f"- #{n}" for n in merged]
         if skipped:
@@ -907,12 +912,13 @@ def do_consolidate(cfg: Config, client: StingrayClient, ticket: dict, repo: Path
                        "--head", branch, "--base", base_branch], cwd=wt,
                       timeout=cfg.git_net_timeout)
         if rc == 0:
-            url = out.strip().splitlines()[-1] if out.strip() else ""
+            lines = [line for line in out.strip().splitlines() if line.startswith("https://")]
+            url = lines[-1] if lines else ""
         else:
             view_rc, view_out = run(["gh", "pr", "view", branch, "--json", "url",
                                      "-q", ".url"], cwd=wt, timeout=cfg.git_net_timeout)
             url = view_out.strip() if view_rc == 0 else ""
-        if not url or not url.startswith("https://"):
+        if not url or not re.match(r'^https://github\.com/[\w\-]+/[\w\-]+/pull/\d+/?$', url):
             finish(f"Merged {len(merged)} PR(s) and pushed `{branch}`, but "
                    f"`gh pr create` failed.\n\n```\n{tail(out)}\n```")
             return
