@@ -109,7 +109,7 @@ class ChatConfig:
     # explicit dict, and a required field would break every one of them.
     max_tool_hops: int = 6
     # Total character count of history at which summarization triggers. Very high
-    # default means operators opt in by lowering it; 0 disables summarization.
+    # default means operators opt in by lowering it; 0 is effectively "always".
     summary_threshold: int = 20_000
     # How many of the most-recent turns to keep verbatim when summarizing; the
     # remainder is condensed into a single synthetic exchange prepended to them.
