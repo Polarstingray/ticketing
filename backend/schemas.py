@@ -418,6 +418,13 @@ class PaginatedTickets(BaseModel):
     offset: int
 
 
+class PaginatedComments(BaseModel):
+    items: List[CommentOut]
+    total: int
+    limit: int
+    offset: int
+
+
 # --- Tag facets --------------------------------------------------------------
 
 class TagFacet(BaseModel):

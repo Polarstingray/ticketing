@@ -24,7 +24,9 @@ def test_create_and_list_comment(client, admin_key):
 
     listed = client.get(f"/tickets/{t['id']}/comments", headers={"X-API-Key": admin_key})
     assert listed.status_code == 200
-    assert "first comment" in [c["body"] for c in listed.json()]
+    page = listed.json()
+    assert set(page.keys()) >= {"items", "total"}
+    assert "first comment" in [c["body"] for c in page["items"]]
 
 
 def test_empty_comment_rejected(client, admin_key):
@@ -88,7 +90,7 @@ def test_author_can_delete_comment(client, admin_key, make_user):
     )
     assert r.status_code == 204, r.text
     listed = client.get(f"/tickets/{t['id']}/comments", headers={"X-API-Key": member.key})
-    assert c["id"] not in [x["id"] for x in listed.json()]
+    assert c["id"] not in [x["id"] for x in listed.json()["items"]]
 
 
 def test_non_author_with_view_access_gets_403(client, admin_key, make_user):

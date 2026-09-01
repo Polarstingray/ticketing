@@ -74,7 +74,7 @@ beforeEach(() => {
   authState.user = null;
   api.listUsers.mockResolvedValue([]);
   api.getTicket.mockResolvedValue(makeTicket());
-  api.listComments.mockResolvedValue([]);
+  api.listComments.mockResolvedValue({ items: [], total: 0 });
   api.listActivity.mockResolvedValue([]);
   api.listAgentRuns.mockResolvedValue([]);
   api.costRollup.mockResolvedValue(null);
@@ -179,7 +179,7 @@ describe("TicketDetail resolver fix loop", () => {
   it("offers Apply fixes on a reviewed ticket and hands it back to the bot", async () => {
     authState.user = { id: CREATOR.id, role: "member" };
     api.getTicket.mockResolvedValue(reviewed());
-    api.listComments.mockResolvedValue([REVIEW]);
+    api.listComments.mockResolvedValue({ items: [REVIEW], total: 1 });
     api.addComment.mockResolvedValue({ id: 2, author: CREATOR.id, body: "/fix" });
     api.updateTicket.mockResolvedValue(reviewed());
     renderDetail();
@@ -197,7 +197,7 @@ describe("TicketDetail resolver fix loop", () => {
   it("disables Apply fixes when the ticket names no repo", async () => {
     authState.user = { id: CREATOR.id, role: "member" };
     api.getTicket.mockResolvedValue(reviewed(["resolver:awaiting-fix"]));
-    api.listComments.mockResolvedValue([REVIEW]);
+    api.listComments.mockResolvedValue({ items: [REVIEW], total: 1 });
     renderDetail();
     await waitForLoaded();
 
@@ -207,7 +207,7 @@ describe("TicketDetail resolver fix loop", () => {
   it("hides Apply fixes when the ticket is not awaiting a fix", async () => {
     authState.user = { id: CREATOR.id, role: "member" };
     api.getTicket.mockResolvedValue(reviewed(["repo:ticketing"]));
-    api.listComments.mockResolvedValue([REVIEW]);
+    api.listComments.mockResolvedValue({ items: [REVIEW], total: 1 });
     renderDetail();
     await waitForLoaded();
 
@@ -217,7 +217,7 @@ describe("TicketDetail resolver fix loop", () => {
   it("hides Apply fixes from a member who cannot modify the ticket", async () => {
     authState.user = { id: 777, role: "member" };
     api.getTicket.mockResolvedValue(reviewed());
-    api.listComments.mockResolvedValue([REVIEW]);
+    api.listComments.mockResolvedValue({ items: [REVIEW], total: 1 });
     renderDetail();
     await waitForLoaded();
 
@@ -248,7 +248,7 @@ describe("TicketDetail markdown rendering", () => {
 
   it("renders a resolver comment as markdown, not literal text", async () => {
     authState.user = { id: CREATOR.id, role: "member" };
-    api.listComments.mockResolvedValue([RESOLVER_COMMENT]);
+    api.listComments.mockResolvedValue({ items: [RESOLVER_COMMENT], total: 1 });
     const { container } = renderDetail();
     await waitForLoaded();
 

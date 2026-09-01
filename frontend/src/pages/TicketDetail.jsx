@@ -35,6 +35,8 @@ export default function TicketDetail() {
   const [ticket, setTicket] = useState(null);
   const [users, setUsers] = useState([]);
   const [comments, setComments] = useState([]);
+  const [commentsTotal, setCommentsTotal] = useState(0);
+  const [commentsOffset, setCommentsOffset] = useState(0);
   const [activity, setActivity] = useState([]);
   const [agentRuns, setAgentRuns] = useState([]);
   // Delegation cost rollup: this ticket's cost plus every child's. Only surfaced
@@ -56,16 +58,18 @@ export default function TicketDetail() {
   async function load() {
     setLoading(true);
     try {
-      const [t, c, a, runs, roll] = await Promise.all([
+      const [t, commentPage, a, runs, roll] = await Promise.all([
         api.getTicket(id),
-        api.listComments(id),
+        api.listComments(id, { limit: 10, offset: 0 }),
         api.listActivity(id),
         api.listAgentRuns(id),
         // Non-critical: a rollup failure must not blank the whole page.
         api.costRollup(id).catch(() => null),
       ]);
       setTicket(t);
-      setComments(c);
+      setComments(commentPage.items);
+      setCommentsTotal(commentPage.total);
+      setCommentsOffset(commentPage.items.length);
       setActivity(a);
       setAgentRuns(runs);
       setRollup(roll);

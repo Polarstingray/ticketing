@@ -1,5 +1,5 @@
 """Comment routes nested under a ticket."""
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from activity import record_activity
@@ -9,7 +9,7 @@ from events import emit
 from inbox import notify_comment_recipients
 from models import Comment, Ticket, User
 from notifications import notify_comment_email
-from schemas import CommentCreate, CommentOut, CommentUpdate
+from schemas import CommentCreate, CommentOut, CommentUpdate, PaginatedComments
 
 router = APIRouter(prefix="/tickets/{ticket_id}/comments", tags=["comments"])
 
@@ -28,9 +28,11 @@ def _ensure_comment(comment_id: int, db: Session) -> Comment:
     return comment
 
 
-@router.get("", response_model=list[CommentOut])
+@router.get("", response_model=PaginatedComments)
 def list_comments(
     ticket_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -38,12 +40,14 @@ def list_comments(
     # 404 (not 403) so non-members can't probe ticket existence.
     if not can_view_ticket(user, ticket):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
-    return (
+    q = (
         db.query(Comment)
         .filter(Comment.ticket_id == ticket_id)
         .order_by(Comment.created_at.asc())
-        .all()
     )
+    total = q.count()
+    items = q.offset(offset).limit(limit).all()
+    return PaginatedComments(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=CommentOut, status_code=status.HTTP_201_CREATED)

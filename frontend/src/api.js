@@ -197,7 +197,8 @@ export const api = {
   redeliverWebhookDelivery: (id, deliveryId) =>
     request("POST", `/webhooks/${id}/deliveries/${deliveryId}/redeliver`),
 
-  listComments: (id) => request("GET", `/tickets/${id}/comments`),
+  // Returns paginated envelope { items, total, limit, offset }; params: limit, offset.
+  listComments: (id, params = {}) => request("GET", `/tickets/${id}/comments` + qs(params)),
   addComment: (id, body) => request("POST", `/tickets/${id}/comments`, { body }),
   editComment: (id, commentId, body) =>
     request("PATCH", `/tickets/${id}/comments/${commentId}`, { body }),
