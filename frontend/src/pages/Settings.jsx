@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { useNotifications } from "../notifications/NotificationsContext";
 import styles from "../styles/Settings.module.css";
 
 // The backend returns the full matrix; these drive row/column order + labels.
@@ -10,6 +11,7 @@ const TYPES = [
 const CHANNELS = [
   { value: "in_app", label: "In-app" },
   { value: "email", label: "Email" },
+  { value: "page_title", label: "Page title" },
 ];
 
 function key(type, channel) {
@@ -17,6 +19,7 @@ function key(type, channel) {
 }
 
 export default function Settings() {
+  const { refreshPreferences } = useNotifications();
   // Map of "type:channel" -> enabled (bool).
   const [prefs, setPrefs] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -67,6 +70,7 @@ export default function Settings() {
       for (const it of res.items) map[key(it.type, it.channel)] = it.enabled;
       setPrefs(map);
       setSaved(true);
+      refreshPreferences();
     } catch (e) {
       setError(e.message);
     } finally {
