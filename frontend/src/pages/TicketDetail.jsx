@@ -86,7 +86,10 @@ export default function TicketDetail() {
     setCommentsLoading(true);
     try {
       const page = await api.listComments(id, { limit: 10, offset: commentsOffset });
-      setComments((prev) => [...prev, ...page.items]);
+      setComments((prev) => {
+        const seen = new Set(prev.map((c) => c.id));
+        return [...prev, ...page.items.filter((c) => !seen.has(c.id))];
+      });
       setCommentsTotal(page.total);
       setCommentsOffset((prev) => prev + page.items.length);
     } catch (e) {
@@ -206,7 +209,6 @@ export default function TicketDetail() {
       const c = await api.addComment(id, "/fix");
       setComments((prev) => [...prev, c]);
       setCommentsTotal((prev) => prev + 1);
-      setCommentsOffset((prev) => prev + 1);
       await patch({ assigned_to: reviewComment.author });
     } catch (e) {
       setError(e.message);
@@ -222,7 +224,6 @@ export default function TicketDetail() {
       const c = await api.addComment(id, commentBody.trim());
       setComments((prev) => [...prev, c]);
       setCommentsTotal((prev) => prev + 1);
-      setCommentsOffset((prev) => prev + 1);
       setCommentBody("");
       reloadActivity();
     } catch (e) {
@@ -265,7 +266,7 @@ export default function TicketDetail() {
       await api.deleteComment(id, commentId);
       setComments((prev) => prev.filter((c) => c.id !== commentId));
       setCommentsTotal((prev) => prev - 1);
-      setCommentsOffset((prev) => prev - 1);
+      setCommentsOffset((prev) => Math.max(0, prev - 1));
       reloadActivity();
     } catch (e) {
       setError(e.message);
