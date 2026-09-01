@@ -411,8 +411,21 @@ class NotificationPreferencesUpdate(BaseModel):
 
 # --- Pagination --------------------------------------------------------------
 
+COMMENTS_PER_PAGE = 10
+# A comment longer than this ends page 1 early so heavy content is gated
+# behind "Load more" rather than blowing up the initial load.
+COMMENT_BODY_THRESHOLD = 500  # chars
+
+
 class PaginatedTickets(BaseModel):
     items: List[TicketOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaginatedComments(BaseModel):
+    items: List[CommentOut]
     total: int
     limit: int
     offset: int
