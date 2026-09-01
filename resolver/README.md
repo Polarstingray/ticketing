@@ -255,6 +255,38 @@ next sweep:
   planning it. Put `/ticket` in a comment (or alongside real content) if you want the
   host ticket worked on too.
 
+### The `/consolidate` directive (merge the repo's open PRs onto one branch)
+
+If several tickets against the same repo each produce their own PR, they routinely
+end up conflicting with each other. `/consolidate` is another deterministic,
+no-LLM-in-the-loop directive (a reserved verb like `/ticket`/`/approve`, not a
+`commands/*.md` premade prompt) that cleans that up: it branches off the repo's
+default branch, tries to merge every open PR (or just the ones you name) onto it,
+pushes, opens a "consolidation" PR, and files a `code_review` ticket on the result
+so someone reviews the merged state.
+
+```
+/consolidate [PR# ...]
+```
+
+```
+/consolidate            # merge every open PR targeting the default branch
+/consolidate 12 15      # merge only PRs #12 and #15
+```
+
+- Requires the target repo (from the ticket's `repo:` tag) to have a GitHub `origin`
+  and an authenticated `gh` — same requirement as opening any PR from a resolver run.
+- PRs that merge cleanly land on `claude/consolidate-<ticket id>`; PRs that conflict
+  are skipped (merge aborted) and reported by number, rather than blocking the whole
+  run on the first conflict — the reviewer works through those manually.
+- Filed once: dedupes the same way `/ticket` does, via a `🧩 **Consolidated**` marker
+  comment carrying the directive's `[key:…]`.
+- The follow-up code-review ticket is assigned to user id `CONSOLIDATE_REVIEW_USER_ID`
+  (default `4`, `claude-lite-ubvm`) and carries `repo:`/`rev:`/`branch:` tags for the
+  new branch instead of `code_blocks` — the reviewer explores the checkout.
+- Like a `/ticket`-only body, a ticket whose body is *only* `/consolidate` is handled
+  and handed straight back to you (`in_review`) with no plan/implement run.
+
 ## Standard commands (premade prompts)
 
 For tasks you want run the same way across **all** your projects — a security audit
