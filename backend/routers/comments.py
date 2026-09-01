@@ -47,8 +47,10 @@ def list_comments(
 
     On the first page (offset==0) the scan stops after the first comment whose
     body exceeds COMMENT_BODY_THRESHOLD chars, so heavy content is gated behind
-    "Load more" rather than blowing up the initial load.  Subsequent pages
-    apply plain offset pagination without the cutoff.
+    "Load more" rather than blowing up the initial load.  This means
+    ``len(items)`` may be less than ``limit`` on page 1 even when more comments
+    exist — it does not signal EOF.  Subsequent pages apply plain offset
+    pagination without the cutoff.
     """
     ticket = _ensure_ticket(ticket_id, db)
     # 404 (not 403) so non-members can't probe ticket existence.
