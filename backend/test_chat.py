@@ -2067,3 +2067,95 @@ def test_the_newest_runs_survive_the_row_limit(client, make_user, enabled, recor
     sent = recorder[0]["user"]
     assert f"attempt {chat_context.MAX_RUNS + 2} exploded" in sent
     assert "attempt 0 exploded" not in sent
+
+
+# --- Summarization -----------------------------------------------------------
+
+from chat import summarize as chat_summarize
+
+
+def _make_history(n_turns: int, chars_per_message: int = 100) -> list[tuple[str, str]]:
+    """Build a synthetic history of n_turns exchanges."""
+    history = []
+    for i in range(n_turns):
+        history.append(("user", f"Question {i}: " + "q" * chars_per_message))
+        history.append(("assistant", f"Answer {i}: " + "a" * chars_per_message))
+    return history
+
+
+def _make_cfg_for_summarize(**overrides):
+    base = dict(
+        api_url="https://provider.example/v1/chat/completions",
+        api_key="sk-test", model="test-model", timeout=5, context_budget=1000,
+        price_in_per_mtok=0.0, price_out_per_mtok=0.0, rate_limit="20/minute",
+        daily_usd_limit=0.0, history_turns=10, stream_usage=True,
+    )
+    base.update(overrides)
+    return chat_config.ChatConfig(**base)
+
+
+def test_maybe_summarize_noop_below_threshold():
+    """History under the threshold is returned unchanged."""
+    history = _make_history(3, chars_per_message=10)
+    cfg = _make_cfg_for_summarize()
+    result = chat_summarize.maybe_summarize(
+        history, cfg, threshold=100_000, keep_turns=4
+    )
+    assert result is history
+
+
+def test_maybe_summarize_noop_too_short():
+    """History over threshold but not enough messages to split → unchanged."""
+    history = _make_history(2, chars_per_message=5000)  # 4 messages, keep_turns=2 → split=0
+    cfg = _make_cfg_for_summarize()
+    result = chat_summarize.maybe_summarize(
+        history, cfg, threshold=1, keep_turns=2
+    )
+    # 2 turns = 4 messages, keep_turns*2 = 4 → nothing to summarize
+    assert result is history
+
+
+def test_maybe_summarize_summarizes_old_turns(monkeypatch):
+    """Over threshold with old enough history → summary prepended, provider called once."""
+    history = _make_history(6, chars_per_message=1000)  # 12 messages, ~24k chars
+    cfg = _make_cfg_for_summarize()
+
+    complete_calls = []
+
+    def fake_complete(cfg, system, user_message):
+        complete_calls.append({"system": system, "user": user_message})
+        return chat_provider.Completion(
+            text="Compact summary of earlier turns.",
+            model="test-model", input_tokens=100, output_tokens=20,
+        )
+
+    monkeypatch.setattr(chat_summarize, "complete", fake_complete)
+
+    result = chat_summarize.maybe_summarize(
+        history, cfg, threshold=1, keep_turns=2
+    )
+
+    assert len(complete_calls) == 1
+    # First two entries are the synthetic summary pair
+    assert result[0][0] == "user"
+    assert "[Summary of earlier conversation]" in result[0][1]
+    assert "Compact summary of earlier turns." in result[0][1]
+    assert result[1] == ("assistant", "Understood, I have the prior context.")
+    # Last keep_turns*2 messages from the original are appended verbatim
+    assert result[2:] == history[-4:]
+
+
+def test_maybe_summarize_degrades_on_provider_error(monkeypatch):
+    """A ProviderError during summarization returns the original history unchanged."""
+    history = _make_history(6, chars_per_message=1000)
+    cfg = _make_cfg_for_summarize()
+
+    def failing_complete(cfg, system, user_message):
+        raise chat_provider.ProviderError("quota exceeded", status=429)
+
+    monkeypatch.setattr(chat_summarize, "complete", failing_complete)
+
+    result = chat_summarize.maybe_summarize(
+        history, cfg, threshold=1, keep_turns=2
+    )
+    assert result is history
