@@ -49,7 +49,8 @@ def test_collect_consolidate_directives_ignores_unrelated_lines():
 class _FakeRun:
     """Dispatches fake `git`/`gh` argv to canned results, recording every call."""
 
-    def __init__(self, *, conflicting_prs=(), pr_list=None, pr_create_ok=True):
+    def __init__(self, *, conflicting_prs=(), pr_list=None, pr_create_ok=True,
+                 abort_fails=False):
         self.calls: list[list[str]] = []
         self.conflicting_prs = set(conflicting_prs)
         self.pr_list = pr_list if pr_list is not None else [
@@ -57,6 +58,8 @@ class _FakeRun:
             {"number": 11, "baseRefName": "main"},
         ]
         self.pr_create_ok = pr_create_ok
+        self.abort_fails = abort_fails
+        self.merge_in_progress = False
 
     def __call__(self, cmd, cwd=None, timeout=None):
         self.calls.append(list(cmd))
@@ -90,9 +93,14 @@ class _FakeRun:
                 return 0, ""
             if "merge" in cmd:
                 if "--abort" in cmd:
+                    if self.abort_fails:
+                        return 1, "error: There is no merge to abort"
+                    if self.merge_in_progress:
+                        self.merge_in_progress = False
                     return 0, ""
                 pr_ref = next((a for a in cmd if a.startswith("pr-")), None)
                 if pr_ref and int(pr_ref[len("pr-"):]) in self.conflicting_prs:
+                    self.merge_in_progress = True
                     return 1, "CONFLICT (content): merge conflict in x.py"
                 return 0, ""
             if "push" in cmd:
@@ -159,6 +167,25 @@ def test_do_consolidate_explicit_pr_numbers_skips_pr_list(fake_cfg, monkeypatch,
 
     assert not any(c[:3] == ["gh", "pr", "list"] for c in fake_run.calls)
     assert len(client.created) == 1
+
+
+def test_do_consolidate_merge_abort_failure_bails_out(fake_cfg, monkeypatch, consolidate_ticket, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_run = _FakeRun(conflicting_prs={10}, abort_fails=True)
+    monkeypatch.setattr(rt, "run", fake_run)
+    monkeypatch.setattr(rt, "has_origin", lambda r: True)
+    monkeypatch.setattr(rt, "remove_worktree", lambda r, wt: None)
+    client = FakeClient([])
+    directive = rt.collect_consolidate_directives(consolidate_ticket, [], BOT)[0]
+
+    rt.do_consolidate(fake_cfg, client, consolidate_ticket, repo, directive)
+
+    assert not client.created
+    marker_bodies = [b for _, b in client.comments_added if rt.CONSOLIDATE_MARKER in b]
+    assert len(marker_bodies) == 1
+    assert "corrupted" in marker_bodies[0]
+    assert client.updates[-1]["status"] == "in_review"
 
 
 def test_do_consolidate_no_open_prs(fake_cfg, monkeypatch, consolidate_ticket, tmp_path):
