@@ -40,6 +40,7 @@ from chat import config as chat_config
 from chat import context as chat_context
 from chat import loop as chat_loop
 from chat import prompts, provider, spend
+from chat import summarize as chat_summarize
 from chat import tools as chat_tools
 from chat.budget import Budget, estimate_cost
 from database import SessionLocal, get_db
@@ -275,6 +276,11 @@ def _stream_turn(conversation_id: int, user_id: int, question: str,
         spent_before = spend.spent_today(db, user_id)
 
         history = _history(convo, cfg.history_turns)
+        history = chat_summarize.maybe_summarize(
+            history, cfg,
+            threshold=cfg.summary_threshold,
+            keep_turns=cfg.summary_keep_turns,
+        )
         db.add(ChatMessage(
             conversation_id=convo.id,
             role=ChatRole.user.value,
