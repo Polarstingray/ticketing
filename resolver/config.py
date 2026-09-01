@@ -273,6 +273,11 @@ class Config:
     verify_command: str
     verify_timeout: int
     verify_max_retries: int
+    # Sandboxing (optional): a shell template the resolver prepends to the agent
+    # subprocess during the implement phase only. `{cwd}` is substituted with the
+    # worktree path. Empty ⇒ no sandbox (legacy behavior — isolation relies on path
+    # anchoring and the post-run escape check). See resolver/.env.example.
+    sandbox_command: str
     # Quota backoff: when an agent run fails on an API quota/rate limit (rather than
     # a real error), the resolver parks the ticket — keeping it assigned to the bot
     # and preserving its phase tag — instead of handing it back to the user. The
@@ -456,6 +461,7 @@ class Config:
             verify_command=_env("VERIFY_COMMAND", default=""),
             verify_timeout=int(os.environ.get("VERIFY_TIMEOUT", "900")),
             verify_max_retries=int(os.environ.get("VERIFY_MAX_RETRIES", "1")),
+            sandbox_command=_env("SANDBOX_COMMAND", default=""),
             # How long to wait after a quota/rate-limit failure before auto-retrying
             # the parked ticket from the same phase (see quota_backoff). Default 60m.
             quota_backoff_minutes=int(os.environ.get("QUOTA_BACKOFF_MINUTES", "60")),

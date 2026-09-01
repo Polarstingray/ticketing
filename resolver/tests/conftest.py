@@ -103,6 +103,8 @@ def fake_cfg(tmp_path):
         verify_command="",
         verify_timeout=900,
         verify_max_retries=1,
+        # sandbox wrapper for the implement phase (off by default; tests opt in)
+        sandbox_command="",
         # quota backoff window (minutes) before a parked ticket auto-retries
         quota_backoff_minutes=60,
         # resolver-to-resolver delegation (off by default; tests opt in)
