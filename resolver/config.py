@@ -246,6 +246,11 @@ class Config:
     # Priorities that escalate to escalate_to_user_id (in addition to the always-on
     # `dangerous` / `claude` tag triggers). Comma-separated; default high,critical.
     escalate_priorities: list[str]
+    # --- /consolidate directive --------------------------------------------------
+    # Who the code-review ticket filed after a `/consolidate` run is assigned to.
+    # Defaults to 4 (claude-lite-ubvm), per the ticket's explicit ask; overridable
+    # per-deployment/per-bot via CONSOLIDATE_REVIEW_USER_ID.
+    consolidate_review_user_id: int
     # --- free-resolver: single-shot review backend -----------------------------
     # When all three are set, code reviews go through a direct OpenAI-compatible
     # chat completion (no opencode agent loop) — see single_shot_review. Works with
@@ -428,6 +433,10 @@ class Config:
             escalate_to_user_id=int(os.environ.get("ESCALATE_TO_USER_ID", "0") or "0"),
             escalate_priorities=_split_models(
                 _env("ESCALATE_PRIORITIES", default="high,critical")),
+            # Who a `/consolidate` run's review ticket is assigned to. Default 4
+            # (claude-lite-ubvm), matching the ticket's explicit ask.
+            consolidate_review_user_id=int(
+                os.environ.get("CONSOLIDATE_REVIEW_USER_ID", "4") or "4"),
             # Single-shot review backend (direct OpenAI-compatible chat completion).
             review_api_url=_env("REVIEW_API_URL", default=""),
             review_api_key=_env("REVIEW_API_KEY", default=""),
