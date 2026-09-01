@@ -92,6 +92,7 @@ QUOTA_BACKOFF_MARKER = "⏳ Quota backoff"
 DELEGATE_MARKER = "🧭 **Delegated**"
 DELEGATE_OFF_MARKER = "ℹ️ Delegation not enabled"
 UNKNOWN_CMD_MARKER = "ℹ️ Unknown command"
+CONSOLIDATE_MARKER = "🧩 **Consolidated**"
 WORK_DIR = Path(__file__).resolve().parent / "work"
 
 # Footer on a findings-only review: how to turn the findings into a PR without
@@ -605,11 +606,14 @@ def _directive_parser() -> _DirectiveParser:
 
 
 def body_is_directive_only(ticket: dict) -> bool:
-    """True when the ticket description is nothing but `/ticket` directive line(s)
-    (and whitespace) — i.e. a pure filing request with no real work to plan."""
+    """True when the ticket description is nothing but `/ticket`/`/consolidate`
+    directive line(s) (and whitespace) — i.e. a pure control request with no real
+    work to plan."""
     nonempty = [ln.strip() for ln in (ticket.get("description") or "").splitlines() if ln.strip()]
     return bool(nonempty) and all(
-        ln == "/ticket" or ln.startswith("/ticket ") for ln in nonempty
+        ln == "/ticket" or ln.startswith("/ticket ")
+        or ln == "/consolidate" or ln.startswith("/consolidate ")
+        for ln in nonempty
     )
 
 
@@ -718,6 +722,262 @@ def handle_ticket_directives(cfg: Config, client: StingrayClient, ticket: dict,
             log(f"#{ticket['id']}: /ticket failed ({d['key']}): {exc}")
 
     client.add_comment(ticket["id"], f"{FILED_MARKER}\n\n" + "\n".join(lines))
+
+
+# --- /consolidate directive -----------------------------------------------
+# A human can ask the resolver to consolidate the repo's open PRs onto one branch
+# with `/consolidate [PR# ...]` — useful when several tickets against the same
+# repo produced several PRs that now conflict with each other. Deterministic
+# parsing, same shape as `/ticket` above: dedupe by directive_key, mark handled
+# with a [key:...] marker comment so a re-swept ticket doesn't redo the work.
+def _consolidate_parser() -> _DirectiveParser:
+    p = _DirectiveParser(prog="/consolidate", add_help=False)
+    p.add_argument("prs", nargs="*", type=int)
+    return p
+
+
+def collect_consolidate_directives(ticket: dict, comments: list[dict],
+                                   bot_id: int) -> list[dict]:
+    """Find every `/consolidate ...` line in the ticket body and human comments.
+    Returns dicts of {key, line, author}, same shape as collect_directives."""
+    sources: list[tuple[str, int | None]] = [
+        (ticket.get("description") or "", ticket.get("created_by"))
+    ]
+    for c in comments:
+        if c.get("author") != bot_id:
+            sources.append((c.get("body") or "", c.get("author")))
+
+    found: list[dict] = []
+    seen: set[str] = set()
+    for text, author in sources:
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line != "/consolidate" and not line.startswith("/consolidate "):
+                continue
+            key = directive_key(line)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append({"key": key, "line": line, "author": author})
+    return found
+
+
+def already_handled_consolidate_keys(comments: list[dict], bot_id: int) -> set[str]:
+    """Directive keys the resolver already consolidated, read back from its own
+    marker comments — this is what makes a `/consolidate` line run only once."""
+    keys: set[str] = set()
+    for c in comments:
+        if c.get("author") == bot_id and CONSOLIDATE_MARKER in (c.get("body") or ""):
+            keys.update(_KEY_RE.findall(c.get("body") or ""))
+    return keys
+
+
+def _parse_consolidate_prs(line: str) -> list[int]:
+    """Parse the optional PR numbers off a `/consolidate` line. Raises
+    _DirectiveError on malformed input. Empty list means "consolidate every open
+    PR" (the caller discovers them via `gh pr list`)."""
+    args_str = line[len("/consolidate"):].strip()
+    if not args_str:
+        return []
+    try:
+        tokens = shlex.split(args_str)
+    except ValueError as exc:
+        raise _DirectiveError(f"could not parse arguments: {exc}")
+    args = _consolidate_parser().parse_args(tokens)
+    out: list[int] = []
+    for n in args.prs:
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def do_consolidate(cfg: Config, client: StingrayClient, ticket: dict, repo: Path | None,
+                   directive: dict) -> None:
+    """Branch off the repo's default branch, merge each open (or named) PR onto
+    it, open a consolidation PR, and file a code-review ticket on the result.
+
+    Fully self-contained: posts its own marker comment and hands the ORIGINAL
+    ticket back, regardless of outcome — a caller need only skip its own
+    plan/implement/review dispatch once this returns."""
+    tid = ticket["id"]
+    key = directive["key"]
+
+    def finish(note: str) -> None:
+        client.add_comment(tid, f"{CONSOLIDATE_MARKER}\n\n{note}\n\n[key:{key}]")
+        handback = handback_user(client, ticket)
+        set_state(client, ticket, [], status="in_review", assigned_to=handback)
+        phase("consolidated", ticket, f"#{tid}: /consolidate handled ({key})")
+
+    if repo is None:
+        finish("Can't consolidate — this ticket has no `repo:` tag to check out.")
+        return
+    if not has_origin(repo):
+        finish("Can't consolidate — the target repo has no `origin` remote configured.")
+        return
+    if run(["gh", "auth", "status"])[0] != 0:
+        finish("Can't consolidate — `gh` is not authenticated (run `gh auth login`).")
+        return
+
+    try:
+        explicit_prs = _parse_consolidate_prs(directive["line"])
+    except _DirectiveError as exc:
+        finish(f"Could not parse `{directive['line']}`: {exc}")
+        return
+
+    rc, out = run(["gh", "repo", "view", "--json", "defaultBranchRef",
+                   "-q", ".defaultBranchRef.name"], cwd=repo, timeout=cfg.git_net_timeout)
+    base_branch = out.strip() if rc == 0 and out.strip() else _ambient_base(repo)[1]
+    rc, fetch_out = run(["git", "-C", str(repo), "fetch", "origin", base_branch],
+                        timeout=cfg.git_net_timeout)
+    if rc != 0:
+        finish(f"Can't consolidate — failed to fetch `{base_branch}` from "
+               f"origin.\n\n```\n{tail(fetch_out)}\n```")
+        return
+
+    if explicit_prs:
+        pr_numbers = explicit_prs
+    else:
+        rc, out = run(["gh", "pr", "list", "--state", "open", "--json",
+                       "number,baseRefName", "--limit", "100"], cwd=repo,
+                      timeout=cfg.git_net_timeout)
+        if rc != 0:
+            finish(f"Can't consolidate — `gh pr list` failed.\n\n```\n{tail(out)}\n```")
+            return
+        try:
+            prs = json.loads(out or "[]")
+        except json.JSONDecodeError:
+            prs = []
+        pr_numbers = [p["number"] for p in prs if p.get("baseRefName") == base_branch]
+    if not pr_numbers:
+        finish("No open PRs to consolidate.")
+        return
+
+    branch = f"claude/consolidate-{tid}"
+    WORK_DIR.mkdir(exist_ok=True)
+    wt = WORK_DIR / f"consolidate-{tid}"
+    run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)])
+    if wt.exists():
+        shutil.rmtree(wt, ignore_errors=True)
+    run(["git", "-C", str(repo), "worktree", "prune"])
+    rc, out = run(["git", "-C", str(repo), "worktree", "add", "-B", branch, str(wt),
+                   f"origin/{base_branch}"])
+    if rc != 0:
+        finish(f"Couldn't create the consolidation branch.\n\n```\n{tail(out)}\n```")
+        return
+
+    try:
+        merged: list[int] = []
+        skipped: list[tuple[int, str]] = []
+        for n in pr_numbers:
+            rc, fout = run(["git", "-C", str(wt), "fetch", "origin",
+                            f"pull/{n}/head:pr-{n}"], timeout=cfg.git_net_timeout)
+            if rc != 0:
+                skipped.append((n, f"fetch failed: {tail(fout, 400)}"))
+                continue
+            rc, mout = run(["git", "-C", str(wt),
+                            "-c", f"user.name={cfg.git_author_name}",
+                            "-c", f"user.email={cfg.git_author_email}",
+                            "merge", "--no-edit", "-m", f"Merge PR #{n}", f"pr-{n}"])
+            if rc != 0:
+                abort_rc, _ = run(["git", "-C", str(wt), "merge", "--abort"])
+                if abort_rc != 0:
+                    finish(f"Could not abort merge of PR #{n} — worktree may be corrupted.")
+                    return
+                skipped.append((n, tail(mout, 400)))
+                continue
+            merged.append(n)
+
+        if not merged:
+            lines = "\n".join(f"- #{n}: {reason}" for n, reason in skipped)
+            finish(f"Nothing merged cleanly — every PR conflicted.\n\n{lines}")
+            return
+
+        rc, push_out = run(["git", "-C", str(wt), "push", "--force-with-lease", "-u", "origin", branch],
+                           timeout=cfg.git_net_timeout)
+        if rc != 0:
+            finish(f"Merged {len(merged)} PR(s) locally but the push to `{branch}` "
+                   f"failed.\n\n```\n{tail(push_out)}\n```")
+            return
+
+        title = "Consolidate PRs " + ", ".join(f"#{n}" for n in merged)
+        if len(title) > 200:
+            title = title[:197] + "…"
+        pr_body_lines = [f"Consolidation of open PRs for Stingray #{tid}.", "",
+                         "Merged:"] + [f"- #{n}" for n in merged]
+        if skipped:
+            pr_body_lines += ["", "Skipped (conflicts):"] + \
+                [f"- #{n}: {reason}" for n, reason in skipped]
+        rc, out = run(["gh", "pr", "create", "--title", title,
+                       "--body", "\n".join(pr_body_lines),
+                       "--head", branch, "--base", base_branch], cwd=wt,
+                      timeout=cfg.git_net_timeout)
+        if rc == 0:
+            lines = [line for line in out.strip().splitlines() if line.startswith("https://")]
+            url = lines[-1] if lines else ""
+        else:
+            view_rc, view_out = run(["gh", "pr", "view", branch, "--json", "url",
+                                     "-q", ".url"], cwd=wt, timeout=cfg.git_net_timeout)
+            url = view_out.strip() if view_rc == 0 else ""
+        if not url or not re.match(r'^https://github\.com/[\w\-]+/[\w\-]+/pull/\d+/?$', url):
+            finish(f"Merged {len(merged)} PR(s) and pushed `{branch}`, but "
+                   f"`gh pr create` failed.\n\n```\n{tail(out)}\n```")
+            return
+
+        rc, sha_out = run(["git", "-C", str(wt), "rev-parse", "HEAD"])
+        sha = sha_out.strip() if rc == 0 else ""
+
+        summary_lines = [f"Opened {url}", "", "Merged:"] + [f"- #{n}" for n in merged]
+        if skipped:
+            summary_lines += ["", "Skipped (conflicts, need manual resolution):"] + \
+                [f"- #{n}: {reason}" for n, reason in skipped]
+
+        review_tags = [f"repo:{repo.name}", f"branch:{branch}"]
+        if sha:
+            review_tags.append(f"rev:{sha}")
+        try:
+            review = client.create_ticket(
+                type="code_review",
+                title=f"Review: consolidation branch for #{tid}",
+                description="\n".join(summary_lines),
+                priority="medium",
+                tags=review_tags,
+                assigned_to=cfg.consolidate_review_user_id,
+            )
+            summary_lines.append(
+                f"\nFiled review #{review['id']}, assigned to user "
+                f"{cfg.consolidate_review_user_id}.")
+        except Exception as exc:
+            summary_lines.append(f"\nCould not file the follow-up review ticket: {exc}")
+
+        finish("\n".join(summary_lines))
+    finally:
+        remove_worktree(repo, wt)
+
+
+def handle_consolidate_directives(cfg: Config, client: StingrayClient, ticket: dict,
+                                  comments: list[dict], repo: Path | None,
+                                  dry_run: bool) -> bool:
+    """Act on the first not-yet-handled `/consolidate` directive on this ticket.
+    Returns True if a directive was (or in dry-run, would be) handled this sweep,
+    so the caller can skip the normal plan/implement/review dispatch — do_consolidate
+    fully owns the ticket's state transition itself."""
+    directives = collect_consolidate_directives(ticket, comments, cfg.bot_user_id)
+    if not directives:
+        return False
+    done = already_handled_consolidate_keys(comments, cfg.bot_user_id)
+    pending = [d for d in directives if d["key"] not in done]
+    if not pending:
+        return False
+
+    if dry_run:
+        log(f"#{ticket['id']}: would consolidate ({pending[0]['line']})")
+        return True
+
+    # In practice only one /consolidate line is meaningful per ticket; process the
+    # first unhandled one. do_consolidate's marker comment covers its key, so a
+    # duplicate line elsewhere is naturally skipped on the next sweep.
+    do_consolidate(cfg, client, ticket, repo, pending[0])
+    return True
 
 
 # --- agent runners -------------------------------------------------------
@@ -3074,6 +3334,15 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
     # `repo` is only a cwd for file_ticket.py here; a repo-less review still files
     # follow-ups fine from the resolver dir (directive_payload handles repo=None).
     handle_ticket_directives(cfg, client, ticket, comments, repo, dry_run)
+
+    # Honor a `/consolidate` directive the same way — but unlike `/ticket`, it fully
+    # owns the ticket's own state transition (comment + handback), so once it's
+    # handled this sweep there's nothing left for the normal dispatch below to do.
+    if handle_consolidate_directives(cfg, client, ticket, comments, repo, dry_run):
+        if dry_run:
+            return
+        log(f"#{tid}: /consolidate directive handled this sweep")
+        return
 
     # A ticket whose body is *only* a `/ticket` directive is a pure filing
     # request — there's nothing to plan or implement. File it (above), then hand

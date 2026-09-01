@@ -32,7 +32,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # Slash-verbs the resolver already gives its own meaning — never treat these as
 # premade-prompt commands (see process() dispatch in resolve_tickets.py).
-RESERVED = frozenset({"ticket", "approve", "revise", "review", "fix"})
+RESERVED = frozenset({"ticket", "approve", "revise", "review", "fix", "consolidate"})
 
 VALID_TYPES = frozenset({"task", "code_review"})
 
