@@ -73,9 +73,11 @@ class NotificationType(str, enum.Enum):
 
 class NotificationChannel(str, enum.Enum):
     """Where a notification is delivered. ``in_app`` is the bell/inbox;
-    ``email`` is the SMTP path in ``notifications.py``."""
+    ``email`` is the SMTP path in ``notifications.py``; ``page_title`` updates
+    the browser tab with an unread-count indicator."""
     in_app = "in_app"
     email = "email"
+    page_title = "page_title"
 
 
 class AgentPhase(str, enum.Enum):
