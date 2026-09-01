@@ -17,6 +17,7 @@ from chat import config as chat_config
 from chat import context as chat_context
 from chat import prompts
 from chat import provider as chat_provider
+from chat import summarize as chat_summarize
 from routers import chat as chat_router
 
 CONFIGURED = {
@@ -438,10 +439,18 @@ def test_budget_drops_sections_once_exhausted():
     assert b.take("more text") == ""
 
 
+def _cfg(**overrides):
+    base = dict(
+        api_url="https://provider.example/v1/chat/completions",
+        api_key="sk-test", model="test-model", timeout=5, context_budget=1000,
+        price_in_per_mtok=0.0, price_out_per_mtok=0.0, rate_limit="20/minute",
+        daily_usd_limit=0.0, history_turns=10, stream_usage=True,
+    )
+    base.update(overrides)
+    return chat_config.ChatConfig(**base)
+
+
 # --- Summarization -----------------------------------------------------------
-
-from chat import summarize as chat_summarize
-
 
 def _fake_complete(response_text):
     def fake(cfg, system, user_message):
@@ -468,8 +477,12 @@ def test_summarize_passes_through_when_under_threshold(monkeypatch):
 
 def test_summarize_passes_through_when_not_enough_messages(monkeypatch):
     """keep_turns * 2 == len(history) means nothing to summarize."""
-    history = _history_of(8)  # 4 turns
-    monkeypatch.setattr(chat_provider, "complete", _fake_complete("SUMMARY"))
+    history = _history_of(8)  # 4 turns = keep_turns, nothing older to condense
+
+    def should_not_be_called(cfg, system, user_message):
+        raise AssertionError("complete() must not be called when history fits in keep_turns")
+
+    monkeypatch.setattr(chat_summarize, "complete", should_not_be_called)
     result = chat_summarize.maybe_summarize(
         history, _cfg(), threshold=0, keep_turns=4,
     )
@@ -521,17 +534,6 @@ def test_summarize_zero_threshold_fires_on_any_nonempty_history(monkeypatch):
 # --- The provider itself -----------------------------------------------------
 # Everything above stubs `complete` out; these exercise it against canned HTTP
 # responses, because response parsing and failure mapping are where the bugs are.
-
-def _cfg(**overrides):
-    base = dict(
-        api_url="https://provider.example/v1/chat/completions",
-        api_key="sk-test", model="test-model", timeout=5, context_budget=1000,
-        price_in_per_mtok=0.0, price_out_per_mtok=0.0, rate_limit="20/minute",
-        daily_usd_limit=0.0, history_turns=10, stream_usage=True,
-    )
-    base.update(overrides)
-    return chat_config.ChatConfig(**base)
-
 
 def _respond(monkeypatch, *, status_code=200, json_body=None, exc=None):
     """Replace the provider's outbound POST with a canned response or failure."""
