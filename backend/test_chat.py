@@ -438,6 +438,86 @@ def test_budget_drops_sections_once_exhausted():
     assert b.take("more text") == ""
 
 
+# --- Summarization -----------------------------------------------------------
+
+from chat import summarize as chat_summarize
+
+
+def _fake_complete(response_text):
+    def fake(cfg, system, user_message):
+        return chat_provider.Completion(
+            text=response_text, model="test-model",
+            input_tokens=100, output_tokens=50,
+        )
+    return fake
+
+
+def _history_of(n):
+    return [(("user" if i % 2 == 0 else "assistant"), f"msg{i} " + "x" * 200)
+            for i in range(n)]
+
+
+def test_summarize_passes_through_when_under_threshold(monkeypatch):
+    history = _history_of(10)
+    total = sum(len(c) for _, c in history)
+    result = chat_summarize.maybe_summarize(
+        history, _cfg(), threshold=total + 1, keep_turns=4,
+    )
+    assert result is history
+
+
+def test_summarize_passes_through_when_not_enough_messages(monkeypatch):
+    """keep_turns * 2 == len(history) means nothing to summarize."""
+    history = _history_of(8)  # 4 turns
+    monkeypatch.setattr(chat_provider, "complete", _fake_complete("SUMMARY"))
+    result = chat_summarize.maybe_summarize(
+        history, _cfg(), threshold=0, keep_turns=4,
+    )
+    assert result is history
+
+
+def test_summarize_condenses_old_messages_into_synthetic_pair(monkeypatch):
+    history = _history_of(10)  # 5 turns
+    monkeypatch.setattr(chat_summarize, "complete", _fake_complete("THE SUMMARY"))
+    result = chat_summarize.maybe_summarize(
+        history, _cfg(), threshold=0, keep_turns=2,
+    )
+    # Synthetic pair prepended, then the 4 kept messages (2 turns).
+    assert len(result) == 6
+    role0, content0 = result[0]
+    assert role0 == "user"
+    assert "THE SUMMARY" in content0
+    assert result[1] == ("assistant", "Understood.")
+    # The most-recent messages survive verbatim.
+    assert result[2:] == history[-4:]
+
+
+def test_summarize_falls_back_on_provider_failure(monkeypatch):
+    history = _history_of(10)
+
+    def boom(cfg, system, user_message):
+        raise chat_provider.ProviderError("upstream down")
+
+    monkeypatch.setattr(chat_summarize, "complete", boom)
+    result = chat_summarize.maybe_summarize(
+        history, _cfg(), threshold=0, keep_turns=2,
+    )
+    assert result is history
+
+
+def test_summarize_zero_threshold_fires_on_any_nonempty_history(monkeypatch):
+    """threshold=0 is 'always', not 'never' — the comparison is total <= threshold."""
+    history = _history_of(6)
+    monkeypatch.setattr(chat_summarize, "complete", _fake_complete("S"))
+    result = chat_summarize.maybe_summarize(
+        history, _cfg(), threshold=0, keep_turns=2,
+    )
+    # Fired: result is the synthetic pair + the 2-turn keep window.
+    assert result is not history
+    assert result[0][0] == "user"
+    assert "S" in result[0][1]
+
+
 # --- The provider itself -----------------------------------------------------
 # Everything above stubs `complete` out; these exercise it against canned HTTP
 # responses, because response parsing and failure mapping are where the bugs are.
