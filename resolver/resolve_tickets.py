@@ -1162,6 +1162,30 @@ def _phase_timeout(cfg, mode: str) -> int:
     return getattr(cfg, "agent_timeout", 1800)
 
 
+def _apply_sandbox(cmd: list[str], cfg: Config, cwd: Path, mode: str) -> list[str]:
+    """Prepend the sandbox wrapper to `cmd` when configured and running implement.
+    Only the implement phase needs containerization; plan/review are already
+    read-only via tool allowlists, and delegate's Bash is limited to file_ticket.py."""
+    if mode != "implement":
+        return cmd
+    raw = getattr(cfg, "sandbox_command", "").strip()
+    if not raw:
+        return cmd
+    # IMPORTANT: only `cwd` (a Path) is interpolated here — never pass user-supplied
+    # values to .format() or callers can inject arbitrary placeholder keys.
+    try:
+        prefix = shlex.split(raw.format(cwd=str(cwd)))
+    except (ValueError, KeyError) as exc:
+        audit.get_logger().warning(
+            "SANDBOX_COMMAND could not be parsed (%s); running without sandbox", exc)
+        return cmd
+    audit.audit_event(
+        audit.get_logger(), "subprocess", "applying sandbox wrapper for implement phase",
+        level=logging.INFO, category="sandbox", label=mode, cmd=prefix,
+    )
+    return prefix + cmd
+
+
 def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -> tuple[bool, str]:
     """Run headless Claude, streaming its output so every tool call (Read/Write/
     Edit/Bash/...) is recorded as an `agent_tool` audit event. The raw stream is
@@ -1190,6 +1214,7 @@ def run_claude(cfg: Config, prompt: str, cwd: Path, mode: str, log_path: Path) -
         if cfg.implement_tools:
             cmd += ["--allowedTools", *cfg.implement_tools.split()]
 
+    cmd = _apply_sandbox(cmd, cfg, cwd, mode)
     timeout = _phase_timeout(cfg, mode)
     logger = audit.get_logger()
     result: dict = {}
@@ -1438,6 +1463,7 @@ def _run_opencode_once(cfg: Config, prompt: str, cwd: Path, mode: str,
     else:
         cmd += ["--agent", cfg.opencode_build_agent, "--dangerously-skip-permissions"]
 
+    cmd = _apply_sandbox(cmd, cfg, cwd, mode)
     timeout = _phase_timeout(cfg, mode)
     logger = audit.get_logger()
     state: dict = {}

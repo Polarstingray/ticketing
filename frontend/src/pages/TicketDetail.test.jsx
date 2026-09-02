@@ -74,7 +74,7 @@ beforeEach(() => {
   authState.user = null;
   api.listUsers.mockResolvedValue([]);
   api.getTicket.mockResolvedValue(makeTicket());
-  api.listComments.mockResolvedValue([]);
+  api.listComments.mockResolvedValue({ items: [], total: 0 });
   api.listActivity.mockResolvedValue([]);
   api.listAgentRuns.mockResolvedValue([]);
   api.costRollup.mockResolvedValue(null);
@@ -179,7 +179,7 @@ describe("TicketDetail resolver fix loop", () => {
   it("offers Apply fixes on a reviewed ticket and hands it back to the bot", async () => {
     authState.user = { id: CREATOR.id, role: "member" };
     api.getTicket.mockResolvedValue(reviewed());
-    api.listComments.mockResolvedValue([REVIEW]);
+    api.listComments.mockResolvedValue({ items: [REVIEW], total: 1 });
     api.addComment.mockResolvedValue({ id: 2, author: CREATOR.id, body: "/fix" });
     api.updateTicket.mockResolvedValue(reviewed());
     renderDetail();
@@ -197,7 +197,7 @@ describe("TicketDetail resolver fix loop", () => {
   it("disables Apply fixes when the ticket names no repo", async () => {
     authState.user = { id: CREATOR.id, role: "member" };
     api.getTicket.mockResolvedValue(reviewed(["resolver:awaiting-fix"]));
-    api.listComments.mockResolvedValue([REVIEW]);
+    api.listComments.mockResolvedValue({ items: [REVIEW], total: 1 });
     renderDetail();
     await waitForLoaded();
 
@@ -207,7 +207,7 @@ describe("TicketDetail resolver fix loop", () => {
   it("hides Apply fixes when the ticket is not awaiting a fix", async () => {
     authState.user = { id: CREATOR.id, role: "member" };
     api.getTicket.mockResolvedValue(reviewed(["repo:ticketing"]));
-    api.listComments.mockResolvedValue([REVIEW]);
+    api.listComments.mockResolvedValue({ items: [REVIEW], total: 1 });
     renderDetail();
     await waitForLoaded();
 
@@ -217,7 +217,7 @@ describe("TicketDetail resolver fix loop", () => {
   it("hides Apply fixes from a member who cannot modify the ticket", async () => {
     authState.user = { id: 777, role: "member" };
     api.getTicket.mockResolvedValue(reviewed());
-    api.listComments.mockResolvedValue([REVIEW]);
+    api.listComments.mockResolvedValue({ items: [REVIEW], total: 1 });
     renderDetail();
     await waitForLoaded();
 
@@ -248,7 +248,7 @@ describe("TicketDetail markdown rendering", () => {
 
   it("renders a resolver comment as markdown, not literal text", async () => {
     authState.user = { id: CREATOR.id, role: "member" };
-    api.listComments.mockResolvedValue([RESOLVER_COMMENT]);
+    api.listComments.mockResolvedValue({ items: [RESOLVER_COMMENT], total: 1 });
     const { container } = renderDetail();
     await waitForLoaded();
 
@@ -306,5 +306,94 @@ describe("TicketDetail unread notifications", () => {
 
     expect(screen.queryByText(/boom/i)).not.toBeInTheDocument();
     expect(notifState.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("TicketDetail comment pagination", () => {
+  const COMMENT = (id, body) => ({
+    id,
+    author: CREATOR.id,
+    body,
+    created_at: "2026-01-01T00:00:00Z",
+  });
+
+  it("shows 'Load more comments' when total exceeds loaded count", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.listComments.mockResolvedValue({ items: [COMMENT(1, "First")], total: 5 });
+    renderDetail();
+    await waitForLoaded();
+
+    expect(screen.getByRole("button", { name: /Load more comments/i })).toBeInTheDocument();
+  });
+
+  it("hides 'Load more comments' when all comments are loaded", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.listComments.mockResolvedValue({ items: [COMMENT(1, "Only comment")], total: 1 });
+    renderDetail();
+    await waitForLoaded();
+
+    expect(screen.queryByRole("button", { name: /Load more comments/i })).not.toBeInTheDocument();
+  });
+
+  it("appends next page and hides button when all comments are now loaded", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.listComments
+      .mockResolvedValueOnce({ items: [COMMENT(1, "Page one comment")], total: 2 })
+      .mockResolvedValueOnce({ items: [COMMENT(2, "Page two comment")], total: 2 });
+
+    renderDetail();
+    await waitForLoaded();
+
+    expect(screen.getByText("Page one comment")).toBeInTheDocument();
+    expect(screen.queryByText("Page two comment")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Load more comments/i }));
+
+    await waitFor(() => expect(screen.getByText("Page two comment")).toBeInTheDocument());
+    expect(screen.getByText("Page one comment")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Load more comments/i })).not.toBeInTheDocument();
+
+    expect(api.listComments).toHaveBeenCalledTimes(2);
+    expect(api.listComments).toHaveBeenNthCalledWith(2, "42", { limit: 10, offset: 1 });
+  });
+
+  it("shows an error when loadMoreComments fails", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    api.listComments
+      .mockResolvedValueOnce({ items: [COMMENT(1, "First comment")], total: 3 })
+      .mockRejectedValueOnce(new Error("Network error"));
+
+    renderDetail();
+    await waitForLoaded();
+
+    fireEvent.click(screen.getByRole("button", { name: /Load more comments/i }));
+
+    await waitFor(() => expect(screen.getByText(/Network error/i)).toBeInTheDocument());
+    // First comment still visible
+    expect(screen.getByText("First comment")).toBeInTheDocument();
+  });
+
+  it("ignores a second click while a load is already in flight", async () => {
+    authState.user = { id: CREATOR.id, role: "member" };
+    let resolveSecond;
+    const secondPagePromise = new Promise((res) => { resolveSecond = res; });
+
+    api.listComments
+      .mockResolvedValueOnce({ items: [COMMENT(1, "C1")], total: 3 })
+      .mockReturnValueOnce(secondPagePromise);
+
+    renderDetail();
+    await waitForLoaded();
+
+    const btn = screen.getByRole("button", { name: /Load more comments/i });
+    fireEvent.click(btn);
+    // Second click before the first resolves
+    fireEvent.click(btn);
+
+    resolveSecond({ items: [COMMENT(2, "C2")], total: 3 });
+    await waitFor(() => expect(screen.getByText("C2")).toBeInTheDocument());
+
+    // listComments called exactly twice: initial load + one "load more"
+    expect(api.listComments).toHaveBeenCalledTimes(2);
   });
 });

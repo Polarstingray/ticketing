@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth/AuthContext";
@@ -35,6 +35,10 @@ export default function TicketDetail() {
   const [ticket, setTicket] = useState(null);
   const [users, setUsers] = useState([]);
   const [comments, setComments] = useState([]);
+  const [commentsTotal, setCommentsTotal] = useState(0);
+  const [commentsOffset, setCommentsOffset] = useState(0);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const commentsLoadingRef = useRef(false);
   const [activity, setActivity] = useState([]);
   const [agentRuns, setAgentRuns] = useState([]);
   // Delegation cost rollup: this ticket's cost plus every child's. Only surfaced
@@ -56,16 +60,18 @@ export default function TicketDetail() {
   async function load() {
     setLoading(true);
     try {
-      const [t, c, a, runs, roll] = await Promise.all([
+      const [t, commentPage, a, runs, roll] = await Promise.all([
         api.getTicket(id),
-        api.listComments(id),
+        api.listComments(id, { limit: 10, offset: 0 }),
         api.listActivity(id),
         api.listAgentRuns(id),
         // Non-critical: a rollup failure must not blank the whole page.
         api.costRollup(id).catch(() => null),
       ]);
       setTicket(t);
-      setComments(c);
+      setComments(commentPage?.items ?? []);
+      setCommentsTotal(commentPage?.total ?? 0);
+      setCommentsOffset((commentPage?.items ?? []).length);
       setActivity(a);
       setAgentRuns(runs);
       setRollup(roll);
@@ -73,6 +79,28 @@ export default function TicketDetail() {
       setError(e.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadMoreComments() {
+    // Ref guard must be set synchronously before the first await so concurrent
+    // callers (e.g. rapid double-click) see it and bail immediately.
+    if (commentsLoadingRef.current) return;
+    commentsLoadingRef.current = true;
+    // Snapshot the offset now; the closed-over value is stable because the ref
+    // guard above ensures no other load is in flight that could advance it.
+    const offsetSnapshot = commentsOffset;
+    setCommentsLoading(true);
+    try {
+      const page = await api.listComments(id, { limit: 10, offset: offsetSnapshot });
+      setComments((prev) => [...prev, ...(page?.items ?? [])]);
+      setCommentsTotal(page?.total ?? 0);
+      setCommentsOffset(offsetSnapshot + (page?.items ?? []).length);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      commentsLoadingRef.current = false;
+      setCommentsLoading(false);
     }
   }
 
@@ -387,6 +415,16 @@ export default function TicketDetail() {
               </div>
             ))}
           </div>
+          {commentsOffset < commentsTotal && (
+            <button
+              type="button"
+              className={styles.loadMore}
+              onClick={loadMoreComments}
+              disabled={commentsLoading}
+            >
+              {commentsLoading ? "Loading…" : "Load more comments"}
+            </button>
+          )}
           <form onSubmit={submitComment} className={styles.commentForm}>
             <MarkdownEditor
               value={commentBody}

@@ -762,6 +762,60 @@ def test_run_claude_handles_missing_binary(tmp_path, fake_cfg):
     assert "definitely-not-a-real-binary-xyz" in msg
 
 
+# --- implement-phase sandboxing -------------------------------------------
+def test_apply_sandbox_noop_for_non_implement_modes(fake_cfg, tmp_path):
+    fake_cfg.sandbox_command = "bwrap --bind {cwd} {cwd} --"
+    cmd = ["claude", "-p", "hi"]
+    assert rt._apply_sandbox(cmd, fake_cfg, tmp_path, "plan") == cmd
+    assert rt._apply_sandbox(cmd, fake_cfg, tmp_path, "review") == cmd
+    assert rt._apply_sandbox(cmd, fake_cfg, tmp_path, "delegate") == cmd
+
+
+def test_apply_sandbox_noop_when_unset(fake_cfg, tmp_path):
+    fake_cfg.sandbox_command = ""
+    cmd = ["claude", "-p", "hi"]
+    assert rt._apply_sandbox(cmd, fake_cfg, tmp_path, "implement") == cmd
+
+
+def test_apply_sandbox_prepends_prefix_with_cwd_substituted(fake_cfg, tmp_path):
+    fake_cfg.sandbox_command = "bwrap --bind {cwd} {cwd} --ro-bind / / --"
+    cmd = ["claude", "-p", "hi"]
+    out = rt._apply_sandbox(cmd, fake_cfg, tmp_path, "implement")
+    assert out == ["bwrap", "--bind", str(tmp_path), str(tmp_path),
+                   "--ro-bind", "/", "/", "--", "claude", "-p", "hi"]
+
+
+def test_apply_sandbox_fails_open_on_malformed_template(fake_cfg, tmp_path, caplog):
+    fake_cfg.sandbox_command = 'bwrap --bind {cwd "unterminated quote'
+    cmd = ["claude", "-p", "hi"]
+    with caplog.at_level(logging.WARNING):
+        out = rt._apply_sandbox(cmd, fake_cfg, tmp_path, "implement")
+    assert out == cmd
+    assert "SANDBOX_COMMAND" in caplog.text
+
+
+def test_run_claude_uses_sandboxed_command_for_implement(tmp_path, fake_cfg, monkeypatch):
+    fake_cfg.agent_bin = "claude"
+    fake_cfg.agent_model = ""
+    fake_cfg.implement_tools = ""
+    fake_cfg.agent_timeout = 5
+    fake_cfg.agent_implement_timeout = 5
+    fake_cfg.sandbox_command = "bwrap --bind {cwd} {cwd} --"
+    captured = {}
+
+    def fake_stream(cmd, cwd, timeout, log_path, on_line, *, category, label):
+        captured["cmd"] = list(cmd)
+        on_line(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                            "result": "done"}))
+        return 0, False, None
+
+    monkeypatch.setattr(rt, "_stream_subprocess", fake_stream)
+    ok, text = rt.run_claude(fake_cfg, "do it", tmp_path, "implement", tmp_path / "i.log")
+    assert ok is True
+    assert captured["cmd"][:4] == ["bwrap", "--bind", str(tmp_path), str(tmp_path)]
+    assert "claude" in captured["cmd"]
+
+
 # --- opencode runner -----------------------------------------------------
 def _set_opencode_cfg(fake_cfg):
     fake_cfg.agent_bin = "opencode"
