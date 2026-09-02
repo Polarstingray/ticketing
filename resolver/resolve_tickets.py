@@ -1171,6 +1171,8 @@ def _apply_sandbox(cmd: list[str], cfg: Config, cwd: Path, mode: str) -> list[st
     raw = getattr(cfg, "sandbox_command", "").strip()
     if not raw:
         return cmd
+    # IMPORTANT: only `cwd` (a Path) is interpolated here — never pass user-supplied
+    # values to .format() or callers can inject arbitrary placeholder keys.
     try:
         prefix = shlex.split(raw.format(cwd=str(cwd)))
     except (ValueError, KeyError) as exc:
