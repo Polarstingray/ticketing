@@ -83,14 +83,19 @@ export default function TicketDetail() {
   }
 
   async function loadMoreComments() {
+    // Ref guard must be set synchronously before the first await so concurrent
+    // callers (e.g. rapid double-click) see it and bail immediately.
     if (commentsLoadingRef.current) return;
     commentsLoadingRef.current = true;
+    // Snapshot the offset now; the closed-over value is stable because the ref
+    // guard above ensures no other load is in flight that could advance it.
+    const offsetSnapshot = commentsOffset;
     setCommentsLoading(true);
     try {
-      const page = await api.listComments(id, { limit: 10, offset: commentsOffset });
+      const page = await api.listComments(id, { limit: 10, offset: offsetSnapshot });
       setComments((prev) => [...prev, ...(page?.items ?? [])]);
       setCommentsTotal(page?.total ?? 0);
-      setCommentsOffset((prev) => prev + (page?.items ?? []).length);
+      setCommentsOffset(offsetSnapshot + (page?.items ?? []).length);
     } catch (e) {
       setError(e.message);
     } finally {
