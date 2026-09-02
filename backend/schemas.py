@@ -225,6 +225,13 @@ class CommentOut(BaseModel):
     created_at: UTCDateTime
 
 
+class PaginatedComments(BaseModel):
+    items: List[CommentOut]
+    total: int
+    limit: int
+    offset: int
+
+
 # --- Activity ----------------------------------------------------------------
 
 class ActivityOut(BaseModel):
