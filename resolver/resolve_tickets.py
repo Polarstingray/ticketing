@@ -1777,6 +1777,11 @@ def ref_exists(repo: Path, ref: str) -> bool:
     return run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])[0] == 0
 
 
+def _is_ancestor(repo: Path, rev: str, ref: str) -> bool:
+    """Return True if `rev` is a (non-strict) ancestor of `ref`."""
+    return run(["git", "-C", str(repo), "merge-base", "--is-ancestor", rev, ref])[0] == 0
+
+
 def _ambient_base(repo: Path) -> tuple[str, str]:
     """Where to branch from when the ticket says nothing — the historical behavior.
 
@@ -1856,7 +1861,28 @@ def resolve_base(repo: Path, ticket: dict, *, fetch_ok: bool = False,
             "fix will be against that, not the code this ticket was filed for."
         )
 
-    # Pinned and reachable. Keep the ambient branch only if the ticket named none.
+    # Pinned and reachable. When both rev: and branch: are given, prefer the live
+    # branch tip as the checkout point — the pin functions only as a "has this branch
+    # been rewritten backward?" sentinel. Using the literal pin as a worktree base
+    # cuts the worktree BEFORE the reviewed commits, so a fix agent reconstructs the
+    # feature from scratch instead of amending the real code (bug from ticket #135).
+    if branch and fetch_ok:
+        remote_branch = f"origin/{branch}"
+        if ref_exists(repo, remote_branch):
+            if _is_ancestor(repo, rev, remote_branch):
+                # Branch has moved forward since filing. Use its current tip so the
+                # worktree contains the work that was actually reviewed.
+                return remote_branch, branch, ""
+            else:
+                # Branch has been rewritten/rebased behind the pin — the reviewed
+                # commit is no longer an ancestor. This is the stale-pin scenario.
+                return fallback_ref, fallback_branch, (
+                    f"⚠️ This ticket is pinned to commit `{rev[:12]}` on branch "
+                    f"`{branch}`, but that commit is no longer an ancestor of "
+                    f"`origin/{branch}` (force-pushed or rebased?). Falling back to "
+                    f"`{fallback_branch}` — findings and any fix will be against that, "
+                    "not the code this ticket was filed for."
+                )
     return rev, (branch or fallback_branch), ""
 
 
@@ -2552,6 +2578,14 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
     if base_warning:
         client.add_comment(ticket["id"], base_warning)
     wt, branch = prepare_worktree(repo, ticket["id"], base_ref)
+    # Export the worktree's actual HEAD and branch so any follow-up ticket the agent
+    # files via file_ticket.py auto-inherits correct rev:/branch: tags. Without this
+    # the agent's self-filed code_review tickets pin to whatever SHA the agent happens
+    # to grab (often the pre-feature base), causing a fix to cut a sibling worktree
+    # from before the reviewed code exists (bug from ticket #135).
+    rc, wt_head = run(["git", "-C", str(wt), "rev-parse", "HEAD"])
+    os.environ["STINGRAY_TICKET_REV"] = wt_head.strip() if rc == 0 else ""
+    os.environ["STINGRAY_TICKET_BRANCH"] = branch
     try:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         log_path = cfg.logs_dir / f"ticket-{ticket['id']}-implement-{ts}.log"
@@ -3420,6 +3454,16 @@ def process(cfg: Config, client: StingrayClient, ticket: dict, dry_run: bool) ->
             # isn't re-implementing blind (B4).
             action, kw = "rework", {"plan": find_approved_plan(comments, cfg.bot_user_id),
                                     "reviewer_notes": last["body"] if last else None}
+        elif cmd.startswith("/retry"):
+            # Generic rework verb: check out the ticket's own branch at its current
+            # tip and push an additional commit with the given notes. Unlike the
+            # changes_requested path (which fires when GitHub reviews and reassigns),
+            # /retry fires when a human reassigns with an explicit instruction —
+            # same prepare_worktree reuse-branch path, same do_implement machinery.
+            notes = (last["body"].split(None, 1)[1]
+                     if last and len(last["body"].split(None, 1)) > 1 else "")
+            plan = find_approved_plan(comments, cfg.bot_user_id)
+            action, kw = "rework", {"plan": plan, "reviewer_notes": notes or None}
         else:
             action, kw = "skip", {}
     elif TAG_AWAIT_FIX in tags:
