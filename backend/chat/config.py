@@ -108,6 +108,12 @@ class ChatConfig:
     # Defaulted (and last) on purpose: tests construct ChatConfig(**base) from an
     # explicit dict, and a required field would break every one of them.
     max_tool_hops: int = 6
+    # Total character count of history at which summarization triggers. Very high
+    # default means operators opt in by lowering it; 0 is effectively "always".
+    summary_threshold: int = 20_000
+    # How many of the most-recent turns to keep verbatim when summarizing; the
+    # remainder is condensed into a single synthetic exchange prepended to them.
+    summary_keep_turns: int = 4
 
     @property
     def enabled(self) -> bool:
@@ -148,4 +154,6 @@ def load() -> ChatConfig:
         history_turns=_int_env("CHAT_HISTORY_TURNS", 10),
         stream_usage=_bool_env("CHAT_STREAM_USAGE", True),
         max_tool_hops=_int_env("CHAT_MAX_TOOL_HOPS", 6),
+        summary_threshold=_int_env("CHAT_SUMMARY_THRESHOLD", 20_000),
+        summary_keep_turns=_int_env("CHAT_SUMMARY_KEEP_TURNS", 4),
     )
