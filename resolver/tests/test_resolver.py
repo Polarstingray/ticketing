@@ -531,6 +531,83 @@ def test_do_implement_repair_escape_hard_fails(fake_cfg, monkeypatch, tmp_path):
     assert "escaped its worktree" in rec["failed"][0]
 
 
+# --- zero-diff runs: "no changes needed" is not automatically a failure --
+def _zero_diff_harness(fake_cfg, monkeypatch, tmp_path, summary, log_text=""):
+    """Like _impl_harness, but wires the git plumbing to report zero commits
+    ahead (the "no diff" path) and lets a log file be pre-seeded for
+    filed_tickets_in_log to scan."""
+    wt = tmp_path / "wt"
+    log_path = tmp_path / "impl.log"
+    log_path.write_text(log_text)
+    rec = {"states": [], "comments": []}
+    monkeypatch.setattr(rt, "set_state",
+                        lambda client, ticket, tags, **f: rec["states"].append((tags, f)) or {})
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "has_origin", lambda repo: False)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo, ticket, **kw: ("HEAD", "main", ""))
+    monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # never escapes
+    monkeypatch.setattr(rt, "run_agent_tracked", lambda *a, **k: (True, summary))
+    # commit/diff plumbing: always report zero commits ahead (the "no changes" branch),
+    # and hand back the pre-seeded log path so filed_tickets_in_log has something to read.
+    monkeypatch.setattr(rt, "run",
+                        lambda cmd, cwd=None, timeout=None: (0, "0") if "rev-list" in cmd else (0, ""))
+    # do_implement builds log_path as cfg.logs_dir / "ticket-<id>-implement-<ts>.log";
+    # redirect it to our pre-seeded file regardless of the name.
+    class _FixedLogsDir:
+        def __truediv__(self, name):
+            return log_path
+    fake_cfg.logs_dir = _FixedLogsDir()
+    monkeypatch.setattr(rt, "publish",
+                        lambda *a, **k: pytest.fail("must not publish a zero-diff run"))
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: rec.update(failed=(msg, k)))
+    return rec, log_path
+
+
+def test_do_implement_no_changes_needed_hands_back_success(fake_cfg, monkeypatch, tmp_path):
+    summary = ("Investigated: the review found no actionable issues, all tests pass.\n\n"
+               "NO CHANGES NEEDED: the code already correctly implements the ticket.")
+    rec, _log = _zero_diff_harness(fake_cfg, monkeypatch, tmp_path, summary)
+    client = FakeClient()
+    ticket = {"id": 168, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, tmp_path / "repo", plan="review-only plan")
+    assert "failed" not in rec
+    assert client.comments_added, "expected a hand-back comment"
+    body = client.comments_added[-1][1]
+    assert rt.IMPL_MARKER in body
+    assert "the code already correctly implements the ticket." in body
+    assert rec["states"][-1][1].get("status") == "in_review"
+
+
+def test_do_implement_zero_diff_without_marker_still_fails(fake_cfg, monkeypatch, tmp_path):
+    # No NO CHANGES NEEDED marker and nothing filed in the log: this must still be
+    # treated as a failure, exactly as before this change.
+    summary = "I looked around but didn't do anything in particular."
+    rec, _log = _zero_diff_harness(fake_cfg, monkeypatch, tmp_path, summary)
+    client = FakeClient()
+    ticket = {"id": 169, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, tmp_path / "repo", plan="p")
+    assert rec["failed"][1].get("reimplementable") is True
+    assert "produced no code changes" in rec["failed"][0]
+
+
+def test_do_implement_filed_tickets_still_takes_priority(fake_cfg, monkeypatch, tmp_path):
+    # When a run both filed a ticket AND claims NO CHANGES NEEDED, the existing
+    # filed-tickets path wins (it's checked first) — precedence is intentional.
+    summary = "Filed a follow-up.\n\nNO CHANGES NEEDED: this was a filing-only ticket."
+    rec, log_path = _zero_diff_harness(fake_cfg, monkeypatch, tmp_path, summary,
+                                       log_text="created ticket #99: Follow-up\n")
+    client = FakeClient()
+    ticket = {"id": 170, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, tmp_path / "repo", plan="p")
+    assert "failed" not in rec
+    body = client.comments_added[-1][1]
+    assert "filed #99" in body
+    assert "no code changes were needed:" not in body  # filed-branch wording, not the marker's
+
+
 # --- resolve_base: origin-less repos (real git, no network) --------------
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args],
@@ -1343,6 +1420,18 @@ def test_filed_tickets_in_log_parses_created_lines(tmp_path):
 
 def test_filed_tickets_in_log_missing_file_is_empty(tmp_path):
     assert rt.filed_tickets_in_log(tmp_path / "nope.log") == []
+
+
+def test_no_changes_needed_reason_parses_marker():
+    summary = ("Ran the tests, everything already passes.\n\n"
+               "NO CHANGES NEEDED: the review found no actionable issues.")
+    assert rt.no_changes_needed_reason(summary) == "the review found no actionable issues."
+
+
+def test_no_changes_needed_reason_returns_none_without_marker():
+    assert rt.no_changes_needed_reason("Fixed the bug in foo.py.") is None
+    assert rt.no_changes_needed_reason("") is None
+    assert rt.no_changes_needed_reason(None) is None
 
 
 # --- untrusted ticket fields (prompt injection) --------------------------
