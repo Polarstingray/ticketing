@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth/AuthContext";
@@ -38,6 +38,7 @@ export default function TicketDetail() {
   const [commentsTotal, setCommentsTotal] = useState(0);
   const [commentsOffset, setCommentsOffset] = useState(0);
   const [commentsLoading, setCommentsLoading] = useState(false);
+  const commentsLoadingRef = useRef(false);
   const [activity, setActivity] = useState([]);
   const [agentRuns, setAgentRuns] = useState([]);
   // Delegation cost rollup: this ticket's cost plus every child's. Only surfaced
@@ -82,6 +83,8 @@ export default function TicketDetail() {
   }
 
   async function loadMoreComments() {
+    if (commentsLoadingRef.current) return;
+    commentsLoadingRef.current = true;
     setCommentsLoading(true);
     try {
       const page = await api.listComments(id, { limit: 10, offset: commentsOffset });
@@ -91,6 +94,7 @@ export default function TicketDetail() {
     } catch (e) {
       setError(e.message);
     } finally {
+      commentsLoadingRef.current = false;
       setCommentsLoading(false);
     }
   }
