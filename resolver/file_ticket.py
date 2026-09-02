@@ -97,6 +97,44 @@ def _repo_for(args: argparse.Namespace) -> "str | None":
     return explicit or None
 
 
+def _rev_for(args: argparse.Namespace) -> "str | None":
+    """Which commit a ticket filed from this run should pin.
+
+    Inside a sweep resolve_tickets.do_implement exports ``STINGRAY_TICKET_REV`` set to
+    the worktree's actual HEAD SHA right after the branch is created, so a self-filed
+    code_review ticket always pins to the real tip — not whatever commit the agent
+    happens to grab, which is typically the pre-feature base (bug from ticket #135).
+
+    Suppressed when ``--no-repo`` is passed (rev: is meaningless without a repo)."""
+    if getattr(args, "no_repo", False):
+        return None
+    inherited = os.environ.get("STINGRAY_TICKET_REV", "").strip()
+    explicit = getattr(args, "rev", None)
+    if inherited:
+        if explicit and explicit != inherited:
+            print(f"note: ignoring --rev {explicit!r}; this run's worktree HEAD is "
+                  f"{inherited!r} (pass --no-repo to suppress)", file=sys.stderr)
+        return inherited
+    return explicit or None
+
+
+def _branch_for(args: argparse.Namespace) -> "str | None":
+    """Which branch a ticket filed from this run belongs to.
+
+    Parallel to _rev_for: do_implement exports ``STINGRAY_TICKET_BRANCH`` so the
+    branch name is captured without relying on the agent to pass ``--branch``."""
+    if getattr(args, "no_repo", False):
+        return None
+    inherited = os.environ.get("STINGRAY_TICKET_BRANCH", "").strip()
+    explicit = getattr(args, "branch", None)
+    if inherited:
+        if explicit and explicit != inherited:
+            print(f"note: ignoring --branch {explicit!r}; this run's worktree branch is "
+                  f"{inherited!r} (pass --no-repo to suppress)", file=sys.stderr)
+        return inherited
+    return explicit or None
+
+
 def build_payload(args: argparse.Namespace) -> dict:
     """Validate args and assemble the POST body. Raises ValueError on bad input.
 
@@ -115,8 +153,8 @@ def build_payload(args: argparse.Namespace) -> dict:
         root=args.root,
         repo=_repo_for(args),
         no_repo=getattr(args, "no_repo", False),
-        rev=getattr(args, "rev", None),
-        branch=getattr(args, "branch", None),
+        rev=_rev_for(args),
+        branch=_branch_for(args),
         parent=getattr(args, "parent", None),
         assign=args.assign,
         warn=lambda msg: print(msg, file=sys.stderr),

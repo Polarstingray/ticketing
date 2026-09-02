@@ -672,6 +672,158 @@ def test_resolve_base_prefers_origin_default(tmp_path):
     assert base_branch == "main"
 
 
+# --- resolve_base: branch tip preference over stale rev (ticket #135) ----
+def _setup_origin_with_branch(tmp_path):
+    """Create a repo with a remote, and return (repo, bare, feature_sha).
+
+    The feature commit is pushed to origin on branch 'feat/mobile'. The local
+    repo is given the remote as 'origin' and fetched. This mirrors the state
+    after an implement run has pushed its branch."""
+    repo = _init_repo(tmp_path)
+    bare = tmp_path / "o.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(repo), str(bare)],
+                   check=True, capture_output=True)
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "fetch", "-q", "origin")
+
+    # Create a feature branch with one commit.
+    _git(repo, "checkout", "-q", "-b", "feat/mobile")
+    (repo / "f.txt").write_text("feature\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-aqm", "feature")
+    feature_sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    # Push the feature branch.
+    _git(repo, "push", "-q", "origin", "feat/mobile")
+    # Fetch so origin/feat/mobile is visible locally.
+    _git(repo, "fetch", "-q", "origin")
+
+    # Switch back to main.
+    _git(repo, "checkout", "-q", "main")
+    return repo, bare, feature_sha
+
+
+def test_resolve_base_uses_branch_tip_when_rev_is_ancestor(tmp_path):
+    """When rev: is an ancestor of origin/<branch>, use the branch tip as base_ref.
+
+    This is the core fix for ticket #135: a self-filed review ticket carries the
+    pre-feature rev (the base the implement agent branched from), but the reviewed
+    branch has since advanced to include the feature commit. A fix should stack on
+    the branch tip, not re-derive from the pre-feature commit."""
+    repo, _bare, feature_sha = _setup_origin_with_branch(tmp_path)
+
+    # Simulate a mis-pinned ticket: rev is the init commit (parent of feature_sha),
+    # which is an ancestor of origin/feat/mobile.
+    init_sha = _git(repo, "rev-parse", "feat/mobile~1").strip()
+    ticket = {"id": 1, "tags": [f"rev:{init_sha}", "branch:feat/mobile"]}
+
+    base_ref, base_branch, warning = rt.resolve_base(repo, ticket, fetch_ok=True)
+
+    assert base_ref == "origin/feat/mobile"
+    assert base_branch == "feat/mobile"
+    assert warning == ""
+
+
+def test_resolve_base_warns_when_rev_not_ancestor_of_branch(tmp_path):
+    """When rev: is NOT an ancestor of origin/<branch>, the branch was rewritten.
+
+    Emit the stale-pin warning and fall back to ambient, same as the unreachable-pin
+    path. This covers force-push/rebase scenarios."""
+    repo, _bare, feature_sha = _setup_origin_with_branch(tmp_path)
+
+    # Manufacture a SHA that isn't an ancestor of feat/mobile by using a fresh orphan
+    # branch — we just need a reachable but unrelated SHA.
+    _git(repo, "checkout", "-q", "--orphan", "orphan-branch")
+    (repo / "g.txt").write_text("orphan\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "orphan")
+    orphan_sha = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "checkout", "-q", "main")
+
+    ticket = {"id": 1, "tags": [f"rev:{orphan_sha}", "branch:feat/mobile"]}
+    base_ref, base_branch, warning = rt.resolve_base(repo, ticket, fetch_ok=True)
+
+    assert warning != "", "must warn when rev is not an ancestor of origin/<branch>"
+    assert "rewritten" in warning.lower() or "rebased" in warning.lower() or "force" in warning.lower()
+    # Falls back to ambient (main).
+    assert base_branch in ("main", "")
+
+
+def test_resolve_base_pin_no_remote_uses_literal_rev(tmp_path):
+    """Without fetch_ok (no origin), the literal rev is still used — unchanged behavior."""
+    repo = _init_repo(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    ticket = {"id": 1, "tags": [f"rev:{head}", "branch:feat/thing"]}
+
+    base_ref, base_branch, warning = rt.resolve_base(repo, ticket, fetch_ok=False)
+
+    assert base_ref == head
+    assert base_branch == "feat/thing"
+    assert warning == ""
+
+
+# --- /retry dispatch (ticket #135) ----------------------------------------
+def test_retry_dispatches_to_rework_on_awaiting_pr(fake_cfg, monkeypatch):
+    """/retry on an awaiting-pr ticket triggers a rework without requiring PR status
+    'changes_requested' — it lets a human add arbitrary follow-up notes."""
+    rework_calls = []
+
+    def fake_implement(cfg, client, ticket, repo, plan, reviewer_notes=None, command=None):
+        rework_calls.append({"plan": plan, "reviewer_notes": reviewer_notes})
+
+    monkeypatch.setattr(rt, "do_implement", fake_implement)
+    monkeypatch.setattr(rt, "prepare_readonly_worktree",
+                        lambda repo, tid, base_ref, kind: tmp_path_placeholder / kind)
+
+    import tempfile
+    tmp_path_placeholder = Path(tempfile.mkdtemp())
+
+    bot = fake_cfg.bot_user_id
+    plan_body = f"{rt.PLAN_MARKER} (Stingray resolver)\n\nthe plan"
+    comments = [
+        {"author": bot, "body": plan_body},
+        # Human re-assigns with /retry and notes.
+        {"author": 9, "body": "/retry please also add a docstring"},
+    ]
+    ticket = {
+        "id": 50,
+        "tags": [rt.TAG_AWAIT_PR, "repo:x"],
+        "status": "open",
+        "created_by": 9,
+    }
+    client = FakeClient(comments)
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+
+    assert len(rework_calls) == 1
+    assert "please also add a docstring" in (rework_calls[0]["reviewer_notes"] or "")
+
+
+def test_retry_without_notes_still_dispatches_to_rework(fake_cfg, monkeypatch):
+    """/retry with no trailing notes should still trigger a rework."""
+    rework_calls = []
+
+    def fake_implement(cfg, client, ticket, repo, plan, reviewer_notes=None, command=None):
+        rework_calls.append({"reviewer_notes": reviewer_notes})
+
+    monkeypatch.setattr(rt, "do_implement", fake_implement)
+
+    bot = fake_cfg.bot_user_id
+    comments = [
+        {"author": bot, "body": f"{rt.PLAN_MARKER} (Stingray resolver)\n\nthe plan"},
+        {"author": 9, "body": "/retry"},
+    ]
+    ticket = {
+        "id": 51,
+        "tags": [rt.TAG_AWAIT_PR, "repo:x"],
+        "status": "open",
+        "created_by": 9,
+    }
+    client = FakeClient(comments)
+    rt.process(fake_cfg, client, ticket, dry_run=False)
+
+    assert len(rework_calls) == 1
+    assert rework_calls[0]["reviewer_notes"] is None
+
+
 # --- per-phase model selection ------------------------------------------
 def test_model_for_falls_back_to_agent_model():
     cfg = SimpleNamespace(agent_model="base")
