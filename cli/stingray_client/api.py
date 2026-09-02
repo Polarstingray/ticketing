@@ -256,7 +256,12 @@ class StingrayClient:
 
     # --- comments --------------------------------------------------------
     def list_comments(self, ticket_id: int) -> list[dict]:
-        return self._request("GET", f"/tickets/{ticket_id}/comments").json()
+        data = self._request("GET", f"/tickets/{ticket_id}/comments").json()
+        # Backend returns { items, total, limit, offset }; unwrap for callers
+        # that expect a flat list.
+        if isinstance(data, dict):
+            return data.get("items", [])
+        return data
 
     def add_comment(self, ticket_id: int, body: str) -> dict:
         return self._request("POST", f"/tickets/{ticket_id}/comments", json={"body": body}).json()
