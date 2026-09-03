@@ -139,8 +139,11 @@ def test_reactivating_resets_the_failure_streak(client, make_user):
 
 
 def test_per_user_cap(client, make_user, monkeypatch):
+    from schemas import SecuritySettingsValues
+
     user = make_user()
-    monkeypatch.setattr("routers.webhooks.MAX_WEBHOOKS_PER_USER", 2)
+    monkeypatch.setattr("routers.webhooks.get_security_settings",
+                        lambda db: SecuritySettingsValues(max_webhooks_per_user=2))
     _create(client, user, name="one")
     _create(client, user, name="two")
     res = client.post(
@@ -253,6 +256,105 @@ def test_dns_failure_is_a_rejection(monkeypatch):
 def test_http_allowed_only_behind_the_env_flag(monkeypatch):
     with pytest.raises(ValueError, match="scheme must be https"):
         webhook_urls.validate_webhook_url("http://example.com/hook")
+
+
+# --- Admin security-settings exemptions (allowed_hosts / allow_insecure) -----
+
+def test_allowed_hosts_exempts_a_private_resolving_host(monkeypatch):
+    """The scenario this feature exists for: a real, non-suffix-denied DNS
+    name that happens to resolve to a private address, explicitly exempted by
+    an admin — the private-address check is skipped for that exact host."""
+    monkeypatch.setattr(
+        webhook_urls.socket, "getaddrinfo",
+        lambda host, *a, **kw: _addrinfo("10.1.2.3"),
+    )
+    # Not exempted: still rejected.
+    with pytest.raises(ValueError, match="private address"):
+        webhook_urls.validate_webhook_url("https://sink.example.com/hook")
+    # Exempted by exact hostname: allowed through.
+    url = webhook_urls.validate_webhook_url(
+        "https://sink.example.com/hook",
+        allowed_hosts=frozenset({"sink.example.com"}),
+    )
+    assert url == "https://sink.example.com/hook"
+
+
+def test_allowed_hosts_does_not_exempt_a_different_host(monkeypatch):
+    monkeypatch.setattr(
+        webhook_urls.socket, "getaddrinfo",
+        lambda host, *a, **kw: _addrinfo("10.1.2.3"),
+    )
+    with pytest.raises(ValueError, match="private address"):
+        webhook_urls.validate_webhook_url(
+            "https://other.example.com/hook",
+            allowed_hosts=frozenset({"sink.example.com"}),
+        )
+
+
+def test_allowed_hosts_does_not_exempt_the_denied_suffix_check(monkeypatch):
+    """An exemption only skips the resolved-address check — a host named
+    `.internal`/`.local`/`localhost` is still denied by name regardless."""
+    with pytest.raises(ValueError, match="internal infrastructure"):
+        webhook_urls.validate_webhook_url(
+            "https://sink.internal/hook",
+            allowed_hosts=frozenset({"sink.internal"}),
+        )
+
+
+def test_allowed_hosts_does_not_exempt_scheme_or_port(monkeypatch):
+    monkeypatch.setattr(
+        webhook_urls.socket, "getaddrinfo",
+        lambda host, *a, **kw: _addrinfo("93.184.216.34"),
+    )
+    with pytest.raises(ValueError, match="scheme must be https"):
+        webhook_urls.validate_webhook_url(
+            "http://sink.example.com/hook", allowed_hosts=frozenset({"sink.example.com"}),
+        )
+    with pytest.raises(ValueError, match="port"):
+        webhook_urls.validate_webhook_url(
+            "https://sink.example.com:22/hook",
+            allowed_hosts=frozenset({"sink.example.com"}),
+        )
+
+
+def test_allow_insecure_param_permits_http_independent_of_env(monkeypatch):
+    monkeypatch.setattr(
+        webhook_urls.socket, "getaddrinfo",
+        lambda host, *a, **kw: _addrinfo("93.184.216.34"),
+    )
+    url = webhook_urls.validate_webhook_url("http://example.com/hook", allow_insecure=True)
+    assert url == "http://example.com/hook"
+
+
+def test_webhook_allowed_hosts_setting_lets_create_succeed(client, new_client, make_user, monkeypatch):
+    """End-to-end: an admin adds a host to webhook_allowed_hosts via the
+    security-settings panel, and POST /webhooks for that exact host (resolving
+    to a private address) succeeds where it would otherwise 422."""
+    monkeypatch.setattr(
+        webhook_urls.socket, "getaddrinfo",
+        lambda host, *a, **kw: _addrinfo("10.1.2.3"),
+    )
+    admin = _login(new_client(), "admin", "admin")
+    r = admin.put("/security-settings", json={"webhook_allowed_hosts": ["sink.example.com"]})
+    assert r.status_code == 200, r.text
+    try:
+        user = make_user()
+        res = client.post(
+            "/webhooks",
+            json={"name": "sink", "url": "https://sink.example.com/hook"},
+            headers=_auth(user),
+        )
+        assert res.status_code == 201, res.text
+    finally:
+        # This suite shares one DB/global settings row across files — clear the
+        # exemption so it doesn't leak into other tests' SSRF assertions.
+        admin.put("/security-settings", json={"webhook_allowed_hosts": []})
+
+
+def _login(c, username: str, password: str):
+    r = c.post("/auth/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return c
 
     monkeypatch.setenv("ALLOW_INSECURE_WEBHOOKS", "1")
     assert webhook_urls.validate_webhook_url("http://example.com/hook")

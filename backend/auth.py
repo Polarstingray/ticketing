@@ -82,13 +82,22 @@ def create_session_token(user_id: int, session_version: int) -> str:
     return _serializer.dumps({"user_id": user_id, "sv": session_version})
 
 
-def read_session_token(token: str):
-    """Return the decoded token payload ({"user_id", "sv"}) or None if the
-    signature is bad/expired."""
+def read_session_token(token: str, *, with_timestamp: bool = False):
+    """Return the decoded token payload ({"user_id", "sv"}), or None if the
+    signature is bad/expired.
+
+    With ``with_timestamp=True``, return ``(payload, issued_at)`` instead —
+    ``issued_at`` is a UTC-aware datetime of when the token was minted,
+    reusing itsdangerous's own embedded timestamp (already used internally
+    for the ``max_age`` check above) rather than adding a redundant custom
+    claim. ``require_recent_admin`` uses this to gate the security-settings
+    panel behind a fresh login, not just a currently-valid session."""
     try:
+        if with_timestamp:
+            return _serializer.loads(token, max_age=SESSION_MAX_AGE, return_timestamp=True)
         return _serializer.loads(token, max_age=SESSION_MAX_AGE)
     except (BadSignature, SignatureExpired):
-        return None
+        return (None, None) if with_timestamp else None
 
 
 def set_session_cookie(response, user: User):
@@ -124,9 +133,10 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     The API key is checked first so programmatic clients (Claude Code) work even
     if a stale browser cookie is also present.
     """
-    # Always define it, including on the cookie and 401 paths, so get_api_key
-    # never sees a missing attribute.
+    # Always define these, including on the cookie and 401 paths, so
+    # get_api_key/require_recent_admin never see a missing attribute.
     request.state.api_key = None
+    request.state.session_issued_at = None
 
     raw_key = request.headers.get("X-API-Key")
     if raw_key:
@@ -163,12 +173,13 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
     token = request.cookies.get(SESSION_COOKIE)
     if token:
-        data = read_session_token(token)
+        data, issued_at = read_session_token(token, with_timestamp=True)
         # Require both a user_id and a session version. Tokens minted before
         # revocable sessions lacked "sv", so they are rejected here too.
         if data is not None and "user_id" in data and "sv" in data:
             user = db.query(User).filter(User.id == data["user_id"]).first()
             if user and user.session_version == data["sv"]:
+                request.state.session_issued_at = issued_at
                 return user
 
     raise HTTPException(
@@ -198,6 +209,30 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
 
 def is_admin(user: User) -> bool:
     return user.role == UserRole.admin.value
+
+
+# How fresh a login has to be to reach the security-settings panel. Deliberately
+# a code constant, not a DB-editable setting: if it lived in the very table this
+# gate protects, a stale-but-valid admin session could weaken its own gate
+# without ever proving a fresh login.
+REAUTH_WINDOW_SECONDS = 15 * 60
+
+
+def require_recent_admin(request: Request, user: User = Depends(require_admin)) -> User:
+    """Admin AND the session cookie was minted within REAUTH_WINDOW_SECONDS.
+
+    Not satisfiable via an API key: request.state.session_issued_at is only
+    set on the cookie path (see get_current_user), so this dependency is a
+    browser/UI-only surface by construction — a programmatic caller gets 401
+    regardless of how recently its key was created, since key age isn't login
+    recency. Distinguished from a bare "not authenticated" 401 by the
+    "reauth_required" detail, which the frontend uses to show an inline
+    re-login prompt instead of a generic error.
+    """
+    issued_at = getattr(request.state, "session_issued_at", None)
+    if issued_at is None or (utcnow() - issued_at).total_seconds() > REAUTH_WINDOW_SECONDS:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="reauth_required")
+    return user
 
 
 def can_modify_ticket(user: User, ticket: Ticket) -> bool:

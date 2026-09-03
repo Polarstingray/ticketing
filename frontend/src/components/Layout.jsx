@@ -13,6 +13,7 @@ import {
   NewIcon,
   RobotIcon,
   SettingsIcon,
+  ShieldIcon,
   StingrayIcon,
   UserIcon,
   UsersIcon,
@@ -121,6 +122,15 @@ export default function Layout() {
             >
               <RobotIcon size={16} className={styles.navIcon} />
               Resolvers
+            </NavLink>
+          )}
+          {user?.role === "admin" && (
+            <NavLink
+              to="/admin/security-settings"
+              className={({ isActive }) => `${linkClass({ isActive })} ${styles.sidebarOnly}`}
+            >
+              <ShieldIcon size={16} className={styles.navIcon} />
+              Security
             </NavLink>
           )}
           <NavLink
