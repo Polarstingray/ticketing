@@ -255,6 +255,49 @@
   color: var(--text-dim);
 }
 
+/* Bulk-action bar: appears when ≥1 row is selected. */
+.bulkBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.bulkCount {
+  font-size: 13px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.bulkBar select {
+  width: auto;
+  min-width: 120px;
+  font-size: 13px;
+  padding: 4px 8px;
+}
+.bulkBar button {
+  width: auto;
+  font-size: 13px;
+  padding: 4px 12px;
+}
+
+/* Checkbox cell at the start of each row. */
+.rowCheck {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding-right: 4px;
+}
+.rowCheck input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
 @media (max-width: 900px) {
   .layout {
     grid-template-columns: minmax(0, 1fr);
