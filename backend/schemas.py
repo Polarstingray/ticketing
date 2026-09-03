@@ -186,6 +186,17 @@ class TicketUpdate(BaseModel):
         return _clean_tags(v)
 
 
+class BulkTicketUpdate(BaseModel):
+    ids: List[int] = Field(min_length=1, max_length=200)
+    status: Optional[TicketStatus] = None
+    assigned_to: Optional[int] = None
+
+
+class BulkTicketUpdateResult(BaseModel):
+    updated: List["TicketOut"]
+    failed: List[dict]
+
+
 class TicketOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

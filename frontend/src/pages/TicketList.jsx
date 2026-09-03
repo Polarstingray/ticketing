@@ -144,6 +144,17 @@ export default function TicketList() {
   // its request is in flight.
   const [busyId, setBusyId] = useState(null);
 
+  // Mass-select state
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState("");
+  const [bulkAssignee, setBulkAssignee] = useState("");
+
+  // Clear selection whenever the active query changes (filter / sort change).
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [currentQuery]);
+
   // A row edit can outlive the list: navigate to a ticket mid-request and the
   // response lands after unmount. Guard the state updates rather than let the
   // late setState fire on a dead component.
@@ -202,6 +213,61 @@ export default function TicketList() {
       if (mounted.current) setError(e.message);
     } finally {
       if (mounted.current) setBusyId(null);
+    }
+  }
+
+  function toggleSelect(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  const allSelected = tickets.length > 0 && tickets.every((t) => selectedIds.has(t.id));
+  const someSelected = !allSelected && tickets.some((t) => selectedIds.has(t.id));
+
+  function toggleSelectAll() {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(tickets.map((t) => t.id)));
+    }
+  }
+
+  async function applyBulk() {
+    const ids = [...selectedIds];
+    const body = { ids };
+    if (bulkStatus) body.status = bulkStatus;
+    if (bulkAssignee !== "") {
+      body.assigned_to = bulkAssignee === "null" ? null : Number(bulkAssignee);
+    }
+    if (!body.status && !("assigned_to" in body)) {
+      setError("Select a status or assignee to apply");
+      return;
+    }
+    setBulkBusy(true);
+    try {
+      const result = await api.bulkUpdateTickets(body);
+      if (!mounted.current) return;
+      setTickets((prev) =>
+        prev.map((t) => {
+          const up = result.updated.find((u) => u.id === t.id);
+          return up ? { ...t, ...up } : t;
+        })
+      );
+      if (result.failed.length > 0) {
+        setError(`${result.failed.length} ticket(s) could not be updated.`);
+      } else {
+        setError("");
+      }
+      setSelectedIds(new Set());
+      setBulkStatus("");
+      setBulkAssignee("");
+    } catch (e) {
+      if (mounted.current) setError(e.message);
+    } finally {
+      if (mounted.current) setBulkBusy(false);
     }
   }
 
@@ -335,6 +401,53 @@ export default function TicketList() {
         )}
 
         {error && <div className="error">{error}</div>}
+
+        {selectedIds.size > 0 && (
+          <div className={styles.bulkBar}>
+            <span className={styles.bulkCount}>{selectedIds.size} selected</span>
+            <select
+              value={bulkStatus}
+              onChange={(e) => setBulkStatus(e.target.value)}
+              aria-label="Bulk status"
+              disabled={bulkBusy}
+            >
+              <option value="">— Status —</option>
+              {Object.entries(STATUS_LABELS).map(([v, label]) => (
+                <option key={v} value={v}>{label}</option>
+              ))}
+            </select>
+            {users.length > 0 && (
+              <select
+                value={bulkAssignee}
+                onChange={(e) => setBulkAssignee(e.target.value)}
+                aria-label="Bulk assignee"
+                disabled={bulkBusy}
+              >
+                <option value="">— Assignee —</option>
+                <option value="null">Unassigned</option>
+                {users.map((u) => (
+                  <option key={u.id} value={String(u.id)}>{u.display_name}</option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              className="primary"
+              disabled={bulkBusy || (!bulkStatus && bulkAssignee === "")}
+              onClick={applyBulk}
+            >
+              {bulkBusy ? "Applying…" : "Apply"}
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => setSelectedIds(new Set())}
+            >
+              Clear selection
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <div className="muted">Loading…</div>
         ) : tickets.length === 0 ? (
@@ -350,13 +463,32 @@ export default function TicketList() {
           )
         ) : (
           <div className={styles.list}>
+            <div className={styles.selectAllRow}>
+              <input
+                type="checkbox"
+                className={styles.checkbox}
+                checked={allSelected}
+                ref={(el) => { if (el) el.indeterminate = someSelected; }}
+                onChange={toggleSelectAll}
+                aria-label="Select all tickets"
+              />
+            </div>
             {tickets.map((t) => (
               <Link key={t.id} to={`/tickets/${t.id}`} className={styles.rowLink}>
                 <div
-                  className={
-                    density === "compact" ? `${styles.row} ${styles.rowCompact}` : styles.row
-                  }
+                  className={[
+                    density === "compact" ? `${styles.row} ${styles.rowCompact}` : styles.row,
+                    selectedIds.has(t.id) ? styles.rowSelected : "",
+                  ].filter(Boolean).join(" ")}
                 >
+                  <input
+                    type="checkbox"
+                    className={styles.checkbox}
+                    checked={selectedIds.has(t.id)}
+                    aria-label={`Select ticket ${t.id}`}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => toggleSelect(t.id)}
+                  />
                   <div className={styles.rowMain}>
                     <div className={styles.rowTitle}>
                       {unreadTicketIds?.has(t.id) && (
@@ -380,7 +512,7 @@ export default function TicketList() {
                     <PriorityBadge priority={t.priority} />
                     <StatusDropdown
                       status={t.status}
-                      disabled={busyId === t.id}
+                      disabled={busyId === t.id || bulkBusy}
                       onChange={(s) => changeStatus(t.id, s)}
                     />
                     {t.status === "closed" && !t.archived && (
@@ -405,7 +537,7 @@ export default function TicketList() {
                       <AssigneeDropdown
                         assignedTo={t.assigned_to}
                         users={users}
-                        disabled={busyId === t.id}
+                        disabled={busyId === t.id || bulkBusy}
                         onChange={(uid) => changeAssignee(t.id, uid)}
                       />
                     ) : (

@@ -47,6 +47,8 @@ from schemas import (
     AgentRunCreate,
     AgentRunOut,
     AgentRunTotals,
+    BulkTicketUpdate,
+    BulkTicketUpdateResult,
     ClaimRequest,
     CostRollup,
     CostRollupChild,
@@ -308,6 +310,78 @@ def create_ticket(
     if assignee is not None:
         notify_assignment(background, db, ticket, assignee, user)
     return ticket
+
+
+@router.post("/bulk-update", response_model=BulkTicketUpdateResult)
+def bulk_update_tickets(
+    payload: BulkTicketUpdate,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Apply a status or assignee change to multiple tickets at once.
+
+    Declared before /{ticket_id} so the literal path wins the route match.
+    Tickets the caller cannot modify are silently skipped and reported in
+    ``failed`` rather than aborting the whole batch.
+    """
+    data = payload.model_dump(exclude_unset=True)
+    update_fields = {k: v for k, v in data.items() if k != "ids"}
+
+    if not update_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one field (status, assigned_to) must be provided",
+        )
+
+    new_assignee = None
+    if "assigned_to" in update_fields and update_fields["assigned_to"] is not None:
+        new_assignee = db.query(User).filter(User.id == update_fields["assigned_to"]).first()
+        if not new_assignee:
+            raise HTTPException(status_code=400, detail="assigned_to user does not exist")
+
+    updated_tickets: list[Ticket] = []
+    failed: list[dict] = []
+
+    for ticket_id in payload.ids:
+        ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if not ticket:
+            failed.append({"id": ticket_id, "error": "Not found"})
+            continue
+        if not can_modify_ticket(user, ticket):
+            failed.append({"id": ticket_id, "error": "Not permitted"})
+            continue
+
+        old_status = ticket.status
+        old_assigned_to = ticket.assigned_to
+
+        if "status" in update_fields:
+            value = update_fields["status"]
+            ticket.status = value.value if hasattr(value, "value") else value
+        if "assigned_to" in update_fields:
+            ticket.assigned_to = update_fields["assigned_to"]
+        ticket.updated_at = utcnow()
+
+        if "status" in update_fields and ticket.status != old_status:
+            record_activity(db, ticket.id, user.id, "status_changed",
+                            {"from": old_status, "to": ticket.status})
+        if "assigned_to" in update_fields and ticket.assigned_to != old_assigned_to:
+            if ticket.assigned_to is None:
+                record_activity(db, ticket.id, user.id, "unassigned")
+            elif new_assignee is not None:
+                record_activity(db, ticket.id, user.id, "assigned",
+                                {"to": new_assignee.id, "name": new_assignee.display_name})
+                create_notification(
+                    db, user_id=new_assignee.id, type="assigned", ticket=ticket, actor=user,
+                )
+
+        updated_tickets.append(ticket)
+
+    db.commit()
+    for t in updated_tickets:
+        db.refresh(t)
+
+    return BulkTicketUpdateResult(updated=updated_tickets, failed=failed)
 
 
 @router.get("/{ticket_id}", response_model=TicketOut)

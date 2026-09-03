@@ -420,3 +420,78 @@ def test_free_epic_tag_needs_no_scope(client, make_user):
     member = make_user()
     t = _create(client, member.key, tags=["epic:7", "scaffold"])
     assert _tags(t) == {"epic:7", "scaffold"}
+
+
+# --- Bulk update --------------------------------------------------------------
+
+def test_bulk_update_status_happy_path(client, admin_key):
+    t1 = _create(client, admin_key, title="bulk a")
+    t2 = _create(client, admin_key, title="bulk b")
+
+    r = client.post(
+        "/tickets/bulk-update",
+        json={"ids": [t1["id"], t2["id"]], "status": "resolved"},
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) == {"updated", "failed"}
+    updated_ids = {t["id"] for t in body["updated"]}
+    assert t1["id"] in updated_ids
+    assert t2["id"] in updated_ids
+    assert all(t["status"] == "resolved" for t in body["updated"])
+    assert body["failed"] == []
+
+
+def test_bulk_update_skips_tickets_caller_cannot_modify(client, admin_key, make_user):
+    member = make_user()
+    # admin owns this; member cannot modify it
+    admin_ticket = _create(client, admin_key, title="admin only")
+    # member owns this
+    member_ticket = _create(client, member.key, title="member owns")
+
+    r = client.post(
+        "/tickets/bulk-update",
+        json={"ids": [admin_ticket["id"], member_ticket["id"]], "status": "resolved"},
+        headers={"X-API-Key": member.key},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    updated_ids = {t["id"] for t in body["updated"]}
+    failed_ids = {f["id"] for f in body["failed"]}
+    assert member_ticket["id"] in updated_ids
+    assert admin_ticket["id"] in failed_ids
+
+
+def test_bulk_update_rejects_empty_ids(client, admin_key):
+    r = client.post(
+        "/tickets/bulk-update",
+        json={"ids": [], "status": "resolved"},
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 422
+
+
+def test_bulk_update_requires_at_least_one_field(client, admin_key):
+    t = _create(client, admin_key)
+    r = client.post(
+        "/tickets/bulk-update",
+        json={"ids": [t["id"]]},
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 400
+
+
+def test_bulk_update_nonexistent_ids_go_to_failed(client, admin_key):
+    t = _create(client, admin_key, title="exists")
+    r = client.post(
+        "/tickets/bulk-update",
+        json={"ids": [t["id"], 999999], "status": "closed"},
+        headers={"X-API-Key": admin_key},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    updated_ids = {u["id"] for u in body["updated"]}
+    failed_ids = {f["id"] for f in body["failed"]}
+    assert t["id"] in updated_ids
+    assert 999999 in failed_ids

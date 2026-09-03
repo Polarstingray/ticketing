@@ -14,6 +14,7 @@ vi.mock("../api", () => ({
     deleteSavedView: vi.fn(),
     updateTicket: vi.fn(),
     archiveTicket: vi.fn(),
+    bulkUpdateTickets: vi.fn(),
   },
 }));
 
@@ -86,6 +87,7 @@ beforeEach(() => {
   api.listSavedViews.mockResolvedValue([]);
   api.updateTicket.mockImplementation((id, body) => Promise.resolve(ticket({ id, ...body })));
   api.archiveTicket.mockResolvedValue(null);
+  api.bulkUpdateTickets.mockResolvedValue({ updated: [], failed: [] });
   notifState.unreadTicketIds = new Set();
   localStorage.clear();
 });
@@ -580,6 +582,132 @@ describe("TicketList inline reassignment", () => {
 
     expect(screen.queryByRole("button", { name: /Change assignee/i })).not.toBeInTheDocument();
     expect(screen.getByText("#5")).toBeInTheDocument();
+  });
+});
+
+describe("TicketList mass select", () => {
+  const TWO_TICKETS = [
+    ticket({ id: 1, title: "First ticket" }),
+    ticket({ id: 2, title: "Second ticket" }),
+  ];
+
+  beforeEach(() => {
+    api.listTickets.mockResolvedValue({ items: TWO_TICKETS, total: 2 });
+  });
+
+  it("renders a checkbox per row and none are checked by default", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+    const checkboxes = screen.getAllByRole("checkbox");
+    checkboxes.forEach((cb) => expect(cb).not.toBeChecked());
+  });
+
+  it("checking a row adds it to selection and shows the bulk bar with count", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByLabelText("Select ticket 1"));
+
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear selection" })).toBeInTheDocument();
+  });
+
+  it("Select all selects all visible tickets; unchecking clears all", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByLabelText("Select all tickets"));
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Select all tickets"));
+    expect(screen.queryByText(/selected/)).not.toBeInTheDocument();
+  });
+
+  it("Apply bulk status change calls bulkUpdateTickets with the right ids and field", async () => {
+    api.bulkUpdateTickets.mockResolvedValue({
+      updated: [ticket({ id: 1, status: "resolved" }), ticket({ id: 2, status: "resolved" })],
+      failed: [],
+    });
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByLabelText("Select ticket 1"));
+    fireEvent.click(screen.getByLabelText("Select ticket 2"));
+
+    fireEvent.change(screen.getByLabelText("Bulk status"), { target: { value: "resolved" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() =>
+      expect(api.bulkUpdateTickets).toHaveBeenCalledWith({
+        ids: expect.arrayContaining([1, 2]),
+        status: "resolved",
+      })
+    );
+    // Bulk bar dismissed after success
+    await waitFor(() => expect(screen.queryByText(/selected/)).not.toBeInTheDocument());
+  });
+
+  it("Apply bulk assignee change calls bulkUpdateTickets with assigned_to", async () => {
+    api.listUsers.mockResolvedValue([{ id: 5, display_name: "Ada Lovelace" }]);
+    api.bulkUpdateTickets.mockResolvedValue({
+      updated: [ticket({ id: 1, assigned_to: 5 })],
+      failed: [],
+    });
+    api.listTickets.mockResolvedValue({ items: [ticket({ id: 1 })], total: 1 });
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByLabelText("Select ticket 1"));
+    fireEvent.change(screen.getByLabelText("Bulk assignee"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() =>
+      expect(api.bulkUpdateTickets).toHaveBeenCalledWith({
+        ids: [1],
+        assigned_to: 5,
+      })
+    );
+  });
+
+  it("shows failures in the error banner while successful rows still update", async () => {
+    api.bulkUpdateTickets.mockResolvedValue({
+      updated: [ticket({ id: 1, status: "resolved" })],
+      failed: [{ id: 2, error: "Not permitted" }],
+    });
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByLabelText("Select ticket 1"));
+    fireEvent.click(screen.getByLabelText("Select ticket 2"));
+    fireEvent.change(screen.getByLabelText("Bulk status"), { target: { value: "resolved" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(await screen.findByText(/1 ticket\(s\) could not be updated/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/selected/)).not.toBeInTheDocument());
+  });
+
+  it("Clear selection hides the bulk bar", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByLabelText("Select ticket 1"));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(screen.queryByText(/selected/)).not.toBeInTheDocument();
+  });
+
+  it("changing a filter clears the selection", async () => {
+    renderList();
+    await screen.findByText("First ticket");
+
+    fireEvent.click(screen.getByLabelText("Select ticket 1"));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+    // Changing the status filter updates currentQuery, which should clear selectedIds.
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "resolved" } });
+
+    await waitFor(() => expect(screen.queryByText(/selected/)).not.toBeInTheDocument());
   });
 });
 
