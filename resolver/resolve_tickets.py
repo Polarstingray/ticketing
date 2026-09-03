@@ -2168,7 +2168,14 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         "if present. Do NOT commit or push — just leave the changes in the working tree.",
         "APPLY the changes with your edit/write tools and run commands with your shell —",
         "do NOT just print code or describe the edits in your reply. A run that ends",
-        "without actually modifying any files is treated as a failure.",
+        "without actually modifying any files is treated as a failure — UNLESS you",
+        "have actually investigated (read the code, run the tests) and concluded no",
+        "code changes are needed: the thing the ticket describes is already true,",
+        "already fixed, or the ticket's entire job was to file a separate ticket via",
+        "file_ticket.py. In that case, end your final reply with a line starting",
+        "exactly with `NO CHANGES NEEDED:` followed by a one-sentence reason. Only use",
+        "this when you've verified there's truly nothing to change here — never as a",
+        "way to avoid a change that IS warranted.",
         f"IMPORTANT: every file you read, edit, or run MUST live under {repo}. Never",
         "edit files outside it. The plan below has already been confined to this working",
         "directory, so any absolute path you find yourself reaching for is out of scope —",
@@ -2517,6 +2524,18 @@ def filed_tickets_in_log(log_path: Path) -> list[int]:
     return seen
 
 
+_NO_CHANGES_RE = re.compile(r"^NO CHANGES NEEDED:\s*(.+)$", re.MULTILINE)
+
+
+def no_changes_needed_reason(summary: str) -> "str | None":
+    """The agent's stated reason for a deliberate zero-diff run, if it gave
+    one via the `NO CHANGES NEEDED:` marker `implement_prompt` instructs it
+    to use — distinguishing an investigated no-op (e.g. a review found the
+    code already correct) from a confused/stalled run that just did nothing."""
+    m = _NO_CHANGES_RE.search(summary or "")
+    return m.group(1).strip() if m else None
+
+
 def _run_verify(cfg: Config, wt: Path) -> tuple[bool, str]:
     """Run the configured VERIFY_COMMAND as a shell command in the worktree to confirm
     the implement run's changes pass. Unlike run() (argv, no shell) this is shell=True
@@ -2698,6 +2717,16 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                           assigned_to=handback_user(client, ticket))
                 phase("filed-no-code", ticket,
                       f"#{ticket['id']}: filed {ids}, no code changes — handed back")
+                return
+            no_change_reason = no_changes_needed_reason(summary)
+            if no_change_reason:
+                client.add_comment(ticket["id"],
+                    f"{IMPL_MARKER} — no code changes were needed: {no_change_reason}"
+                    f"\n\n{summary}")
+                set_state(client, ticket, [], status="in_review",
+                          assigned_to=handback_user(client, ticket))
+                phase("no-changes-needed", ticket,
+                      f"#{ticket['id']}: investigated, no code changes needed — handed back")
                 return
             if assignment:
                 # A /scaffold run that wrote the handout but no skeleton still
