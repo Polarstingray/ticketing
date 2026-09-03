@@ -257,6 +257,12 @@ def test_http_allowed_only_behind_the_env_flag(monkeypatch):
     with pytest.raises(ValueError, match="scheme must be https"):
         webhook_urls.validate_webhook_url("http://example.com/hook")
 
+    monkeypatch.setenv("ALLOW_INSECURE_WEBHOOKS", "1")
+    assert webhook_urls.validate_webhook_url("http://example.com/hook")
+    # The flag relaxes the scheme only — addresses are still checked.
+    with pytest.raises(ValueError, match="loopback"):
+        webhook_urls.validate_webhook_url("http://127.0.0.1/hook")
+
 
 # --- Admin security-settings exemptions (allowed_hosts / allow_insecure) -----
 
@@ -355,12 +361,6 @@ def _login(c, username: str, password: str):
     r = c.post("/auth/login", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
     return c
-
-    monkeypatch.setenv("ALLOW_INSECURE_WEBHOOKS", "1")
-    assert webhook_urls.validate_webhook_url("http://example.com/hook")
-    # The flag relaxes the scheme only — addresses are still checked.
-    with pytest.raises(ValueError, match="loopback"):
-        webhook_urls.validate_webhook_url("http://127.0.0.1/hook")
 
 
 # --- Delivery log ------------------------------------------------------------
