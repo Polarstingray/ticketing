@@ -308,18 +308,18 @@ export default function TicketList() {
 
       <div className={styles.main}>
         <div className={styles.head}>
-          <h1>
+          <div className={styles.headTitle}>
             {tickets.length > 0 && (
               <input
                 type="checkbox"
-                style={{ marginRight: 8, verticalAlign: "middle", accentColor: "var(--accent)", width: 15, height: 15 }}
+                className={styles.selectAll}
                 aria-label="Select all visible tickets"
                 checked={tickets.length > 0 && selectedIds.size === tickets.length}
                 onChange={toggleAll}
               />
             )}
-            Tickets {!loading && <span className={styles.count}>({total})</span>}
-          </h1>
+            <h1>Tickets {!loading && <span className={styles.count}>({total})</span>}</h1>
+          </div>
           <div className={styles.headControls}>
             <label className={styles.sort}>
               <select

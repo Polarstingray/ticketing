@@ -6,9 +6,21 @@
   gap: 10px;
   margin-bottom: 18px;
 }
-.head h1 {
+.headTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.headTitle h1 {
   font-size: 20px;
   margin: 0;
+}
+.selectAll {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent);
+  flex-shrink: 0;
 }
 .count {
   color: var(--text-dim);
@@ -346,7 +358,7 @@
   }
 
   /* Head controls: sort takes full width, density + new-ticket share next line. */
-  .head h1 {
+  .headTitle h1 {
     font-size: 18px;
   }
   .sort {
