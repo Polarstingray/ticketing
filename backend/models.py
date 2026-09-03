@@ -381,6 +381,27 @@ class ResolverSettings(Base):
     updated_by = Column(Integer, nullable=True)
 
 
+class SecuritySettings(Base):
+    """Server-managed, admin-editable settings that affect the app's security
+    posture (webhook SSRF exemptions, the insecure-webhooks/dispatcher-pause
+    toggles, the lease TTL policy window, the per-user webhook cap).
+
+    A single global row (id=1) — unlike :class:`ResolverSettings` there is no
+    per-identity keying here, since these are app-wide policy, not per-bot
+    tunables. Reading/writing this table is gated behind
+    ``auth.require_recent_admin`` (admin role AND a session cookie minted
+    within the last few minutes), not just ``auth.require_admin`` — these are
+    exactly the settings an attacker holding a hijacked-but-valid admin
+    session would most want to weaken quietly.
+    """
+    __tablename__ = "security_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    settings = Column(JSON, nullable=False, default=dict)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    updated_by = Column(Integer, nullable=True)
+
+
 class AgentInstance(Base):
     """A running agent's self-reported identity + observed state.
 
