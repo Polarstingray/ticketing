@@ -335,6 +335,14 @@ def bulk_update_tickets(
             detail="At least one field (status, assigned_to) must be provided",
         )
 
+    # status is non-nullable; an explicit null would pass through Optional[TicketStatus]
+    # and crash the DB commit with a NOT NULL violation instead of returning 422.
+    if "status" in update_fields and update_fields["status"] is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="status cannot be null; omit the field to leave it unchanged",
+        )
+
     new_assignee = None
     if "assigned_to" in update_fields and update_fields["assigned_to"] is not None:
         new_assignee = db.query(User).filter(User.id == update_fields["assigned_to"]).first()
