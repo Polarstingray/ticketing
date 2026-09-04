@@ -173,6 +173,7 @@ export const api = {
   costRollup: (id) => request("GET", `/tickets/${id}/cost-rollup`),
   archiveTicket: (id) => request("POST", `/tickets/${id}/archive`),
   unarchiveTicket: (id) => request("POST", `/tickets/${id}/unarchive`),
+  bulkUpdateTickets: (body) => request("POST", "/tickets/bulk-update", body),
 
   // Saved dashboard views: a named filter query string, scoped to the caller.
   listSavedViews: () => request("GET", "/saved-views"),

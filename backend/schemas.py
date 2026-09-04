@@ -425,6 +425,22 @@ class NotificationPreferencesUpdate(BaseModel):
 
 # --- Pagination --------------------------------------------------------------
 
+class BulkTicketUpdate(BaseModel):
+    ids: List[int] = Field(min_length=1, max_length=200)
+    status: Optional[TicketStatus] = None
+    assigned_to: Optional[int] = None
+
+
+class BulkUpdateFailure(BaseModel):
+    id: int
+    error: str
+
+
+class BulkTicketUpdateResult(BaseModel):
+    updated: List["TicketOut"]
+    failed: List[BulkUpdateFailure]
+
+
 class PaginatedTickets(BaseModel):
     items: List[TicketOut]
     total: int

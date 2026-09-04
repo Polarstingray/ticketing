@@ -144,6 +144,17 @@ export default function TicketList() {
   // its request is in flight.
   const [busyId, setBusyId] = useState(null);
 
+  // Mass-select state
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState("");
+  const [bulkAssignee, setBulkAssignee] = useState("");
+
+  // Clear selection whenever the active query changes (filter / sort change).
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [currentQuery]);
+
   // A row edit can outlive the list: navigate to a ticket mid-request and the
   // response lands after unmount. Guard the state updates rather than let the
   // late setState fire on a dead component.
@@ -205,6 +216,46 @@ export default function TicketList() {
     }
   }
 
+  function toggleSelect(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    if (selectedIds.size === tickets.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(tickets.map((t) => t.id)));
+    }
+  }
+
+  async function bulkUpdate() {
+    if (!selectedIds.size || bulkBusy) return;
+    const body = { ids: [...selectedIds] };
+    if (bulkStatus) body.status = bulkStatus;
+    if (bulkAssignee) body.assigned_to = Number(bulkAssignee);
+    if (!body.status && !body.assigned_to) return;
+    setBulkBusy(true);
+    try {
+      const result = await api.bulkUpdateTickets(body);
+      if (!mounted.current) return;
+      const updatedById = Object.fromEntries(result.updated.map((t) => [t.id, t]));
+      setTickets((prev) => prev.map((t) => (updatedById[t.id] ? { ...t, ...updatedById[t.id] } : t)));
+      setSelectedIds(new Set());
+      setBulkStatus("");
+      setBulkAssignee("");
+      setError("");
+    } catch (e) {
+      if (mounted.current) setError(e.message);
+    } finally {
+      if (mounted.current) setBulkBusy(false);
+    }
+  }
+
   const userName = (id) => {
     const u = users.find((x) => x.id === id);
     return u ? u.display_name : id ? `#${id}` : "Unassigned";
@@ -257,9 +308,18 @@ export default function TicketList() {
 
       <div className={styles.main}>
         <div className={styles.head}>
-          <h1>
-            Tickets {!loading && <span className={styles.count}>({total})</span>}
-          </h1>
+          <div className={styles.headTitle}>
+            {tickets.length > 0 && (
+              <input
+                type="checkbox"
+                className={styles.selectAll}
+                aria-label="Select all visible tickets"
+                checked={tickets.length > 0 && selectedIds.size === tickets.length}
+                onChange={toggleAll}
+              />
+            )}
+            <h1>Tickets {!loading && <span className={styles.count}>({total})</span>}</h1>
+          </div>
           <div className={styles.headControls}>
             <label className={styles.sort}>
               <select
@@ -334,6 +394,49 @@ export default function TicketList() {
           </div>
         )}
 
+        {selectedIds.size > 0 && (
+          <div className={styles.bulkBar}>
+            <span className={styles.bulkCount}>{selectedIds.size} selected</span>
+            <select
+              aria-label="Bulk status"
+              value={bulkStatus}
+              onChange={(e) => setBulkStatus(e.target.value)}
+            >
+              <option value="">— set status —</option>
+              {Object.entries({ open: "Open", in_progress: "In progress", resolved: "Resolved", closed: "Closed" }).map(([v, l]) => (
+                <option key={v} value={v}>{l}</option>
+              ))}
+            </select>
+            {users.length > 0 && (
+              <select
+                aria-label="Bulk assignee"
+                value={bulkAssignee}
+                onChange={(e) => setBulkAssignee(e.target.value)}
+              >
+                <option value="">— assign to —</option>
+                <option value="0">Unassigned</option>
+                {users.map((u) => (
+                  <option key={u.id} value={u.id}>{u.display_name}</option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              disabled={bulkBusy || (!bulkStatus && !bulkAssignee)}
+              onClick={bulkUpdate}
+            >
+              {bulkBusy ? "Applying…" : "Apply"}
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => setSelectedIds(new Set())}
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
         {error && <div className="error">{error}</div>}
         {loading ? (
           <div className="muted">Loading…</div>
@@ -357,6 +460,18 @@ export default function TicketList() {
                     density === "compact" ? `${styles.row} ${styles.rowCompact}` : styles.row
                   }
                 >
+                  <div
+                    className={styles.rowCheck}
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleSelect(t.id); }}
+                  >
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ticket #${t.id}`}
+                      checked={selectedIds.has(t.id)}
+                      onChange={() => {}}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </div>
                   <div className={styles.rowMain}>
                     <div className={styles.rowTitle}>
                       {unreadTicketIds?.has(t.id) && (
