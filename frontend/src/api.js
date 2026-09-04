@@ -251,6 +251,18 @@ export const api = {
   // agent carries its own config, so there is nothing here to edit.
   listAgents: () => request("GET", "/agents"),
 
+  // Security settings (admin, step-up gated). Settings that affect the app's
+  // security posture — webhook SSRF exemptions, the insecure-webhooks and
+  // dispatcher-pause toggles, the lease TTL policy window, the per-user
+  // webhook cap. Both GET and PUT require a session cookie minted within the
+  // last few minutes; a stale-but-otherwise-valid admin session gets a 401
+  // with `detail: "reauth_required"` (surfaced as err.message on the thrown
+  // Error), which the page uses to show an inline re-login prompt rather than
+  // a generic error. Returns { settings, updated_at, updated_by };
+  // updateSecuritySettings sends a partial values obj.
+  getSecuritySettings: () => request("GET", "/security-settings"),
+  updateSecuritySettings: (values) => request("PUT", "/security-settings", values),
+
   // Chat assistant (optional — hidden entirely when chatConfig().enabled is
   // false). Returns { enabled, model, daily_usd_limit, spent_today_usd }.
   chatConfig: () => request("GET", "/chat/config"),

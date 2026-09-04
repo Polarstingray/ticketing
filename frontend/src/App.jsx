@@ -7,6 +7,7 @@ import TicketNew from "./pages/TicketNew";
 import TicketDetail from "./pages/TicketDetail";
 import AdminUsers from "./pages/AdminUsers";
 import ResolverSettings from "./pages/ResolverSettings";
+import SecuritySettings from "./pages/SecuritySettings";
 import Notifications from "./pages/Notifications";
 import Profile from "./pages/Profile";
 import Settings from "./pages/Settings";
@@ -54,6 +55,14 @@ export default function App() {
           element={
             <Protected adminOnly>
               <ResolverSettings />
+            </Protected>
+          }
+        />
+        <Route
+          path="/admin/security-settings"
+          element={
+            <Protected adminOnly>
+              <SecuritySettings />
             </Protected>
           }
         />

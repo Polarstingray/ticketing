@@ -41,6 +41,7 @@ from models import (
     utcnow,
 )
 from notifications import notify_assignment, notify_new_ticket_admins
+from routers.security_settings import get_security_settings
 from schemas import (
     MAX_TAGS,
     ActivityOut,
@@ -565,11 +566,30 @@ def claim_ticket(
             detail=f"Ticket is already claimed by user {existing.worker_id}",
         )
 
+    # The schema's Field(ge=MIN_LEASE_TTL, le=MAX_LEASE_TTL) is the absolute
+    # hard rail (rejects nonsense outright); this is the admin-editable policy
+    # window *inside* it — an admin can only tighten the band, never widen past
+    # the hard rail (SecuritySettingsValues enforces that at write time).
+    security_settings = get_security_settings(db)
+    ttl_seconds = (
+        payload.ttl_seconds
+        if "ttl_seconds" in payload.model_fields_set
+        else security_settings.default_lease_ttl
+    )
+    if not (security_settings.min_lease_ttl <= ttl_seconds <= security_settings.max_lease_ttl):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"ttl_seconds must be between {security_settings.min_lease_ttl} and "
+                f"{security_settings.max_lease_ttl}"
+            ),
+        )
+
     lease = TicketLease(
         ticket_id=ticket.id,
         worker_id=user.id,
         token=secrets.token_urlsafe(32),
-        expires_at=utcnow() + timedelta(seconds=payload.ttl_seconds),
+        expires_at=utcnow() + timedelta(seconds=ttl_seconds),
     )
     db.add(lease)
     try:

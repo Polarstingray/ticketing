@@ -3,7 +3,15 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, PlainSerializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_validator,
+)
 
 from control_tags import ALL_SCOPES
 from models import (
@@ -15,7 +23,6 @@ from models import (
     UserRole,
     WebhookEventType,
 )
-from webhook_urls import validate_webhook_url
 
 # --- Tag validation ----------------------------------------------------------
 # Defense in depth, applied to ALL callers (including the resolver bot). Tag
@@ -515,10 +522,12 @@ class SavedViewOut(BaseModel):
 
 
 # --- Webhooks ----------------------------------------------------------------
-# A webhook is an outbound request the server makes to a user-supplied URL, so
-# the URL is validated *here*, at the schema layer: a rejected URL is a 422 with
-# the specific reason, and the router cannot forget to call the check. See
-# webhook_urls for the SSRF rules themselves.
+# A webhook is an outbound request the server makes to a user-supplied URL. The
+# SSRF check (webhook_urls.validate_webhook_url) needs the current admin
+# security settings (the exemption list, the insecure-webhooks toggle) to
+# decide what's allowed, and a schema field_validator has no DB session to read
+# those with — so URL validation lives entirely in the router (create/update),
+# not here. See webhook_urls for the SSRF rules themselves.
 
 MAX_WEBHOOKS_PER_USER = 20
 MAX_WEBHOOK_NAME_LENGTH = 60
@@ -557,11 +566,6 @@ class WebhookCreate(BaseModel):
     def _v_name(cls, v: str) -> str:
         return _clean_webhook_name(v)
 
-    @field_validator("url")
-    @classmethod
-    def _v_url(cls, v: str) -> str:
-        return validate_webhook_url(v)
-
     @field_validator("tag_filter")
     @classmethod
     def _v_tags(cls, v: List[str]) -> List[str]:
@@ -580,11 +584,6 @@ class WebhookUpdate(BaseModel):
     @classmethod
     def _v_name(cls, v: Optional[str]) -> Optional[str]:
         return None if v is None else _clean_webhook_name(v)
-
-    @field_validator("url")
-    @classmethod
-    def _v_url(cls, v: Optional[str]) -> Optional[str]:
-        return None if v is None else validate_webhook_url(v)
 
     @field_validator("tag_filter")
     @classmethod
@@ -850,6 +849,67 @@ class AgentRosterEntry(BaseModel):
     agent: Optional[str] = None
     model: Optional[str] = None
     last_seen_at: Optional[UTCDateTime] = None
+
+
+# --- Security settings --------------------------------------------------------
+# Server-managed, admin-editable settings that affect the app's security
+# posture (see the SecuritySettings model). Gated behind auth.require_recent_admin
+# (a fresh re-login), not just auth.require_admin — see backend/auth.py.
+
+
+class SecuritySettingsValues(BaseModel):
+    """The full tunable surface, with defaults matching the hardcoded values
+    they override. GET always returns a complete view (defaults <- stored row)
+    so the UI renders every field even when nothing has been saved yet.
+
+    The lease TTL trio is a *policy window inside* the hard-coded
+    MIN_LEASE_TTL/MAX_LEASE_TTL rails (see the Ticket leases section above) —
+    this table can only tighten that window, never widen past it, which is
+    enforced by the validator below rather than by these fields' own bounds
+    (a partial PUT may send only one of the three).
+    """
+    webhook_allowed_hosts: List[str] = Field(default_factory=list)
+    allow_insecure_webhooks: bool = False
+    dispatcher_paused: bool = False
+    min_lease_ttl: int = MIN_LEASE_TTL
+    max_lease_ttl: int = MAX_LEASE_TTL
+    default_lease_ttl: int = DEFAULT_LEASE_TTL
+    max_webhooks_per_user: int = MAX_WEBHOOKS_PER_USER
+
+    @model_validator(mode="after")
+    def _check_lease_window(self):
+        if self.min_lease_ttl < MIN_LEASE_TTL:
+            raise ValueError(f"min_lease_ttl may not go below the hard floor {MIN_LEASE_TTL}")
+        if self.max_lease_ttl > MAX_LEASE_TTL:
+            raise ValueError(f"max_lease_ttl may not exceed the hard ceiling {MAX_LEASE_TTL}")
+        if self.min_lease_ttl > self.max_lease_ttl:
+            raise ValueError("min_lease_ttl may not exceed max_lease_ttl")
+        if not (self.min_lease_ttl <= self.default_lease_ttl <= self.max_lease_ttl):
+            raise ValueError("default_lease_ttl must fall within [min_lease_ttl, max_lease_ttl]")
+        return self
+
+
+class SecuritySettingsUpdate(BaseModel):
+    """Admin write payload. ``extra="forbid"`` rejects unknown keys. Every
+    field is optional; only the ones sent are stored/overridden. Cross-field
+    bounds (the lease window) are checked against the *merged* result by the
+    router, not here — a partial update may legitimately send only one of the
+    three lease fields."""
+    model_config = ConfigDict(extra="forbid")
+
+    webhook_allowed_hosts: Optional[List[str]] = None
+    allow_insecure_webhooks: Optional[bool] = None
+    dispatcher_paused: Optional[bool] = None
+    min_lease_ttl: Optional[int] = Field(default=None, ge=MIN_LEASE_TTL)
+    max_lease_ttl: Optional[int] = Field(default=None, le=MAX_LEASE_TTL)
+    default_lease_ttl: Optional[int] = Field(default=None, ge=MIN_LEASE_TTL, le=MAX_LEASE_TTL)
+    max_webhooks_per_user: Optional[int] = Field(default=None, ge=1)
+
+
+class SecuritySettingsOut(BaseModel):
+    settings: SecuritySettingsValues
+    updated_at: Optional[UTCDateTime] = None
+    updated_by: Optional[int] = None
 
 
 # --- Chat assistant ----------------------------------------------------------
