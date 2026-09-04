@@ -307,6 +307,79 @@ def test_do_implement_hard_fails_on_worktree_escape(fake_cfg, monkeypatch, tmp_p
     assert "escaped its worktree" in failed["msg"]
 
 
+# --- venv tamper guard ---------------------------------------------------
+def test_resolver_venv_signature_stable_and_changes_on_touch(tmp_path, monkeypatch):
+    # Build a minimal fake .venv/lib/python3.x/site-packages structure.
+    site_pkgs = tmp_path / ".venv" / "lib" / "python3.11" / "site-packages"
+    site_pkgs.mkdir(parents=True)
+    pkg = site_pkgs / "mypackage-1.0.dist-info"
+    pkg.mkdir()
+    (pkg / "METADATA").write_text("Name: mypackage\n")
+
+    monkeypatch.setattr(rt, "HERE", tmp_path)
+    sig1 = rt._resolver_venv_signature()
+    sig2 = rt._resolver_venv_signature()
+    assert sig1 == sig2, "repeated calls with no writes must return the same signature"
+    assert sig1 != "", "signature must be non-empty when .venv exists"
+
+    # Simulate a pip install adding a new dist-info directory.
+    new_pkg = site_pkgs / "other-2.0.dist-info"
+    new_pkg.mkdir()
+    sig3 = rt._resolver_venv_signature()
+    assert sig3 != sig1, "signature must change after a new entry is added"
+
+
+def test_resolver_venv_signature_empty_when_no_venv(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "HERE", tmp_path)  # no .venv subdir here
+    assert rt._resolver_venv_signature() == ""
+
+
+def test_do_implement_hard_fails_on_venv_tamper(fake_cfg, monkeypatch, tmp_path):
+    # An implement run that modifies the resolver's shared .venv must fail reimplementable
+    # and NEVER reach publish.
+    wt = tmp_path / "wt"
+    monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "has_origin", lambda repo: False)
+    monkeypatch.setattr(rt, "resolve_base", lambda repo, ticket, **kw: ("HEAD", "main", ""))
+    monkeypatch.setattr(rt, "prepare_worktree", lambda repo, tid, base: (wt, f"claude/ticket-{tid}"))
+    monkeypatch.setattr(rt, "remove_worktree", lambda repo, wt: None)
+    monkeypatch.setattr(rt, "run_agent_tracked", lambda *a, **k: (True, "did the work"))
+    monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: set())  # no worktree escape
+
+    # Before-run: venv looks fine; after-run: signature differs (pip install happened).
+    venv_sigs = iter(["sig-before", "sig-after"])
+    monkeypatch.setattr(rt, "_resolver_venv_signature", lambda: next(venv_sigs))
+
+    tampered = {}
+    monkeypatch.setattr(rt, "_handle_venv_tamper",
+                        lambda ticket: tampered.update(ticket_id=ticket["id"]))
+    monkeypatch.setattr(rt, "publish",
+                        lambda *a, **k: pytest.fail("must not publish after venv tamper"))
+
+    failed = {}
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: failed.update(msg=msg, kw=k))
+
+    client = FakeClient()
+    ticket = {"id": 9, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, tmp_path / "repo", plan="do stuff")
+
+    assert tampered["ticket_id"] == 9
+    assert failed["kw"].get("reimplementable") is True
+    assert ".venv" in failed["msg"]
+
+
+def test_implement_prompt_warns_about_resolver_venv(tmp_path):
+    prompt = rt.implement_prompt(
+        {"id": 1, "title": "t", "description": "d"}, tmp_path, plan="do stuff")
+    # Must mention the resolver's own .venv path and the "fresh isolated environment" rule.
+    venv_path = str(rt.HERE / ".venv")
+    assert venv_path in prompt
+    assert "fresh" in prompt.lower() or "throwaway" in prompt.lower()
+    assert "shared" in prompt.lower()
+
+
 # --- difficulty routing --------------------------------------------------
 def test_parse_difficulty_variants():
     assert rt.parse_difficulty("steps\nDIFFICULTY: easy\nFILES: 1") == "easy"
