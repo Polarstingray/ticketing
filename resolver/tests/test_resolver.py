@@ -257,18 +257,20 @@ def test_porcelain_path_parses_status_and_rename():
     assert rt._porcelain_path("xx") is None  # too short to carry a path
 
 
-def test_handle_escape_reverts_only_parseable_paths(monkeypatch):
+def test_handle_escape_reverts_only_parseable_paths(monkeypatch, tmp_path):
     checkouts = []
 
     def fake_run(cmd, cwd=None, timeout=None):
         if "checkout" in cmd:
             checkouts.append(cmd[-1])  # the path arg
+        elif "diff" in cmd:
+            return 0, "diff output"
         return 0, ""
 
     monkeypatch.setattr(rt, "run", fake_run)
     repo = Path("/some/repo")
     escaped = {" M resolver/x.py", "R  a -> b", "x"}  # last is unparseable, must be skipped
-    assert rt._handle_escape(repo, escaped, {"id": 7}) is True
+    assert rt._handle_escape(repo, escaped, {"id": 7}, tmp_path) is True
     assert set(checkouts) == {"resolver/x.py", "b"}
     assert "x" not in checkouts  # unparseable line left for manual cleanup
 
@@ -291,7 +293,7 @@ def test_do_implement_hard_fails_on_worktree_escape(fake_cfg, monkeypatch, tmp_p
 
     handled = {}
     monkeypatch.setattr(rt, "_handle_escape",
-                        lambda repo, escaped, ticket: handled.update(escaped=escaped) or True)
+                        lambda repo, escaped, ticket, logs_dir: handled.update(escaped=escaped) or True)
     monkeypatch.setattr(rt, "publish", lambda *a, **k: pytest.fail("must not publish after escape"))
 
     failed = {}
@@ -596,7 +598,7 @@ def test_do_implement_repair_escape_hard_fails(fake_cfg, monkeypatch, tmp_path):
     # Override _tracked_dirty: clean before + after initial run, dirty after the repair.
     snaps = iter([set(), set(), {" M backend/x.py"}])
     monkeypatch.setattr(rt, "_tracked_dirty", lambda repo: next(snaps))
-    monkeypatch.setattr(rt, "_handle_escape", lambda repo, escaped, ticket: True)
+    monkeypatch.setattr(rt, "_handle_escape", lambda repo, escaped, ticket, logs_dir: True)
     monkeypatch.setattr(rt, "publish", lambda *a, **k: pytest.fail("must not publish after escape"))
     ticket = {"id": 5, "title": "t", "description": "d", "tags": [], "created_by": 3}
     rt.do_implement(fake_cfg, FakeClient(), ticket, tmp_path / "repo", plan="p")
