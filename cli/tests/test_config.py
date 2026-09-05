@@ -6,6 +6,7 @@ import stat
 
 import pytest
 
+from stingray_cli import config
 from stingray_cli.config import (
     ConfigError,
     config_path,
@@ -210,3 +211,42 @@ def test_missing_content_type_is_allowed():
     client = StingrayClient("http://h/api", "sk_x")
     client.session = type("S", (), {"request": lambda *a, **kw: FakeResp()})()
     assert client.whoami()["username"] == "admin"
+
+def test_write_secure_propagates_the_real_error_on_a_failed_write(tmp_path, monkeypatch):
+    """A write failure must surface as itself, not as EBADF from a second close.
+
+    `os.fdopen` owns the descriptor once it succeeds, so closing the raw fd in
+    an `except` around the write closes it twice. Best case that masks the real
+    error; worst case the number has been recycled and an unrelated file is
+    closed under another thread.
+    """
+    class DiskFull(Exception):
+        pass
+
+    real_fdopen = os.fdopen
+
+    def fdopen_that_fails_to_write(fd, *args, **kwargs):
+        handle = real_fdopen(fd, *args, **kwargs)
+        def boom(_text):
+            raise DiskFull("no space left on device")
+        handle.write = boom
+        return handle
+
+    monkeypatch.setattr(os, "fdopen", fdopen_that_fails_to_write)
+    with pytest.raises(DiskFull):
+        config.write_secure(tmp_path / "x.toml", "hello")
+
+
+def test_write_secure_closes_the_descriptor_if_fdopen_fails(tmp_path, monkeypatch):
+    """The one path where the raw close is still ours to make."""
+    closed = []
+    real_close = os.close
+
+    def failing_fdopen(fd, *args, **kwargs):
+        raise OSError("cannot wrap")
+
+    monkeypatch.setattr(os, "fdopen", failing_fdopen)
+    monkeypatch.setattr(os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    with pytest.raises(OSError):
+        config.write_secure(tmp_path / "y.toml", "hello")
+    assert len(closed) == 1
