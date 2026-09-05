@@ -89,7 +89,7 @@ def _check_ip(value: str, *, literal: bool) -> None:
         raise _deny(f"{what} is the unspecified address")
 
 
-def resolve_and_check(host: str) -> list[str]:
+def resolve_and_check(host: str, *, allowed_hosts: frozenset[str] = frozenset()) -> list[str]:
     """Resolve ``host`` (A and AAAA) and reject if *any* answer is non-public.
 
     Returns the resolved addresses. Every answer must pass, not just the first:
@@ -98,6 +98,12 @@ def resolve_and_check(host: str) -> list[str]:
 
     A DNS failure raises — the caller decides what that means (422 at creation,
     a ``skipped`` delivery at send time).
+
+    ``allowed_hosts`` (from the admin security-settings exemption list, see
+    routers.security_settings) skips the address check entirely for an exact
+    hostname match — an admin-authorized escape hatch for a webhook receiver
+    that legitimately resolves to a private/internal address. It does NOT
+    skip DNS resolution (the host must still resolve).
     """
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
@@ -111,17 +117,31 @@ def resolve_and_check(host: str) -> list[str]:
         address = info[4][0]
         if address not in addresses:
             addresses.append(address)
+    if host in allowed_hosts:
+        return addresses
     for address in addresses:
         _check_ip(address, literal=False)
     return addresses
 
 
-def validate_webhook_url(url: str) -> str:
+def validate_webhook_url(
+    url: str, *, allowed_hosts: frozenset[str] = frozenset(), allow_insecure: bool = False,
+) -> str:
     """Return ``url`` unchanged if it is a safe outbound target, else raise.
 
     Raises ``ValueError`` (message prefixed with :data:`SSRF_DENY_REASON`) for a
     malformed URL, a disallowed scheme/port/host, or a host that resolves to any
     non-public address.
+
+    ``allowed_hosts`` and ``allow_insecure`` come from the admin security
+    settings (routers.security_settings.get_security_settings) — both callers
+    (routers.webhooks and the delivery worker) read the current settings and
+    pass them through here rather than this module reaching into the DB
+    itself, keeping this module's only DB dependency at its call sites.
+    ``allowed_hosts`` exempts an exact hostname from the private-address
+    check only; scheme, port, userinfo, fragment, and the denied-suffix check
+    still apply unconditionally. ``allow_insecure`` is OR'd with the
+    ``ALLOW_INSECURE_WEBHOOKS`` env var (either can turn plain http on).
     """
     if not isinstance(url, str):
         raise _deny("url must be a string")
@@ -140,7 +160,7 @@ def validate_webhook_url(url: str) -> str:
 
     scheme = parts.scheme.lower()
     if scheme == "http":
-        if not _allow_insecure():
+        if not (allow_insecure or _allow_insecure()):
             raise _deny("scheme must be https (set ALLOW_INSECURE_WEBHOOKS=1 to allow http)")
     elif scheme != "https":
         raise _deny(f"scheme {parts.scheme!r} is not allowed; use https")
@@ -176,8 +196,9 @@ def validate_webhook_url(url: str) -> str:
     try:
         ipaddress.ip_address(hostname)
     except ValueError:
-        resolve_and_check(hostname)
+        resolve_and_check(hostname, allowed_hosts=allowed_hosts)
     else:
-        _check_ip(hostname, literal=True)
+        if hostname not in allowed_hosts:
+            _check_ip(hostname, literal=True)
 
     return url
