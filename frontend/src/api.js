@@ -251,6 +251,13 @@ export const api = {
   // our resolver bots and third-party agents alike. Read-only — an external
   // agent carries its own config, so there is nothing here to edit.
   listAgents: () => request("GET", "/agents"),
+  // Station enrolment (admin). A one-shot token that lets a host collect the
+  // credentials for one named resolver bot without ever holding an admin key.
+  // Minting needs a *recent* login — an API key cannot do it, by design — so
+  // this only works from the browser, which is the whole point.
+  listEnrollments: () => request("GET", "/station-enrollments"),
+  createEnrollment: (values) => request("POST", "/station-enrollments", values),
+  revokeEnrollment: (id) => request("DELETE", `/station-enrollments/${id}`),
 
   // Security settings (admin, step-up gated). Settings that affect the app's
   // security posture — webhook SSRF exemptions, the insecure-webhooks and

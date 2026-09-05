@@ -14,7 +14,10 @@ import sys
 import time
 from pathlib import Path
 
+import requests
+
 from stingray_cli import config as cfgstore
+from stingray_cli.common import profile_from
 from stingray_cli.config import ConfigError
 from stingray_cli.station import identity, units
 from stingray_cli.station.inventory import (
@@ -27,6 +30,7 @@ from stingray_cli.station.inventory import (
     validate_name,
 )
 from stingray_cli.station.status import ResolverStatus, collect
+from stingray_client.api import StingrayClient
 
 
 def add_parser(sub, add_connection_flags) -> None:
@@ -59,6 +63,26 @@ def add_parser(sub, add_connection_flags) -> None:
     p_adopt.add_argument("--profile", metavar="NAME",
                          help="profile naming the server (default: matched by URL)")
     p_adopt.set_defaults(func=cmd_adopt)
+
+    p_enroll = inner.add_parser(
+        "enroll",
+        help="redeem an enrolment token into a working resolver",
+        description="Redeem a token an admin minted in the web app. The station "
+                    "never needs an admin key: the token is a one-shot capability "
+                    "for exactly one bot.")
+    p_enroll.add_argument("token")
+    p_enroll.add_argument("--name", help="local name (default: the bot's username)")
+    p_enroll.add_argument("--checkout", required=True, metavar="DIR")
+    p_enroll.add_argument("--unit-prefix", default=None,
+                          help=f"systemd unit family (default: {DEFAULT_UNIT_PREFIX})")
+    p_enroll.add_argument("--projects-root", default="", metavar="DIR",
+                          help="PROJECTS_ROOT for the new identity")
+    p_enroll.add_argument("--start", action="store_true",
+                          help="install units and start it once enrolled")
+    p_enroll.add_argument("--force", action="store_true",
+                          help="overwrite an existing identity file")
+    add_connection_flags(p_enroll)
+    p_enroll.set_defaults(func=cmd_enroll)
 
     p_forget = inner.add_parser("forget", help="stop managing an identity (changes nothing on disk)")
     p_forget.add_argument("name")
@@ -114,6 +138,25 @@ def _profile_for_url(url: str, fallback: str | None) -> str:
                 return name
         return ""
     return fallback or default or ""
+
+
+def _server_url(args) -> str:
+    """Where to redeem. A profile is not required — that is the point.
+
+    A host enrolling its first resolver has no credentials at all, so `--url`
+    has to be enough; a host that already talks to this server can name the
+    profile instead of retyping it.
+    """
+    if getattr(args, "url", None):
+        return args.url.rstrip("/")
+    try:
+        return profile_from(args).url
+    except ConfigError:
+        raise ConfigError(
+            "no --url given and no profile is configured. Point at the server "
+            "directly: stingray station enroll TOKEN --url https://tickets.example/api "
+            "--checkout DIR"
+        ) from None
 
 
 def _families() -> dict[str, Path]:
@@ -293,6 +336,85 @@ def cmd_adopt(args) -> int:
     if not units.templates_installed(prefix):
         print(f"note: the {prefix}@ unit templates are not installed; "
               f"`stingray station start {handle}` will install them.", file=sys.stderr)
+    return 0
+
+
+def cmd_enroll(args) -> int:
+    """Token in, running resolver out.
+
+    The four things that have to agree — bot, key, identity file, units — are
+    created together here, which is the whole reason this command exists. The
+    admin named the bot when they minted the token, so nothing about the
+    identity is chosen on this side except where it lives.
+    """
+    url = _server_url(args)
+    checkout = Path(args.checkout).expanduser().resolve()
+    resolver_dir = checkout / "resolver"
+    if not resolver_dir.is_dir():
+        raise ConfigError(f"{resolver_dir} does not exist — --checkout wants a "
+                          f"ticketing checkout, not its resolver/ directory")
+
+    station = load_station(required=False)
+    if not station.name:
+        station.name = socket.gethostname()
+
+    # The token is spent by this call whether or not the rest succeeds, so
+    # everything that can be checked is checked before it is handed over.
+    client = StingrayClient(url, "")
+    try:
+        granted = client.redeem_enrollment(args.token, station=station.name)
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "?"
+        if status == 404:
+            raise ConfigError(
+                "the server rejected that token. Enrolment tokens are single-use "
+                "and short-lived — ask an admin to mint a fresh one."
+            ) from None
+        detail = exc.response.text if exc.response is not None else str(exc)
+        raise ConfigError(f"redeeming failed ({status}): {detail}") from None
+    except requests.RequestException as exc:
+        raise ConfigError(f"could not reach Stingray at {url}: {exc}") from None
+
+    instance = validate_name(args.name or granted["username"])
+    handle = instance if instance not in station.resolvers else f"{instance}@{_profile_for_url(url, args.profile) or 'server'}"
+    prefix = args.unit_prefix or DEFAULT_UNIT_PREFIX
+
+    env_path = identity.write_identity(
+        resolver_dir, instance, url=url, api_key=granted["api_key"],
+        user_id=granted["user_id"], projects_root=args.projects_root,
+        force=args.force,
+    )
+    print(f"enrolled {granted['username']} as user {granted['user_id']}")
+    print(f"wrote {env_path}")
+
+    profile = _profile_for_url(url, args.profile)
+    if not profile:
+        # The identity is real and usable; only this host's bookkeeping is
+        # missing, so say exactly what closes the gap rather than failing after
+        # spending the token.
+        print(f"\nnote: no configured profile points at {url}, so this resolver "
+              f"is not in the station inventory yet. Finish with:\n"
+              f"  stingray auth login --profile NAME --url {url}\n"
+              f"  stingray station adopt {instance} --checkout {checkout}"
+              + (f" --unit-prefix {prefix}" if prefix != DEFAULT_UNIT_PREFIX else ""),
+              file=sys.stderr)
+        return 0
+
+    station.resolvers[handle] = Resolver(
+        handle=handle, instance=instance, profile=profile, checkout=checkout,
+        env_file=env_path.name, bot_user_id=granted["user_id"], unit_prefix=prefix,
+    )
+    save_station(station)
+    print(f"managed as {handle} on station '{station.name}'")
+
+    if args.start:
+        resolver = station.resolvers[handle]
+        if not units.templates_installed(prefix):
+            units.install_templates(resolver_dir, prefix)
+        units.start(resolver)
+        print(f"started {resolver.timer_unit} + {resolver.listener_unit}")
+    else:
+        print(f"start it with: stingray station start {handle}")
     return 0
 
 

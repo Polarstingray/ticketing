@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ResolverSettings, { byStation, freshness, staleAfter } from "./ResolverSettings";
@@ -8,6 +8,9 @@ vi.mock("../api", () => ({
   api: {
     listResolvers: vi.fn(),
     listAgents: vi.fn(),
+    listEnrollments: vi.fn(),
+    createEnrollment: vi.fn(),
+    revokeEnrollment: vi.fn(),
     getResolverSettings: vi.fn(),
     updateResolverSettings: vi.fn(),
   },
@@ -46,6 +49,7 @@ describe("ResolverSettings — external agents panel", () => {
     api.listResolvers.mockResolvedValue([]);
     api.listAgents.mockResolvedValue([]);
     api.getResolverSettings.mockResolvedValue(settings());
+    api.listEnrollments.mockResolvedValue([]);
   });
 
   it("renders an empty state when no agent has checked in", async () => {
@@ -124,5 +128,79 @@ describe("byStation", () => {
   it("survives a roster where nothing reports a station", () => {
     // Every row written by a resolver older than this feature.
     expect(byStation([at(null, 1), at(undefined, 2)])).toHaveLength(1);
+  });
+});
+
+describe("station enrolment", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listResolvers.mockResolvedValue([]);
+    api.listAgents.mockResolvedValue([]);
+    api.getResolverSettings.mockResolvedValue(settings());
+    api.listEnrollments.mockResolvedValue([]);
+  });
+
+  it("shows the minted token once, with a warning that it will not be shown again", async () => {
+    api.createEnrollment.mockResolvedValue({
+      id: 1,
+      username: "gemini-bot",
+      token: "st_abcdef",
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    renderPage();
+
+    const field = await screen.findByPlaceholderText("gemini-bot");
+    fireEvent.change(field, { target: { value: "gemini-bot" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mint token" }));
+
+    expect(await screen.findByText("st_abcdef")).toBeInTheDocument();
+    expect(screen.getByText(/not shown again/i)).toBeInTheDocument();
+  });
+
+  it("explains the re-login rule rather than reporting a bare 401", async () => {
+    // `require_recent_admin` is the gate the whole feature rests on, so a stale
+    // session is an expected outcome to explain, not an error to apologise for.
+    const err = new Error("reauth_required");
+    err.status = 401;
+    api.createEnrollment.mockRejectedValue(err);
+    renderPage();
+
+    const field = await screen.findByPlaceholderText("gemini-bot");
+    fireEvent.change(field, { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mint token" }));
+
+    expect(await screen.findByText(/last 15 minutes/)).toBeInTheDocument();
+    expect(screen.queryByText("reauth_required")).not.toBeInTheDocument();
+  });
+
+  it("offers revoke on a pending enrolment and not on a spent one", async () => {
+    api.listEnrollments.mockResolvedValue([
+      {
+        id: 1, username: "pending", token_prefix: "st_aaaaaaa",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        redeemed_at: null, redeemed_user_id: null, station: "",
+      },
+      {
+        id: 2, username: "spent", token_prefix: "st_bbbbbbb",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        redeemed_at: new Date().toISOString(), redeemed_user_id: 7,
+        station: "ubvm.home.lab",
+      },
+    ]);
+    renderPage();
+
+    expect(await screen.findByText("pending")).toBeInTheDocument();
+    expect(screen.getByText(/redeemed on ubvm.home.lab/)).toBeInTheDocument();
+    // One row is revocable; the redeemed one is a record, not a live token.
+    expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(1);
+  });
+
+  it("keeps the settings form usable when enrolments cannot be listed", async () => {
+    api.listEnrollments.mockRejectedValue(new Error("boom"));
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Models")).toBeInTheDocument());
+    expect(screen.queryByText("boom")).not.toBeInTheDocument();
   });
 });
