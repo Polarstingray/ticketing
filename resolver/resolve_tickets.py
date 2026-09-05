@@ -2713,6 +2713,21 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         repo, ticket, fetch_ok=origin, git_net_timeout=cfg.git_net_timeout)
     if base_warning:
         client.add_comment(ticket["id"], base_warning)
+    # If we're going to open a PR, the base branch must exist on the remote now
+    # (origin was just fetched above). If it's local-only, gh pr create will fail
+    # after burning an entire implement run with the error:
+    #   "Base sha can't be blank, Base ref must be a branch"
+    # Bail early with a clear message so the human can push the branch first.
+    if pr_ok and not ref_exists(repo, f"origin/{base_branch}"):
+        fail(client, ticket,
+             f"Base branch `{base_branch}` is not pushed to the remote — GitHub "
+             f"has no `{base_branch}` ref, so `gh pr create --base {base_branch}` "
+             "would fail after the entire implement run.\n\n"
+             f"Push it first (`git push origin {base_branch}`), then reassign this "
+             "ticket to me, or add a `branch:<name>` tag pointing at a branch that "
+             "already exists on the remote.",
+             reimplementable=True)
+        return
     wt, branch = prepare_worktree(repo, ticket["id"], base_ref)
     # Export the worktree's actual HEAD and branch so any follow-up ticket the agent
     # files via file_ticket.py auto-inherits correct rev:/branch: tags. Without this
