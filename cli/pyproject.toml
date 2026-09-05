@@ -15,7 +15,7 @@ dependencies = ["requests>=2.31"]
 stingray = "stingray_cli.main:main"
 
 [tool.setuptools]
-packages = ["stingray_client", "stingray_cli"]
+packages = ["stingray_client", "stingray_cli", "stingray_cli.station"]
 
 [tool.setuptools.package-data]
 stingray_cli = ["templates/**/*"]

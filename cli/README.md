@@ -70,6 +70,12 @@ stingray explore --feature auth      # just one named feature
 stingray file --type task --title "Flaky retry test" --priority low
 stingray scaffold python-cli ./newproj --intent "a log parser"
 stingray auth status
+
+stingray station init                # adopt this host and everything on it
+stingray station ls                  # every resolver here, and its state
+stingray station status gemini       # units, last sweep, stream, checkout
+stingray station logs gemini -f      # follow one resolver's sweep log
+stingray station stop gemini         # timer and listener together
 ```
 
 ### Credential precedence
@@ -81,6 +87,60 @@ This is deliberately the **opposite** of `resolver/config.py`, where the `.env`
 file wins over the ambient environment. The resolver is a daemon whose identity
 must not shift with whatever a shell exported; an interactive CLI should honor an
 explicit override. Don't "fix" one to match the other.
+
+## `station` — the resolvers running on this host
+
+A resolver identity is four things that have to agree: a bot user on a Stingray
+server, an API key for it, an `.env.<name>` in a resolver checkout, and a pair of
+systemd units. Nothing forced them to agree before, and the ways they drift are
+quiet — a bot id claimed twice, a unit pointing at the wrong checkout, a listener
+that has never connected. `station` makes them one named thing.
+
+```
+$ stingray station ls
+station 'ubvm.home.lab' — /home/penguin/.config/stingray/stations.toml
+NAME                 BOT   PROFILE      STATE                CHECKOUT
+claude               2     local        running              main @7a555b3
+claude-lite          5     local        running              main @7a555b3
+claude-lite@home     4     home         running              main @7a555b3
+mistral-bot          6     home         running              main @7a555b3
+```
+
+**The inventory is local-first.** `~/.config/stingray/stations.toml` records
+*intent* — which identities this host means to run — and nothing derived.
+Unit state, checkout revision, last sweep and server settings are read fresh
+every time, because a station has to be usable when the server is unreachable,
+which is exactly when someone needs it.
+
+**A station is per-host and spans servers.** One box commonly runs resolvers
+against several Stingray instances; each identity names the profile whose URL it
+matches. An identity whose URL matches no profile is *skipped*, never filed under
+a fallback — putting a localhost resolver under another server's profile is the
+mislabelling this command exists to prevent.
+
+**Handle vs instance.** The table key is a station-unique *handle*; the systemd
+instance name and `.env` suffix are separate, and differ only when they must. A
+host running a `claude-lite` against two servers — two different bots — keys one
+of them `claude-lite@home` while both keep the instance name their units already
+use. Commands take either, and refuse a bare instance name that means two things.
+
+**One bot, one resolver.** The server keeps a single registry row per bot
+(`AgentInstance` is unique on `user_id`), so two identities sharing a bot would
+overwrite each other's heartbeat and make both flicker between live and dead.
+`init` reports the clash and keeps whichever one is actually enabled in systemd —
+a stale `.env` beside a live one is the common case, and picking alphabetically
+would adopt the dead one.
+
+**`LoadState` is not installation.** systemd reports `loaded` for *every*
+conceivable instance of a live template, so `stingray-ubvm@nonexistent.timer`
+looks as real as a running one. An instance someone actually asked for has an
+enable symlink or is active; that is what `status` reports.
+
+`station` drives systemd rather than supervising anything itself. systemd already
+serializes runs of a unit, merges a start into a queued job (which is what turns
+a burst of assignments into one sweep), restarts a dead listener, survives logout
+via linger and returns at boot. A tool that spawned its own children would lose
+all of that and die with the terminal.
 
 ## How `review` builds code blocks
 
@@ -266,6 +326,9 @@ plain template.
   (`resolver/stingray.py` subclasses the client to add its audit logging).
 - `stingray_cli/` — argparse front end, credentials, git plumbing, describe pass,
   scaffolding.
+- `stingray_cli/station/` — the station: `inventory` (the TOML of intent),
+  `identity` (reading `.env.<name>`), `units` (driving `systemctl --user`) and
+  `status` (the join of systemd, git, logs and the server).
 
 ## Tests
 

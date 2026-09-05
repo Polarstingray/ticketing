@@ -6,13 +6,16 @@ Subcommands:
   explore   file a code-review ticket per feature in an existing codebase
   file      file an arbitrary ticket (the validated replacement for curl)
   scaffold  generate a project outline plus a ticket per stub
+  station   manage the resolvers running on this host
 """
 from __future__ import annotations
 
 import argparse
 import sys
 
-from stingray_cli import cmd_auth, cmd_explore, cmd_file, cmd_review, cmd_scaffold
+from stingray_cli import (
+    cmd_auth, cmd_explore, cmd_file, cmd_review, cmd_scaffold, cmd_station,
+)
 from stingray_cli.config import ConfigError
 from stingray_cli.gitctx import GitError
 
@@ -36,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     cmd_explore.add_parser(sub, _add_connection_flags)
     cmd_file.add_parser(sub, _add_connection_flags)
     cmd_scaffold.add_parser(sub, _add_connection_flags)
+    cmd_station.add_parser(sub, _add_connection_flags)
     return parser
 
 
