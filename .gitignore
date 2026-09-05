@@ -3,6 +3,13 @@ __pycache__/
 *.pyc
 .venv/
 backend/.venv/
+# Any throwaway virtualenv, not just the canonical name. A resolver run
+# that builds one to execute the tests (`.venv-test/`) is committed by
+# `git add -A` otherwise — which on #189 staged 426k lines and, worse,
+# made an empty result look like a real diff, defeating the
+# "no code changes were needed" hand-back.
+.venv*/
+venv/
 backend/data/
 
 # Local agent state (plans, memory, settings)
