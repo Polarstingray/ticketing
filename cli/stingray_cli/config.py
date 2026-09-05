@@ -174,24 +174,30 @@ def _dump(raw: dict) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _write(raw: dict) -> Path:
-    """Write the config at 0600, creating the directory at 0700.
+def write_secure(path: Path, text: str) -> Path:
+    """Write ``text`` to ``path`` at 0600, creating the directory at 0700.
 
     Opened with the mode up front rather than written-then-chmod'd: the latter
-    leaves a window where a live API key sits in a world-readable file.
+    leaves a window where a live API key sits in a world-readable file. Shared
+    with the station inventory, which lives beside this file and is written the
+    same way — it holds no key today, but it names every identity on the host
+    and there is no reason for that to be world-readable either.
     """
-    path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(_dump(raw))
+            fh.write(text)
     except Exception:
         os.close(fd)
         raise
     # An existing file keeps its old mode through O_CREAT, so pin it explicitly.
     os.chmod(path, 0o600)
     return path
+
+
+def _write(raw: dict) -> Path:
+    return write_secure(config_path(), _dump(raw))
 
 
 def save_profile(name: str, values: dict, *, make_default: bool | None = None) -> Path:
