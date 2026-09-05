@@ -17,10 +17,10 @@ from read_only_guard import read_only_guard
 from routers import auth as auth_router
 from routers import chat as chat_router
 from routers import comments as comments_router
+from routers import enrollments as enrollments_router
 from routers import events as events_router
 from routers import notifications as notifications_router
 from routers import preferences as preferences_router
-from routers import enrollments as enrollments_router
 from routers import resolver_settings as resolver_settings_router
 from routers import saved_views as saved_views_router
 from routers import security_settings as security_settings_router
