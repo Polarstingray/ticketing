@@ -199,6 +199,25 @@ def test_render_leaves_the_default_family_alone(tmp_path):
     assert out == "Wants=stingray-resolver@%i.timer\n"
 
 
+class _Completed:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+def test_sweep_is_asked_for_without_blocking(monkeypatch):
+    """A oneshot `start` waits for the whole sweep; an agent run outlives us.
+
+    Without `--no-block` this call times out while the work it requested is
+    running fine, and systemd cannot merge it into an already-queued start.
+    """
+    seen = []
+    monkeypatch.setattr(units, "systemctl",
+                        lambda *a, **kw: seen.append(a) or _Completed())
+    units.sweep_now(_resolver("gemini"))
+    assert seen == [("start", "--no-block", "stingray-resolver@gemini.service")]
+
+
 # --- profile matching -------------------------------------------------------
 
 def test_a_url_that_matches_no_profile_never_falls_back(isolated_config,

@@ -216,5 +216,12 @@ def restart(resolver: Resolver) -> None:
 
 
 def sweep_now(resolver: Resolver) -> subprocess.CompletedProcess:
-    """Run one sweep immediately, the way the listener's poke does."""
-    return systemctl("start", resolver.sweep_unit)
+    """Run one sweep immediately, the way the listener's poke does.
+
+    ``--no-block`` is not optional. The sweep unit is ``Type=oneshot``, so a
+    plain ``start`` waits for the whole sweep — which can be an agent run of
+    several minutes — and this call would time out while the work it asked for
+    was going perfectly well. It is also what lets systemd merge this request
+    into a start already queued, which is the debouncing the listener relies on.
+    """
+    return systemctl("start", "--no-block", resolver.sweep_unit)
