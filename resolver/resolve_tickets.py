@@ -1964,6 +1964,52 @@ def _porcelain_path(line: str) -> str | None:
     return path or None
 
 
+_ARTIFACT_SENTINELS = {"pyvenv.cfg", "node_modules", ".venv", "venv"}
+
+
+def _all_paths_are_artifacts(wt: Path, base_ref: str) -> tuple[bool, str]:
+    """Return (True, reason) if every file in the diff since base_ref lives inside
+    an artifact directory (virtualenv, node_modules, etc.), (False, "") otherwise.
+
+    Uses `git diff --name-only` to list changed paths, then checks whether the
+    top-level component of each path matches a known-artifact name or whether the
+    path's parent directory contains a `pyvenv.cfg` file (virtualenv marker).
+    An empty diff returns False — the caller already handles that via `ahead == 0`."""
+    _, names_out = run(["git", "-C", str(wt), "diff", "--name-only", f"{base_ref}..HEAD"])
+    paths = [p.strip() for p in names_out.splitlines() if p.strip()]
+    if not paths:
+        return False, ""
+
+    def _is_artifact(p: str) -> bool:
+        parts = Path(p).parts
+        if not parts:
+            return False
+        top = parts[0]
+        if top in _ARTIFACT_SENTINELS or top.startswith(".venv") or top.startswith("venv"):
+            return True
+        parent = wt / Path(p).parent
+        if (parent / "pyvenv.cfg").exists():
+            return True
+        return False
+
+    non_artifact = [p for p in paths if not _is_artifact(p)]
+    if non_artifact:
+        return False, ""
+    reason = f"all {len(paths)} changed path(s) are inside artifact directories (no source files)"
+    return True, reason
+
+
+def _commit_is_suspiciously_large(wt: Path, base_ref: str, threshold: int = 50_000) -> tuple[bool, int]:
+    """Return (True, insertions) if the commit adds more than `threshold` lines.
+    A resolver fix ticket that inserts 400k lines is never legitimate."""
+    _, stat_out = run(["git", "-C", str(wt), "diff", "--shortstat", f"{base_ref}..HEAD"])
+    m = re.search(r"(\d+) insertion", stat_out)
+    if not m:
+        return False, 0
+    insertions = int(m.group(1))
+    return insertions > threshold, insertions
+
+
 def _handle_escape(repo: Path, escaped: set[str], ticket: dict, logs_dir: Path) -> bool:
     """An implement run dirtied the MAIN checkout — a worktree escape. Loudly audit it and
     best-effort revert ONLY the newly-dirtied paths (those in `escaped`, which already
@@ -2797,6 +2843,33 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
              "-c", f"user.email={cfg.git_author_email}",
              "commit", "-m",
              f"Resolve Stingray #{ticket['id']}: {commit_title(ticket)}"])
+        # Guard: if the commit only contains artifact directories (virtualenvs,
+        # node_modules, etc.) treat it as a no-change and hand back tidily.
+        # Also catch implausibly large insertions as a secondary signal.
+        artifacts_only, artifact_reason = _all_paths_are_artifacts(wt, base_ref)
+        if not artifacts_only:
+            big, insertions = _commit_is_suspiciously_large(wt, base_ref)
+            if big:
+                phase("suspicious-commit", ticket,
+                      f"#{tid}: commit has {insertions:,} insertions — treating as artifact noise")
+                artifacts_only = True
+                artifact_reason = (f"commit has {insertions:,} insertions (threshold 50 000)"
+                                   " — likely artifact noise, not source changes")
+        if artifacts_only:
+            no_change_reason = no_changes_needed_reason(summary)
+            comment_body = (
+                f"{IMPL_MARKER} — the commit contained only artifact files "
+                f"({artifact_reason}), not source changes. "
+                + (f"Agent stated: {no_change_reason}" if no_change_reason else
+                   "The agent may have concluded no changes were needed.")
+                + f"\n\n{summary}"
+            )
+            client.add_comment(ticket["id"], comment_body)
+            set_state(client, ticket, [], status="in_review",
+                      assigned_to=handback_user(client, ticket))
+            phase("artifact-only-commit", ticket,
+                  f"#{tid}: artifacts-only commit — treated as no-change, handed back")
+            return
         ahead = run(["git", "-C", str(wt), "rev-list", "--count", f"{base_ref}..HEAD"])[1].strip()
         if ahead in ("", "0"):
             # No diff — but if the run's whole job was to file Stingray ticket(s)
