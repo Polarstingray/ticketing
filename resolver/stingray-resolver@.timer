@@ -1,0 +1,25 @@
+# Sweep cadence for one resolver identity. See stingray-resolver@.service for
+# the install commands.
+#
+# This is the *safety net*, not the primary trigger, once
+# stingray-resolver-listen@%i.service is running: push covers only what emits an
+# event, so the timer still has to catch a missed event, a listener that is down,
+# and a ticket that becomes actionable with no event at all (a due date passing).
+# The sweep is idempotent, so a redundant run costs a wasted round trip.
+#
+# Without the listener installed, drop OnUnitActiveSec back to 5–10min: it is
+# then the only thing picking work up, and the interval is the pickup latency.
+[Unit]
+Description=Run the Stingray resolver (%i) periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+# Cron fired every identity on the same :00/:05 tick. Spreading them keeps N
+# agent CLIs from starting in the same second on one box.
+RandomizedDelaySec=2min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
