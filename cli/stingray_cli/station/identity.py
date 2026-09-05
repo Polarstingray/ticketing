@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from stingray_cli.config import ConfigError, write_secure
+
 # Keys that must never be shown in full or sent anywhere. The server refuses
 # them too (`ResolverSettingsUpdate` sets extra="forbid"), but the station is
 # the thing holding the plaintext, so the guard belongs here first.
@@ -42,6 +44,52 @@ def redact(key: str, value: str) -> str:
     if key not in SECRET_KEYS or not value:
         return value
     return f"{value[:11]}…" if len(value) > 12 else "(set)"
+
+
+def write_identity(resolver_dir: Path, name: str, *, url: str, api_key: str,
+                   user_id: int, desc: str = "", projects_root: str = "",
+                   force: bool = False) -> Path:
+    """Write ``.env.<name>`` from the checkout's ``.env.example``.
+
+    Built from the template rather than from a literal in here, so a resolver
+    that grows a new setting does not need this file changed too — the example
+    is the schema, and only the three identity values are substituted.
+
+    Written 0600: it carries the bot's API key, and every other place that key
+    lives is already protected that way.
+    """
+    dest = resolver_dir / f".env.{name}"
+    if dest.exists() and not force:
+        raise ConfigError(f"{dest} already exists (pass --force to overwrite)")
+    example = resolver_dir / ".env.example"
+    if not example.is_file():
+        raise ConfigError(f"{example} is missing — is {resolver_dir} a resolver checkout?")
+
+    overrides = {
+        "STINGRAY_URL": url,
+        "STINGRAY_API_KEY": api_key,
+        "RESOLVER_BOT_USER_ID": str(user_id),
+    }
+    if projects_root:
+        overrides["PROJECTS_ROOT"] = projects_root
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw in example.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            key = stripped.partition("=")[0].strip()
+            if key in overrides:
+                lines.append(f"{key}={overrides[key]}")
+                seen.add(key)
+                continue
+        lines.append(raw)
+    for key, value in overrides.items():
+        if key not in seen:
+            lines.append(f"{key}={value}")
+    if desc:
+        lines.append(f"{DESC_KEY}={desc}")
+    return write_secure(dest, "\n".join(lines) + "\n")
 
 
 def identity_name(env_file: str) -> str:

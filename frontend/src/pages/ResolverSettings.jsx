@@ -192,6 +192,11 @@ const RUNNING_FIELDS = [
 export default function ResolverSettings() {
   const [roster, setRoster] = useState([]);
   const [agents, setAgents] = useState([]);
+  const [enrollments, setEnrollments] = useState([]);
+  const [enrollForm, setEnrollForm] = useState({ username: "", display_name: "" });
+  const [minted, setMinted] = useState(null);   // the plaintext token, shown once
+  const [enrollError, setEnrollError] = useState("");
+  const [minting, setMinting] = useState(false);
   const [selected, setSelected] = useState(null); // null = Global default, else bot_user_id
   const [form, setForm] = useState(null);
   const [secrets, setSecrets] = useState([]);
@@ -207,6 +212,53 @@ export default function ResolverSettings() {
     setForm(f);
     setSecrets(res.secrets || []);
     setMeta({ updated_at: res.updated_at, updated_by: res.updated_by });
+  }
+
+  async function loadEnrollments() {
+    try {
+      setEnrollments(await api.listEnrollments());
+    } catch {
+      // Same contract as the agent registry: this panel is an admin
+      // convenience and must never stop the settings form rendering.
+      setEnrollments([]);
+    }
+  }
+
+  async function mint(e) {
+    e.preventDefault();
+    setEnrollError("");
+    setMinted(null);
+    setMinting(true);
+    try {
+      const created = await api.createEnrollment({
+        username: enrollForm.username.trim(),
+        display_name: enrollForm.display_name.trim(),
+      });
+      setMinted(created);
+      setEnrollForm({ username: "", display_name: "" });
+      loadEnrollments();
+    } catch (err) {
+      // A stale session is the expected failure here, not an error to
+      // apologise for — explain the rule rather than just reporting a 401.
+      setEnrollError(
+        err && err.status === 401 && err.message === "reauth_required"
+          ? "Minting needs a login from the last 15 minutes. That gate is why no API " +
+            "key can create a bot — sign out and back in, then try again."
+          : err.message || "Could not mint a token"
+      );
+    } finally {
+      setMinting(false);
+    }
+  }
+
+  async function revoke(id) {
+    setEnrollError("");
+    try {
+      await api.revokeEnrollment(id);
+      loadEnrollments();
+    } catch (err) {
+      setEnrollError(err.message || "Could not revoke");
+    }
   }
 
   async function loadRoster() {
@@ -245,6 +297,7 @@ export default function ResolverSettings() {
       try {
         await loadRoster();
         await loadAgents();
+        await loadEnrollments();
         const res = await api.getResolverSettings(); // global default first
         if (active) hydrate(res);
       } catch (e) {
@@ -349,6 +402,99 @@ export default function ResolverSettings() {
                 </Fragment>
               ))}
             </div>
+          </div>
+
+          {/* --- Station enrolment ------------------------------------------- */}
+          <div className="card">
+            <h2 className={styles.h2}>Enrol a resolver</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Mint a one-shot token so a machine can collect the credentials for one
+              named bot without ever holding an admin key. Redeem it there with{" "}
+              <code>stingray station enroll &lt;token&gt;</code>. Tokens are single-use
+              and expire in an hour.
+            </p>
+
+            <form onSubmit={mint} className={styles.enrollForm}>
+              <div className="field">
+                <label>Bot username</label>
+                <input
+                  value={enrollForm.username}
+                  onChange={(e) =>
+                    setEnrollForm({ ...enrollForm, username: e.target.value })
+                  }
+                  placeholder="gemini-bot"
+                />
+              </div>
+              <div className="field">
+                <label>Display name</label>
+                <input
+                  value={enrollForm.display_name}
+                  onChange={(e) =>
+                    setEnrollForm({ ...enrollForm, display_name: e.target.value })
+                  }
+                  placeholder="optional"
+                />
+              </div>
+              <button
+                className="primary"
+                type="submit"
+                disabled={minting || !enrollForm.username.trim()}
+              >
+                {minting ? "Minting…" : "Mint token"}
+              </button>
+            </form>
+
+            {enrollError && <div className="error">{enrollError}</div>}
+
+            {minted && (
+              <div className={styles.mintedToken}>
+                <strong>Copy this now — it is not shown again.</strong>
+                <code>{minted.token}</code>
+                <span className="muted">
+                  For <strong>{minted.username}</strong>, expires{" "}
+                  {new Date(minted.expires_at).toLocaleString()}.
+                </span>
+              </div>
+            )}
+
+            {enrollments.length === 0 ? (
+              <p className="muted" style={{ marginBottom: 0 }}>
+                No enrolments yet.
+              </p>
+            ) : (
+              <div className={styles.roster}>
+                {enrollments.map((en) => {
+                  const spent = en.redeemed_at != null;
+                  const expired =
+                    !spent && new Date(en.expires_at).getTime() <= Date.now();
+                  return (
+                    <div key={en.id} className={`${styles.rosterRow} ${styles.agentRow}`}>
+                      <span className={`${styles.dot} ${styles[spent ? "live" : expired ? "never" : "stale"]}`} />
+                      <span className={styles.rosterName}>
+                        {en.username}
+                        <span className={styles.rosterEnv}> {en.token_prefix}…</span>
+                      </span>
+                      <span className="muted">
+                        {spent
+                          ? `redeemed${en.station ? ` on ${en.station}` : ""}`
+                          : expired
+                          ? "expired"
+                          : `expires ${new Date(en.expires_at).toLocaleString()}`}
+                      </span>
+                      <span className={styles.rosterMeta}>
+                        {spent ? (
+                          <span className="muted">bot #{en.redeemed_user_id}</span>
+                        ) : (
+                          <button type="button" onClick={() => revoke(en.id)}>
+                            Revoke
+                          </button>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* --- External agents (read-only liveness) ------------------------ */}
