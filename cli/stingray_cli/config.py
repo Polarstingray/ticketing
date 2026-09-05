@@ -185,12 +185,18 @@ def write_secure(path: Path, text: str) -> Path:
     """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # `os.fdopen` takes ownership of the descriptor, so the raw close belongs
+    # only on the path where it never got that far. Wrapping the write in the
+    # same try closed `fd` twice on any write failure: the first close is the
+    # `with` exiting, the second raises EBADF over the real error — or, worse,
+    # lands on whatever descriptor another thread was handed in between.
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
     except Exception:
         os.close(fd)
         raise
+    with handle:
+        handle.write(text)
     # An existing file keeps its old mode through O_CREAT, so pin it explicitly.
     os.chmod(path, 0o600)
     return path
