@@ -308,6 +308,23 @@ def test_follow_wakes_on_my_assignment_and_returns_the_cursor(monkeypatch):
     assert captured["stream"] is True
 
 
+def test_follow_does_not_double_the_api_prefix(monkeypatch):
+    """STINGRAY_URL already ends in `/api`; the path appended must be bare.
+
+    Named on its own because the regression it guards was silent: adding a
+    second `/api` made every connection 404, and `run()` treats an HTTP error
+    as a reason to back off and retry forever — so the daemon stayed up, the
+    unit looked healthy, and the resolver quietly ran on its timer alone.
+    """
+    captured: dict = {}
+    monkeypatch.setattr(listen.requests, "get", _fake_get(": connected at 0\n\n", captured))
+
+    listen.follow(FakeCfg(), RecordingWaker(), threading.Event())
+
+    assert captured["url"] == f"{FakeCfg.stingray_url}/events/stream"
+    assert "/api/api/" not in captured["url"]
+
+
 def test_follow_sends_the_resume_cursor(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(listen.requests, "get", _fake_get("", captured))

@@ -36,6 +36,10 @@ WorkingDirectory=/opt/ticketing/resolver
 # Config.load() reads this relative to WorkingDirectory and derives the
 # resolver's identity name from it.
 Environment=RESOLVER_ENV_FILE=.env.%i
+# StandardOutput=append: fails the unit if the directory is missing, and a
+# fresh checkout has no logs/ until something writes one. Leading `-` so a
+# pre-existing directory is not an error.
+ExecStartPre=-/bin/mkdir -p /opt/ticketing/resolver/logs
 ExecStart=/opt/ticketing/resolver/.venv/bin/python /opt/ticketing/resolver/resolve_tickets.py
 # Don't let a wedged sweep run forever; the timer starts the next one.
 TimeoutStartSec=3600
