@@ -19,11 +19,12 @@ rest, single use, short lived, rate limited per IP, and every failure answers
 with the same message so the endpoint cannot be used to tell a real token from
 an expired one.
 """
+import secrets
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-
-import secrets
 
 from auth import hash_api_key, require_admin, require_recent_admin
 from database import get_db
@@ -82,8 +83,6 @@ def create_enrollment(
     orphan user behind every token nobody redeems, and the roster would fill
     with identities that have never run anything.
     """
-    from datetime import timedelta
-
     if db.query(User).filter(User.username == payload.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
 
