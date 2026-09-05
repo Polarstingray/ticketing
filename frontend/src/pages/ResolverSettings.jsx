@@ -588,8 +588,8 @@ export default function ResolverSettings() {
                 Revoking is the only way to stop a resolver acting on this
                 server. A spent enrolment cannot be withdrawn — the token is
                 already used, and the record of how this bot came to exist is
-                worth keeping — so this is what "revoke the bot's API key"
-                means.
+                worth keeping &mdash; so this is what &ldquo;revoke the bot&rsquo;s
+                API key&rdquo; means.
               </p>
               {keysError && <div className="error">{keysError}</div>}
               {botKeys.length === 0 ? (
