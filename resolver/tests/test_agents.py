@@ -39,6 +39,20 @@ def test_run_agent_dispatches_to_claude(monkeypatch, fake_cfg, tmp_path):
     assert calls["args"] == ("do it", "plan")
 
 
+def test_only_opencode_wants_a_provider_prefix():
+    """The `provider/model` rule belongs to the runner, not to the startup check.
+
+    opencode fails with a bare model name; Claude Code requires one. When the
+    check was unconditional, every Claude resolver logged a WARNING telling it
+    that `claude-sonnet-4-6` was malformed and that opencode would fail — on a
+    resolver that does not run opencode at all.
+    """
+    assert agents.get_runner("opencode").model_needs_provider_prefix is True
+    assert agents.get_runner("claude").model_needs_provider_prefix is False
+    # The default is off, so a new runner opts in rather than inheriting noise.
+    assert agents.AgentRunner.model_needs_provider_prefix is False
+
+
 def test_register_runner_requires_name():
     class Nameless(agents.AgentRunner):
         def run(self, cfg, prompt, cwd, mode, log_path):

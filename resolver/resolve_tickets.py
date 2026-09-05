@@ -1654,6 +1654,7 @@ class OpenCodeRunner(agents.AgentRunner):
 
     name = "opencode"
     label = "opencode"
+    model_needs_provider_prefix = True
 
     def run(self, cfg: Config, prompt: str, cwd: Path, mode: str,
             log_path: Path) -> tuple[bool, str]:
@@ -3827,12 +3828,14 @@ def main() -> None:
         remote = {}
     _overlay_settings(cfg, remote)
     AUDIT_TAIL_BYTES = cfg.audit_output_tail_bytes  # re-set: overlay may change it
-    # Warn if effective model looks invalid (missing provider/ prefix).
+    # Warn if the effective model looks invalid for *this* runner. Only the
+    # CLIs that namespace models by provider can be misconfigured this way;
+    # asking a Claude resolver for `anthropic/claude-sonnet-4-6` would break it.
     effective_model = cfg.agent_model or cfg.agent_implement_model or ""
-    if effective_model and "/" not in effective_model:
+    if runner.model_needs_provider_prefix and effective_model and "/" not in effective_model:
         log(f"resolver-settings: WARNING — effective agent_model '{effective_model}' "
             f"has no provider prefix (expected 'provider/model-name'). "
-            f"opencode will likely fail with a generic error. "
+            f"{runner.label} will likely fail with a generic error. "
             f"Fix the model name in resolver settings.")
     # Self-report to the resolver-manager registry (best-effort; a registry
     # failure must never affect resolution — same contract as run_agent_tracked).
