@@ -36,6 +36,11 @@ class AgentRunner(ABC):
     name: str = ""
     #: human-friendly label used in user-facing ticket comments/logs.
     label: str = ""
+    #: True when this CLI addresses models as "provider/model-name" and a bare
+    #: name is a misconfiguration. opencode does; Claude Code does not, and
+    #: warning a Claude resolver that its perfectly valid `claude-sonnet-4-6`
+    #: is missing a prefix is noise that teaches operators to ignore the log.
+    model_needs_provider_prefix: bool = False
 
     @abstractmethod
     def run(self, cfg: "Config", prompt: str, cwd: Path, mode: str,
