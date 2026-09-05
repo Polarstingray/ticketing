@@ -30,6 +30,10 @@ StartLimitBurst=10
 Type=simple
 WorkingDirectory=/opt/ticketing/resolver
 Environment=RESOLVER_ENV_FILE=.env.%i
+# StandardOutput=append: fails the unit if the directory is missing, and a
+# fresh checkout has no logs/ until something writes one. Leading `-` so a
+# pre-existing directory is not an error.
+ExecStartPre=-/bin/mkdir -p /opt/ticketing/resolver/logs
 ExecStart=/opt/ticketing/resolver/.venv/bin/python /opt/ticketing/resolver/listen.py \
     --systemctl-user --unit stingray-resolver@%i.service
 # A dropped stream is handled in-process with backoff, so reaching here means the
