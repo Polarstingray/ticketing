@@ -819,6 +819,12 @@ class ResolverHeartbeat(BaseModel):
     agent: str = ""       # claude | opencode | ...
     model: str = ""
     effective_config: ResolverSettingsValues = Field(default_factory=ResolverSettingsValues)
+    # Reported by whichever process is checking in. The sweep knows the config;
+    # the listener knows the host and the cadence. Neither sends the other's
+    # fields, and the endpoint applies only what was actually sent, so the two
+    # reporters build one row instead of overwriting each other.
+    station: str = ""             # the host this worker runs on
+    heartbeat_seconds: int = 0    # 0 = only reports when it sweeps
 
 
 class ResolverRosterEntry(BaseModel):
@@ -836,6 +842,11 @@ class ResolverRosterEntry(BaseModel):
     model: Optional[str] = None
     last_seen_at: Optional[UTCDateTime] = None
     effective_config: Optional[ResolverSettingsValues] = None
+    station: Optional[str] = None
+    # How often this worker promises to check in. The UI needs it to tell an
+    # idle resolver from a stopped one: with only `last_seen_at`, "quiet for 20
+    # minutes" means healthy for one cadence and dead for another.
+    heartbeat_seconds: Optional[int] = None
 
 
 class AgentHeartbeat(BaseModel):

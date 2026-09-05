@@ -53,7 +53,7 @@ import audit
 import commands
 import file_ticket
 import scaffold_followup
-from config import Config, RepoNotAllowed, RepoNotFound
+from config import Config, station_name, RepoNotAllowed, RepoNotFound
 from stingray import StingrayClient
 from stingray_client import stubs as stubs_mod
 
@@ -3845,6 +3845,12 @@ def main() -> None:
             name=cfg.name,
             agent=cfg.agent,
             model=cfg.agent_model or cfg.agent_implement_model or cfg.agent_plan_model or "",
+            # No `heartbeat_seconds`: a sweep only speaks while it is sweeping,
+            # and 0 is what tells a reader to size "too quiet" generously rather
+            # than from a cadence this process does not promise. The listener
+            # sets it when there is one, and the server keeps each reporter's
+            # fields, so the two do not overwrite one another.
+            station=station_name(),
             effective_config=_effective_snapshot(cfg),
         )
     except Exception as e:

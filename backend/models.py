@@ -430,6 +430,14 @@ class AgentInstance(Base):
     agent = Column(String, nullable=False, default="")    # claude | opencode | ...
     model = Column(String, nullable=False, default="")
     effective_config = Column(JSON, nullable=False, default=dict)  # non-secret snapshot
+    # Where this worker runs, and how often it promises to check in. Both are
+    # reported rather than inferred: a station is a host, and several hosts can
+    # run workers against one server. `heartbeat_seconds` is 0 for a worker that
+    # only reports when it does a sweep, which is what tells a reader that a
+    # long silence means "idle", not "dead" — the freshness rule needs the
+    # cadence, and hardcoding one broke the moment sweep timers changed.
+    station = Column(String, nullable=False, default="")
+    heartbeat_seconds = Column(Integer, nullable=False, default=0)
     last_seen_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
