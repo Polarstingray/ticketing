@@ -197,6 +197,8 @@ export default function ResolverSettings() {
   const [minted, setMinted] = useState(null);   // the plaintext token, shown once
   const [enrollError, setEnrollError] = useState("");
   const [minting, setMinting] = useState(false);
+  const [botKeys, setBotKeys] = useState([]);
+  const [keysError, setKeysError] = useState("");
   const [selected, setSelected] = useState(null); // null = Global default, else bot_user_id
   const [form, setForm] = useState(null);
   const [secrets, setSecrets] = useState([]);
@@ -261,6 +263,39 @@ export default function ResolverSettings() {
     }
   }
 
+  async function loadBotKeys(botUserId) {
+    setKeysError("");
+    if (botUserId == null) {
+      setBotKeys([]);
+      return;
+    }
+    try {
+      setBotKeys(await api.listApiKeys(botUserId));
+    } catch (err) {
+      setBotKeys([]);
+      setKeysError(err.message || "Could not list this bot's API keys");
+    }
+  }
+
+  async function revokeBotKey(botUserId, keyId) {
+    // Revoking is the only way to stop a resolver bot from acting, and there is
+    // no undo — a new key has to be minted and redeployed to the host.
+    if (
+      !window.confirm(
+        "Revoke this key? The resolver using it stops working immediately, and " +
+          "getting it back means minting a new key and putting it on the host."
+      )
+    )
+      return;
+    setKeysError("");
+    try {
+      await api.revokeApiKey(botUserId, keyId);
+      loadBotKeys(botUserId);
+    } catch (err) {
+      setKeysError(err.message || "Could not revoke");
+    }
+  }
+
   async function loadRoster() {
     try {
       setRoster(await api.listResolvers());
@@ -284,6 +319,7 @@ export default function ResolverSettings() {
     setSelected(botUserId);
     setSaved(false);
     setForm(null);
+    loadBotKeys(botUserId);
     try {
       hydrate(await api.getResolverSettings(botUserId));
     } catch (e) {
@@ -483,7 +519,17 @@ export default function ResolverSettings() {
                       </span>
                       <span className={styles.rosterMeta}>
                         {spent ? (
-                          <span className="muted">bot #{en.redeemed_user_id}</span>
+                          // No revoke here on purpose: the token is already
+                          // spent, and deleting this row would erase the record
+                          // of how bot #N came to exist without touching the
+                          // bot itself. Say so, and point at what does work.
+                          <button
+                            type="button"
+                            onClick={() => select(en.redeemed_user_id)}
+                            title="Already redeemed — revoking access means revoking this bot's API key"
+                          >
+                            bot #{en.redeemed_user_id} &rarr; keys
+                          </button>
                         ) : (
                           <button type="button" onClick={() => revoke(en.id)}>
                             Revoke
@@ -533,6 +579,59 @@ export default function ResolverSettings() {
               </div>
             )}
           </div>
+
+          {/* --- API keys (admin, per selected resolver) --------------------- */}
+          {selected != null && (
+            <div className="card">
+              <h2 className={styles.h2}>API keys — {scopeLabel}</h2>
+              <p className="muted" style={{ marginTop: 0 }}>
+                Revoking is the only way to stop a resolver acting on this
+                server. A spent enrolment cannot be withdrawn — the token is
+                already used, and the record of how this bot came to exist is
+                worth keeping — so this is what "revoke the bot's API key"
+                means.
+              </p>
+              {keysError && <div className="error">{keysError}</div>}
+              {botKeys.length === 0 ? (
+                <p className="muted" style={{ margin: 0 }}>
+                  {keysError ? "" : "This bot has no API keys."}
+                </p>
+              ) : (
+                <div className={styles.roster}>
+                  {botKeys.map((k) => (
+                    <div key={k.id} className={`${styles.rosterRow} ${styles.agentRow}`}>
+                      <span
+                        className={`${styles.dot} ${styles[k.revoked ? "never" : "live"]}`}
+                        title={k.revoked ? "revoked" : "active"}
+                      />
+                      <span className={styles.rosterName}>
+                        {k.name}
+                        <span className={styles.rosterEnv}> {k.key_prefix}…</span>
+                      </span>
+                      <span className="muted">
+                        {k.scopes?.length ? k.scopes.join(", ") : "no scopes"}
+                        {k.last_used_at
+                          ? ` · last used ${relTime(Date.now() - new Date(k.last_used_at).getTime())}`
+                          : " · never used"}
+                      </span>
+                      <span className={styles.rosterMeta}>
+                        {k.revoked ? (
+                          <span className="muted">revoked</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => revokeBotKey(selected, k.id)}
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* --- Currently running (read-only, per selected resolver) -------- */}
           {current && (
