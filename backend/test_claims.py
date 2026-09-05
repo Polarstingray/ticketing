@@ -157,6 +157,54 @@ def test_release_then_reclaim(client, admin_key, worker):
     assert _claim(client, admin_key, tid).status_code == 200
 
 
+def test_release_survives_the_worker_being_reassigned_away(client, admin_key, make_user):
+    """The hand-back case, which is how a resolver finishes every ticket.
+
+    A worker's last act is to reassign the ticket to whoever asked for the work
+    and *then* release its claim. Gating release on `can_modify_ticket` refused
+    exactly that: by the time it released it was neither creator nor assignee.
+    The client reads the refusal as "nothing to release", so the ticket stayed
+    locked for the rest of its TTL and the next assignment could not be worked
+    until the lease lapsed minutes later.
+    """
+    bot = make_user()          # a plain member, like a real resolver bot
+    reporter = make_user()
+    tid = _make_ticket(client, admin_key, assigned_to=bot.id)
+
+    claim = _claim(client, bot.key, tid)
+    assert claim.status_code == 200, claim.text
+    token = claim.json()["token"]
+
+    # The bot finishes and hands the ticket back — it is now neither the
+    # creator nor the assignee.
+    handback = client.patch(f"/tickets/{tid}", json={"assigned_to": reporter.id},
+                            headers={"X-API-Key": admin_key})
+    assert handback.status_code == 200, handback.text
+
+    released = _release(client, bot.key, tid, token)
+    assert released.status_code == 204, released.text
+
+    # And the ticket is immediately workable again, rather than after a TTL.
+    again = _claim(client, admin_key, tid)
+    assert again.status_code == 200, again.text
+
+
+def test_release_still_needs_the_holder_s_token(client, admin_key, make_user):
+    """Authorizing on the token must not become authorizing on nothing."""
+    bot = make_user()
+    tid = _make_ticket(client, admin_key, assigned_to=bot.id)
+    assert _claim(client, bot.key, tid).status_code == 200
+
+    # A stranger presenting no valid token still meets the ordinary read
+    # boundary, so releasing cannot be used to probe for other people's
+    # tickets: 404, exactly as before the holder exemption existed.
+    stranger = make_user()
+    bad = _release(client, stranger.key, tid, "not-the-token")
+    assert bad.status_code == 404, bad.text
+    # Still claimed: a failed release must not free the ticket.
+    assert _claim(client, admin_key, tid).status_code == 409
+
+
 def test_release_with_wrong_token_is_forbidden(client, admin_key, worker):
     """Otherwise anyone who can see the ticket could drop a rival's claim."""
     tid = _make_ticket(client, admin_key)
