@@ -17,6 +17,7 @@ from read_only_guard import read_only_guard
 from routers import auth as auth_router
 from routers import chat as chat_router
 from routers import comments as comments_router
+from routers import enrollments as enrollments_router
 from routers import events as events_router
 from routers import notifications as notifications_router
 from routers import preferences as preferences_router
@@ -94,6 +95,7 @@ app.include_router(comments_router.router)
 app.include_router(events_router.router)
 app.include_router(notifications_router.router)
 app.include_router(preferences_router.router)
+app.include_router(enrollments_router.router)
 app.include_router(resolver_settings_router.router)
 app.include_router(resolver_settings_router.registry_router)
 app.include_router(resolver_settings_router.agents_router)

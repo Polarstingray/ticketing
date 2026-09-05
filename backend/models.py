@@ -381,6 +381,44 @@ class ResolverSettings(Base):
     updated_by = Column(Integer, nullable=True)
 
 
+class StationEnrollment(Base):
+    """A one-shot capability to collect the credentials for one named resolver bot.
+
+    Exists so a machine that runs resolvers never has to hold an admin key.
+    Creating a bot and minting its key are admin operations, but the host that
+    will *run* the bot is also the host most likely to be executing untrusted
+    agent output — precisely where an admin credential should not live. An admin
+    mints one of these in the browser instead, and the workstation redeems it
+    for exactly one bot.
+
+    The admin names the bot at mint time, so the token is a capability for that
+    one identity rather than a general licence to create users.
+
+    Stored like an API key: only a sha256 hash and a display prefix, with the
+    plaintext shown once at creation. Single use — ``redeemed_at`` closes it —
+    and short-lived, because an unredeemed token is a standing credential and
+    the window between minting one and pasting it into a terminal is a minute,
+    not a week.
+    """
+
+    __tablename__ = "station_enrollments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token_prefix = Column(String, nullable=False)      # for display, never a lookup
+    token_hash = Column(String, unique=True, nullable=False, index=True)
+    username = Column(String, nullable=False)          # the bot this token creates
+    display_name = Column(String, nullable=False, default="")
+    email = Column(String, nullable=False, default="")
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    redeemed_at = Column(DateTime, nullable=True)
+    redeemed_user_id = Column(Integer, nullable=True)   # the bot that was created
+    # Reported by the station when it redeems, so an admin can see where a bot
+    # was enrolled without waiting for its first heartbeat.
+    station = Column(String, nullable=False, default="")
+
+
 class SecuritySettings(Base):
     """Server-managed, admin-editable settings that affect the app's security
     posture (webhook SSRF exemptions, the insecure-webhooks/dispatcher-pause
@@ -430,6 +468,14 @@ class AgentInstance(Base):
     agent = Column(String, nullable=False, default="")    # claude | opencode | ...
     model = Column(String, nullable=False, default="")
     effective_config = Column(JSON, nullable=False, default=dict)  # non-secret snapshot
+    # Where this worker runs, and how often it promises to check in. Both are
+    # reported rather than inferred: a station is a host, and several hosts can
+    # run workers against one server. `heartbeat_seconds` is 0 for a worker that
+    # only reports when it does a sweep, which is what tells a reader that a
+    # long silence means "idle", not "dead" — the freshness rule needs the
+    # cadence, and hardcoding one broke the moment sweep timers changed.
+    station = Column(String, nullable=False, default="")
+    heartbeat_seconds = Column(Integer, nullable=False, default=0)
     last_seen_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

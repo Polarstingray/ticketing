@@ -110,6 +110,18 @@ def _migrate_agent_instances(engine: Engine) -> None:
 
 
 
+def _migrate_agent_instance_station(engine: Engine) -> None:
+    """agent_instances.station / .heartbeat_seconds — who reports, and how often.
+
+    Additive on an existing table, so `_migrate_agent_instances`'s `create` is
+    a no-op by the time this runs. Both default to the "unknown / per-sweep"
+    value, which is exactly what a row written by an older resolver means.
+    """
+    _add_column(engine, "agent_instances", "station", "VARCHAR NOT NULL DEFAULT ''")
+    _add_column(engine, "agent_instances", "heartbeat_seconds",
+                "INTEGER NOT NULL DEFAULT 0")
+
+
 def _migrate_saved_views(engine: Engine) -> None:
     """saved_views table — added with the dashboard filter panel.
 
@@ -181,6 +193,13 @@ def _migrate_security_settings(engine: Engine) -> None:
 
 
 # Ordered list of migrations applied on startup (after create_all).
+def _migrate_station_enrollments(engine: Engine) -> None:
+    """station_enrollments — one-shot tokens that let a host enrol a bot without
+    holding an admin key. New table; `checkfirst=True` no-ops when it exists."""
+    from models import StationEnrollment
+    StationEnrollment.__table__.create(bind=engine, checkfirst=True)
+
+
 MIGRATIONS = [
     _migrate_session_version,
     _migrate_archived,
@@ -190,6 +209,7 @@ MIGRATIONS = [
     _migrate_agent_runs,
     _migrate_resolver_settings,
     _migrate_agent_instances,
+    _migrate_agent_instance_station,
     _migrate_saved_views,
     _migrate_chat_tables,
     _migrate_agent_run_log_tail,
@@ -197,6 +217,7 @@ MIGRATIONS = [
     _migrate_webhooks,
     _migrate_ticket_leases,
     _migrate_security_settings,
+    _migrate_station_enrollments,
 ]
 
 

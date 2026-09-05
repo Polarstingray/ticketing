@@ -179,6 +179,8 @@ def _roster_entry(user: User, inst: AgentInstance | None, has_settings: bool) ->
         model=inst.model if inst else None,
         last_seen_at=inst.last_seen_at if inst else None,
         effective_config=effective,
+        station=(inst.station or None) if inst else None,
+        heartbeat_seconds=inst.heartbeat_seconds if inst else None,
     )
 
 
@@ -197,13 +199,18 @@ def resolver_heartbeat(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only resolver bots may send a heartbeat",
         )
-    inst = _upsert_instance(db, user.id, {
-        "label": payload.label,
-        "name": payload.name,
-        "agent": payload.agent,
-        "model": payload.model,
-        "effective_config": payload.effective_config.model_dump(mode="json"),
-    })
+    # Only what the caller actually sent. Two processes report for one worker:
+    # the sweep knows the effective config, the listener knows the host and the
+    # cadence. With every field always applied, whichever checked in last would
+    # blank the other's — the sweep resetting `heartbeat_seconds` to 0 would make
+    # a live listener look like a per-sweep reporter, and the freshness rule
+    # would call a healthy resolver dead. `exclude_unset` lets them build one row
+    # between them, the same way `ResolverSettingsUpdate` merges a partial PUT.
+    fields = payload.model_dump(mode="json", exclude_unset=True)
+    fields.pop("effective_config", None)
+    if "effective_config" in payload.model_fields_set:
+        fields["effective_config"] = payload.effective_config.model_dump(mode="json")
+    inst = _upsert_instance(db, user.id, fields)
     has_settings = _row(db, user.id) is not None
     return _roster_entry(user, inst, has_settings)
 
