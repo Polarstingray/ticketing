@@ -61,6 +61,7 @@ from models import (
     WebhookDelivery,
     utcnow,
 )
+from routers.security_settings import get_security_settings
 from webhook_urls import validate_webhook_url
 
 log = logging.getLogger("stingray.dispatcher")
@@ -383,9 +384,16 @@ async def deliver_one(client: httpx.AsyncClient, delivery_id: int) -> None:
 
         # DNS is mutable, so the target is re-checked *now* rather than trusted
         # from creation time — a host that was public then may resolve to
-        # 127.0.0.1 by the time we connect (see webhook_urls).
+        # 127.0.0.1 by the time we connect (see webhook_urls). Read fresh each
+        # delivery (not cached) so an admin's exemption-list edit takes effect
+        # on the very next attempt, not just new webhooks.
+        settings = get_security_settings(db)
         try:
-            url = validate_webhook_url(webhook.url)
+            url = validate_webhook_url(
+                webhook.url,
+                allowed_hosts=frozenset(settings.webhook_allowed_hosts),
+                allow_insecure=settings.allow_insecure_webhooks,
+            )
         except ValueError as exc:
             delivery.state = DeliveryState.skipped.value
             delivery.next_attempt_at = None
@@ -460,6 +468,13 @@ async def drain_once(client: httpx.AsyncClient) -> int:
     instead of racing a background task.
     """
     with SessionLocal() as db:
+        if get_security_settings(db).dispatcher_paused:
+            # The admin-editable runtime kill switch (distinct from the
+            # boot-time DISPATCHER_ENABLED env var, which decides whether
+            # this task exists at all — see enabled() above). Checked fresh
+            # every pass so a pause/resume takes effect on the next tick
+            # without a restart.
+            return 0
         event_ids = claim_batch(db)
     for event_id in event_ids:
         with SessionLocal() as db:
