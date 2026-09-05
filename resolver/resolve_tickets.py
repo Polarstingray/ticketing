@@ -1964,19 +1964,34 @@ def _porcelain_path(line: str) -> str | None:
     return path or None
 
 
-def _handle_escape(repo: Path, escaped: set[str], ticket: dict) -> bool:
+def _handle_escape(repo: Path, escaped: set[str], ticket: dict, logs_dir: Path) -> bool:
     """An implement run dirtied the MAIN checkout — a worktree escape. Loudly audit it and
     best-effort revert ONLY the newly-dirtied paths (those in `escaped`, which already
     excludes the pre-run dirty state via set difference) so the user's pre-existing
     uncommitted work is never touched. A path that can't be parsed is left for manual
-    cleanup rather than risking a wrong `checkout`. Returns True (escape handled)."""
+    cleanup rather than risking a wrong `checkout`. Before reverting, captures all escaped
+    changes to a patch file for recovery. Returns True (escape handled)."""
     logger = audit.get_logger()
+
+    # Collect the combined diff of all escaped paths and write to a patch file for recovery.
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    patch_path = logs_dir / f"escape-{ticket['id']}-{ts}.patch"
+    paths_to_revert = [p for p in (_porcelain_path(ln) for ln in sorted(escaped)) if p]
+    _, diff_out = run(["git", "-C", str(repo), "diff", "--"] + paths_to_revert)
+    patch_note = ""
+    if diff_out.strip():
+        try:
+            patch_path.write_text(diff_out)
+            patch_note = f" Changes saved to {patch_path} — recover with `git apply <patch>`."
+        except OSError as e:
+            logger.warning("#%s: could not write patch file: %s", ticket["id"], e)
+
     logger.warning("#%s: implement run modified the MAIN checkout %s (likely a "
-                   "worktree escape): %s", ticket["id"], repo, sorted(escaped))
+                   "worktree escape): %s%s", ticket["id"], repo, sorted(escaped), patch_note)
     audit.audit_event(
         logger, "phase",
         f"#{ticket['id']}: WARNING — implement dirtied the main checkout "
-        f"(worktree escape?): {sorted(escaped)}",
+        f"(worktree escape?): {sorted(escaped)}{patch_note}",
         level=logging.WARNING, category="implement",
         main_repo=str(repo), changed=sorted(escaped))
     for line in sorted(escaped):
@@ -1985,7 +2000,9 @@ def _handle_escape(repo: Path, escaped: set[str], ticket: dict) -> bool:
             logger.warning("#%s: could not parse escaped path from %r; leaving it for "
                            "manual cleanup", ticket["id"], line)
             continue
-        run(["git", "-C", str(repo), "checkout", "--", path])
+        cmd = ["git", "-C", str(repo), "checkout", "--", path]
+        logger.warning("#%s: reverting %s with: %s", ticket["id"], path, " ".join(cmd))
+        run(cmd)
     return True
 
 
@@ -2690,7 +2707,7 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
             # Hard stop: the run reached outside its worktree and touched the real tree.
             # Revert the damage and abort WITHOUT publishing — never ship a result built
             # by a run that breached the sandbox, even if the agent reported success.
-            _handle_escape(repo, escaped, ticket)
+            _handle_escape(repo, escaped, ticket, cfg.logs_dir)
             fail(client, ticket,
                  f"{agent_label} escaped its worktree and modified the main checkout; "
                  "aborting without publishing.",
@@ -2742,7 +2759,7 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                         return
                     escaped = _tracked_dirty(repo) - dirty_before
                     if escaped:
-                        _handle_escape(repo, escaped, ticket)
+                        _handle_escape(repo, escaped, ticket, cfg.logs_dir)
                         fail(client, ticket,
                              f"{agent_label} escaped its worktree during a verification "
                              "repair run; aborting without publishing.",
@@ -2926,7 +2943,7 @@ def do_delegate(cfg: Config, client: StingrayClient, ticket: dict, repo: "Path |
             cfg, client, ticket, orchestrate_prompt(ticket, wt, cfg, command), wt, "delegate", log_path)
         escaped = _tracked_dirty(repo) - dirty_before
         if escaped:
-            _handle_escape(repo, escaped, ticket)
+            _handle_escape(repo, escaped, ticket, cfg.logs_dir)
             fail(client, ticket,
                  f"{agent_label} escaped its worktree during delegation; aborting.")
             return
