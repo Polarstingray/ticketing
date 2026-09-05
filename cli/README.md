@@ -76,6 +76,7 @@ stingray station ls                  # every resolver here, and its state
 stingray station status gemini       # units, last sweep, stream, checkout
 stingray station logs gemini -f      # follow one resolver's sweep log
 stingray station stop gemini         # timer and listener together
+stingray station enroll st_7fQ2… --url URL --checkout DIR   # no admin key needed
 ```
 
 ### Credential precedence
@@ -135,6 +136,40 @@ would adopt the dead one.
 conceivable instance of a live template, so `stingray-ubvm@nonexistent.timer`
 looks as real as a running one. An instance someone actually asked for has an
 enable symlink or is active; that is what `status` reports.
+
+### Enrolling a resolver without an admin key
+
+Creating a bot and minting its key are admin operations — but the host that
+*runs* the bot is also the host executing untrusted agent output, which makes it
+the last place an admin credential should live. So an admin mints a one-shot
+token in the web app (Resolvers → **Enrol a resolver**) and the workstation
+redeems it:
+
+```bash
+stingray station enroll st_7fQ2… \
+  --url https://tickets.example/api \
+  --checkout ~/projects/ticketing \
+  --start
+```
+
+That single call creates the bot, collects its API key, writes `.env.<name>`
+from the checkout's `.env.example` at 0600, records the identity in the station
+inventory and — with `--start` — installs the units and brings it up. The four
+things that have to agree are created together, which is the whole reason the
+command exists.
+
+The token is **single-use and short-lived** (an hour by default), because an
+unredeemed one is a standing capability to create a bot. Minting is gated on
+`require_recent_admin`, which an API key cannot satisfy *at all* — it reads the
+session cookie's age. That gate is the feature rather than a formality: if a
+program could mint one, holding an admin key on the workstation would be no
+worse.
+
+`enroll` is the one command that works with no credentials, since a host
+enrolling its first resolver has none. It needs `--url` for that reason. If no
+configured profile matches that URL the identity is still written and usable —
+only this host's bookkeeping is missing — and the command says exactly which two
+commands close the gap rather than failing after the token is already spent.
 
 `station` drives systemd rather than supervising anything itself. systemd already
 serializes runs of a unit, merges a start into a queued job (which is what turns

@@ -133,6 +133,50 @@ def test_heartbeat_updates_in_place(client, admin_key):
     assert len(mine) == 1 and mine[0]["model"] == "m2"  # upsert, not append
 
 
+def test_two_reporters_build_one_row_without_blanking_each_other(client, admin_key):
+    """A worker is described by two processes, and neither knows the other's half.
+
+    The listener holds the stream and knows the host and the check-in cadence;
+    the sweep knows the effective config. If every field were applied on every
+    heartbeat, whichever reported last would blank the other's — and a sweep
+    resetting `heartbeat_seconds` to 0 would make a live listener look like a
+    per-sweep reporter, which is exactly the input the freshness rule reads.
+    """
+    uid, key = _make_bot(client, admin_key, f"pair-bot-{__import__('uuid').uuid4().hex[:6]}")
+
+    # The listener checks in: host and cadence, no config.
+    r = client.post("/resolvers/heartbeat",
+                    json={"name": "gemini", "station": "ubvm.home.lab",
+                          "heartbeat_seconds": 300},
+                    headers=H(key))
+    assert r.status_code == 200, r.text
+
+    # Then a sweep checks in: config, no host or cadence.
+    r = client.post("/resolvers/heartbeat",
+                    json={"name": "gemini", "agent": "opencode",
+                          "effective_config": {"max_attempts": 4}},
+                    headers=H(key))
+    assert r.status_code == 200, r.text
+
+    roster = client.get("/resolvers", headers=H(admin_key)).json()
+    mine = next(e for e in roster if e["bot_user_id"] == uid)
+    assert mine["station"] == "ubvm.home.lab"      # survived the sweep
+    assert mine["heartbeat_seconds"] == 300        # survived the sweep
+    assert mine["agent"] == "opencode"             # and the sweep's half landed
+    assert mine["effective_config"]["max_attempts"] == 4
+
+
+def test_a_worker_that_never_reports_a_station_reads_as_unknown(client, admin_key):
+    """An older resolver sends neither field; the row must stay legible."""
+    uid, key = _make_bot(client, admin_key, f"old-bot-{__import__('uuid').uuid4().hex[:6]}")
+    client.post("/resolvers/heartbeat", json={"name": "legacy"}, headers=H(key))
+    roster = client.get("/resolvers", headers=H(admin_key)).json()
+    mine = next(e for e in roster if e["bot_user_id"] == uid)
+    assert mine["station"] is None
+    # 0 means "only reports when it sweeps", which is what a legacy row means.
+    assert mine["heartbeat_seconds"] == 0
+
+
 def test_concurrent_first_heartbeat_retries_as_update(client, admin_key, monkeypatch):
     """Two overlapping sweeps of the same bot can both see "no row" and both
     insert; the unique constraint rejects the loser. That must resolve into an

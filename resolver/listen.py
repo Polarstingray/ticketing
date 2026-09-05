@@ -44,7 +44,8 @@ from typing import Any, Iterator, Optional
 import requests
 
 import audit
-from config import Config
+from config import Config, station_name
+from stingray import StingrayClient
 
 # Event types worth waking for. Everything else on the stream (status changes,
 # comments, agent runs) is a ticket already moving, which is either the
@@ -67,6 +68,14 @@ CONNECT_TIMEOUT = 15.0
 
 RECONNECT_BACKOFF_START = 2.0
 RECONNECT_BACKOFF_CAP = 300.0
+
+# How often to tell the server this identity is alive. The sweep also
+# heartbeats, but only while it is sweeping — so with a 30-minute timer a
+# perfectly healthy resolver went quiet for half an hour at a time and the
+# roster called it stale. This process is the one that is always up, which
+# makes it the honest source of liveness. The value is reported alongside the
+# beat so a reader can size "too quiet" from the cadence instead of guessing.
+HEARTBEAT_SECONDS = 300.0
 
 
 def log(msg: str) -> None:
@@ -156,6 +165,72 @@ def is_wakeup(frame: dict[str, Any], bot_user_id: int) -> bool:
         # the cost of ignoring it is a ticket sitting until the timer fires.
         return True
     return data.get("assigned_to") == bot_user_id
+
+
+# --- liveness ---------------------------------------------------------------
+
+class Heartbeat:
+    """Tells the server this identity is alive, on its own thread.
+
+    Its own thread and its own client because the reader is blocked on the
+    stream for minutes at a time and ``requests.Session`` is not thread-safe —
+    the same reasoning the sweep's lease heartbeat uses.
+
+    Every failure is swallowed. Liveness reporting is a convenience for a human
+    reading the roster; a server that is down, a key that was rotated, or an
+    older server with no such endpoint must not take the listener with it.
+    """
+
+    def __init__(self, cfg: Config, station: str, unit: str,
+                 interval: float = HEARTBEAT_SECONDS,
+                 stop: Optional[threading.Event] = None):
+        self.cfg = cfg
+        self.station = station
+        self.unit = unit
+        self.interval = interval
+        self._stop = stop or threading.Event()
+        self._client = StingrayClient(cfg.stingray_url, cfg.api_key,
+                                      logger=audit.get_logger())
+        self._thread = threading.Thread(target=self._run, name="heartbeat", daemon=True)
+        self._warned = False
+        self.beats = 0
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def beat(self) -> bool:
+        """One check-in. Returns whether it landed."""
+        try:
+            # No `effective_config`: the sweep owns that half of the row, and
+            # the server applies only the fields a caller actually sends. Sending
+            # an empty snapshot here would blank what the sweep reported.
+            self._client.heartbeat(
+                label=self.cfg.env_file,
+                name=self.cfg.name,
+                agent=self.cfg.agent,
+                model=self.cfg.agent_model or self.cfg.agent_implement_model or "",
+                station=self.station,
+                heartbeat_seconds=int(self.interval),
+            )
+        except Exception as exc:  # noqa: BLE001 - never take the listener down
+            if not self._warned:
+                # Once, not every interval: a server that refuses this will
+                # refuse it forever, and a line every five minutes for a
+                # cosmetic feature is how a log stops being read.
+                log(f"listen: heartbeat failed, continuing without one: {exc!r}")
+                self._warned = True
+            return False
+        self._warned = False
+        self.beats += 1
+        return True
+
+    def _run(self) -> None:
+        self.beat()
+        while not self._stop.wait(self.interval):
+            self.beat()
 
 
 # --- the poke ---------------------------------------------------------------
@@ -319,16 +394,24 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="log the pokes instead of starting anything")
     parser.add_argument("--once", action="store_true",
                         help="exit after the first poke (smoke test)")
+    parser.add_argument("--station", default=None,
+                        help="name of the host this resolver runs on "
+                             "(default: $RESOLVER_STATION, else the hostname)")
+    parser.add_argument("--no-heartbeat", action="store_true",
+                        help="don't report liveness to the server")
     parser.add_argument("--systemctl-user", action="store_true",
                         default=os.environ.get("RESOLVER_SYSTEMCTL_USER", "") not in ("", "0"),
                         help="poke the per-user systemd manager (`systemctl --user`) "
                              "instead of the system one; required when the sweep is "
                              "installed as a user unit")
     args = parser.parse_args(argv)
+    if args.station is None:
+        args.station = station_name()
 
     cfg = Config.load()
     setup_logging(cfg)
-    log(f"listen: following {cfg.stingray_url} as user {cfg.bot_user_id}, "
+    log(f"listen: following {cfg.stingray_url} as user {cfg.bot_user_id} "
+        f"on station {args.station}, "
         f"unit={args.unit}{' (--user)' if args.systemctl_user else ''}"
         f"{' (dry run)' if args.dry_run else ''}")
 
@@ -337,10 +420,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                   systemctl_user=args.systemctl_user)
     waker.start()
 
+    heartbeat: Optional[Heartbeat] = None
+    if not args.no_heartbeat:
+        heartbeat = Heartbeat(cfg, args.station, args.unit, stop=stop)
+        heartbeat.start()
+
     def _shutdown(signum, _frame):
         log(f"listen: caught {signal.Signals(signum).name}, shutting down")
         stop.set()
         waker.stop()
+        if heartbeat is not None:
+            heartbeat.stop()
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -351,6 +441,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         pass
     finally:
         waker.stop()
+        if heartbeat is not None:
+            heartbeat.stop()
     log("listen: stopped")
     return 0
 
