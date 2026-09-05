@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ResolverSettings, { byStation, freshness, staleAfter } from "./ResolverSettings";
@@ -8,6 +8,11 @@ vi.mock("../api", () => ({
   api: {
     listResolvers: vi.fn(),
     listAgents: vi.fn(),
+    listEnrollments: vi.fn(),
+    createEnrollment: vi.fn(),
+    revokeEnrollment: vi.fn(),
+    listApiKeys: vi.fn(),
+    revokeApiKey: vi.fn(),
     getResolverSettings: vi.fn(),
     updateResolverSettings: vi.fn(),
   },
@@ -46,6 +51,7 @@ describe("ResolverSettings — external agents panel", () => {
     api.listResolvers.mockResolvedValue([]);
     api.listAgents.mockResolvedValue([]);
     api.getResolverSettings.mockResolvedValue(settings());
+    api.listEnrollments.mockResolvedValue([]);
   });
 
   it("renders an empty state when no agent has checked in", async () => {
@@ -124,5 +130,168 @@ describe("byStation", () => {
   it("survives a roster where nothing reports a station", () => {
     // Every row written by a resolver older than this feature.
     expect(byStation([at(null, 1), at(undefined, 2)])).toHaveLength(1);
+  });
+});
+
+describe("station enrolment", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listResolvers.mockResolvedValue([]);
+    api.listAgents.mockResolvedValue([]);
+    api.getResolverSettings.mockResolvedValue(settings());
+    api.listEnrollments.mockResolvedValue([]);
+  });
+
+  it("shows the minted token once, with a warning that it will not be shown again", async () => {
+    api.createEnrollment.mockResolvedValue({
+      id: 1,
+      username: "gemini-bot",
+      token: "st_abcdef",
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    renderPage();
+
+    const field = await screen.findByPlaceholderText("gemini-bot");
+    fireEvent.change(field, { target: { value: "gemini-bot" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mint token" }));
+
+    expect(await screen.findByText("st_abcdef")).toBeInTheDocument();
+    expect(screen.getByText(/not shown again/i)).toBeInTheDocument();
+  });
+
+  it("explains the re-login rule rather than reporting a bare 401", async () => {
+    // `require_recent_admin` is the gate the whole feature rests on, so a stale
+    // session is an expected outcome to explain, not an error to apologise for.
+    const err = new Error("reauth_required");
+    err.status = 401;
+    api.createEnrollment.mockRejectedValue(err);
+    renderPage();
+
+    const field = await screen.findByPlaceholderText("gemini-bot");
+    fireEvent.change(field, { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mint token" }));
+
+    expect(await screen.findByText(/last 15 minutes/)).toBeInTheDocument();
+    expect(screen.queryByText("reauth_required")).not.toBeInTheDocument();
+  });
+
+  it("offers revoke on a pending enrolment and not on a spent one", async () => {
+    api.listEnrollments.mockResolvedValue([
+      {
+        id: 1, username: "pending", token_prefix: "st_aaaaaaa",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        redeemed_at: null, redeemed_user_id: null, station: "",
+      },
+      {
+        id: 2, username: "spent", token_prefix: "st_bbbbbbb",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        redeemed_at: new Date().toISOString(), redeemed_user_id: 7,
+        station: "ubvm.home.lab",
+      },
+    ]);
+    renderPage();
+
+    expect(await screen.findByText("pending")).toBeInTheDocument();
+    expect(screen.getByText(/redeemed on ubvm.home.lab/)).toBeInTheDocument();
+    // One row is revocable; the redeemed one is a record, not a live token.
+    expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(1);
+  });
+
+  it("keeps the settings form usable when enrolments cannot be listed", async () => {
+    api.listEnrollments.mockRejectedValue(new Error("boom"));
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Models")).toBeInTheDocument());
+    expect(screen.queryByText("boom")).not.toBeInTheDocument();
+  });
+});
+
+function resolverRow(overrides = {}) {
+  return {
+    bot_user_id: 7,
+    username: "station-test",
+    display_name: "Station test bot",
+    is_bot: true,
+    has_settings: false,
+    name: "station-test",
+    label: ".env.station-test",
+    agent: "claude",
+    model: "",
+    last_seen_at: null,
+    effective_config: null,
+    station: null,
+    heartbeat_seconds: 0,
+    ...overrides,
+  };
+}
+
+function apiKey(overrides = {}) {
+  return {
+    id: 3,
+    name: "resolver",
+    key_prefix: "sk_abcdefgh",
+    created_at: new Date().toISOString(),
+    last_used_at: null,
+    expires_at: null,
+    revoked: false,
+    scopes: [],
+    ...overrides,
+  };
+}
+
+describe("revoking a resolver bot's access", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listResolvers.mockResolvedValue([resolverRow()]);
+    api.listAgents.mockResolvedValue([]);
+    api.getResolverSettings.mockResolvedValue(settings());
+    api.listEnrollments.mockResolvedValue([]);
+    api.listApiKeys.mockResolvedValue([apiKey()]);
+  });
+
+  it("offers revoke on a live key once a resolver is selected", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText("station-test"));
+
+    expect(await screen.findByText("sk_abcdefgh…")).toBeInTheDocument();
+    expect(api.listApiKeys).toHaveBeenCalledWith(7);
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+  });
+
+  it("shows a revoked key as spent rather than revocable again", async () => {
+    api.listApiKeys.mockResolvedValue([apiKey({ revoked: true })]);
+    renderPage();
+    fireEvent.click(await screen.findByText("station-test"));
+
+    expect(await screen.findByText("revoked")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  it("sends a redeemed enrolment to the bot's keys instead of a dead revoke", async () => {
+    // The 409 from the API says "revoke the bot's API key instead"; before this
+    // the row said `bot #7` and named an action the UI did not offer anywhere.
+    api.listEnrollments.mockResolvedValue([
+      {
+        id: 2, username: "station-test", token_prefix: "st_bbbbbbb",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        redeemed_at: new Date().toISOString(), redeemed_user_id: 7,
+        station: "ubvm.home.lab",
+      },
+    ]);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /bot #7/ }));
+    expect(await screen.findByText("sk_abcdefgh…")).toBeInTheDocument();
+  });
+
+  it("reports a key listing failure without blanking the page", async () => {
+    api.listApiKeys.mockRejectedValue(new Error("nope"));
+    renderPage();
+    fireEvent.click(await screen.findByText("station-test"));
+
+    expect(await screen.findByText("nope")).toBeInTheDocument();
+    expect(screen.getByText("Models")).toBeInTheDocument();
   });
 });
