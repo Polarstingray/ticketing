@@ -193,6 +193,13 @@ def _migrate_security_settings(engine: Engine) -> None:
 
 
 # Ordered list of migrations applied on startup (after create_all).
+def _migrate_station_enrollments(engine: Engine) -> None:
+    """station_enrollments — one-shot tokens that let a host enrol a bot without
+    holding an admin key. New table; `checkfirst=True` no-ops when it exists."""
+    from models import StationEnrollment
+    StationEnrollment.__table__.create(bind=engine, checkfirst=True)
+
+
 MIGRATIONS = [
     _migrate_session_version,
     _migrate_archived,
@@ -210,6 +217,7 @@ MIGRATIONS = [
     _migrate_webhooks,
     _migrate_ticket_leases,
     _migrate_security_settings,
+    _migrate_station_enrollments,
 ]
 
 

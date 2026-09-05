@@ -273,6 +273,22 @@ class StingrayClient:
                 raise      # the server rejected something it does understand
             return self._request("POST", "/resolvers/heartbeat", json=legacy).json()
 
+    def redeem_enrollment(self, token: str, station: str = "") -> dict:
+        """Exchange a station enrolment token for one bot and its first API key.
+
+        The only call here that does not authenticate: a host enrolling its
+        first resolver has no credentials, which is the situation the token
+        exists to resolve. Construct the client with an empty key.
+
+        The token is spent whether or not the caller does anything useful with
+        the answer, and the `api_key` in it is shown exactly once — so treat a
+        successful response as something to persist immediately.
+        """
+        return self._request(
+            "POST", "/station-enrollments/redeem",
+            json={"token": token, "station": station},
+        ).json()
+
     # --- resolver settings ----------------------------------------------
     def get_resolver_settings(self, bot_user_id: int | None = None) -> dict:
         """Server-managed, non-secret resolver tunables for this identity.

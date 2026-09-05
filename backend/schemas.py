@@ -827,6 +827,69 @@ class ResolverHeartbeat(BaseModel):
     heartbeat_seconds: int = 0    # 0 = only reports when it sweeps
 
 
+# --- station enrollment ------------------------------------------------------
+
+# Bounds on how long a pending token stays usable. An unredeemed token is a
+# standing credential to create one bot, and the gap between minting one and
+# pasting it into a terminal is a minute — so the default is short and the
+# ceiling is a day rather than "until someone remembers".
+MIN_ENROLLMENT_TTL = 60
+DEFAULT_ENROLLMENT_TTL = 3600
+MAX_ENROLLMENT_TTL = 24 * 3600
+
+
+class StationEnrollmentCreate(BaseModel):
+    """Mint a token for one named bot. `extra="forbid"` so a typo'd field is a
+    422 rather than a silently ignored intent."""
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=64)
+    display_name: str = ""
+    email: str = ""
+    expires_in_seconds: int = Field(
+        default=DEFAULT_ENROLLMENT_TTL,
+        ge=MIN_ENROLLMENT_TTL,
+        le=MAX_ENROLLMENT_TTL,
+    )
+
+
+class StationEnrollmentCreated(BaseModel):
+    """The mint response. ``token`` is the only time the plaintext exists."""
+    id: int
+    username: str
+    token: str
+    expires_at: UTCDateTime
+
+
+class StationEnrollmentOut(BaseModel):
+    """A pending or spent enrolment, as an admin sees it. Never the token."""
+    id: int
+    username: str
+    display_name: str = ""
+    token_prefix: str
+    created_at: UTCDateTime
+    expires_at: UTCDateTime
+    redeemed_at: Optional[UTCDateTime] = None
+    redeemed_user_id: Optional[int] = None
+    station: str = ""
+
+
+class StationEnrollmentRedeem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=1)
+    # Optional so redeeming works from anywhere; when sent it tells an admin
+    # where the bot was enrolled without waiting for its first heartbeat.
+    station: str = ""
+
+
+class StationEnrollmentRedeemed(BaseModel):
+    """What the station receives. ``api_key`` is shown exactly once, here."""
+    user_id: int
+    username: str
+    api_key: str
+
+
 class ResolverRosterEntry(BaseModel):
     """One row in the resolver-manager roster: the bot's identity plus its live
     self-reported state (null until it first sweeps)."""

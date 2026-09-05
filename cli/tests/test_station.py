@@ -237,3 +237,60 @@ def test_profile_match_ignores_a_trailing_slash(isolated_config):
     cfgstore.save_profile("home", {"url": "https://tickets.example/api",
                                    "api_key": "sk_x"})
     assert cmd_station._profile_for_url("https://tickets.example/api/", None) == "home"
+
+
+# --- enrolment --------------------------------------------------------------
+
+def test_write_identity_builds_from_the_checkouts_example(tmp_path):
+    """The example is the schema, so a new resolver setting needs no change here."""
+    resolver_dir = tmp_path / "resolver"
+    resolver_dir.mkdir()
+    (resolver_dir / ".env.example").write_text(
+        "# a comment\n"
+        "STINGRAY_URL=http://localhost:8000\n"
+        "STINGRAY_API_KEY=sk_replace_me\n"
+        "RESOLVER_BOT_USER_ID=2\n"
+        "AGENT_TIMEOUT=1800\n"
+    )
+
+    dest = identity.write_identity(resolver_dir, "gemini",
+                                   url="https://tickets.example/api",
+                                   api_key="sk_real", user_id=7)
+    env = identity.read_env(dest)
+    assert dest.name == ".env.gemini"
+    assert env["STINGRAY_URL"] == "https://tickets.example/api"
+    assert env["RESOLVER_BOT_USER_ID"] == "7"
+    # Untouched settings survive, comments included.
+    assert env["AGENT_TIMEOUT"] == "1800"
+    assert "# a comment" in dest.read_text()
+
+
+def test_an_identity_file_is_not_world_readable(tmp_path):
+    """It carries the bot's API key."""
+    import stat
+    resolver_dir = tmp_path / "resolver"
+    resolver_dir.mkdir()
+    (resolver_dir / ".env.example").write_text("STINGRAY_API_KEY=sk_replace_me\n")
+    dest = identity.write_identity(resolver_dir, "x", url="u", api_key="sk_real",
+                                   user_id=1)
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+
+
+def test_write_identity_refuses_to_clobber_without_force(tmp_path):
+    resolver_dir = tmp_path / "resolver"
+    resolver_dir.mkdir()
+    (resolver_dir / ".env.example").write_text("STINGRAY_URL=x\n")
+    identity.write_identity(resolver_dir, "x", url="u", api_key="k", user_id=1)
+    with pytest.raises(ConfigError):
+        identity.write_identity(resolver_dir, "x", url="u2", api_key="k2", user_id=2)
+    dest = identity.write_identity(resolver_dir, "x", url="u2", api_key="k2",
+                                   user_id=2, force=True)
+    assert identity.read_env(dest)["STINGRAY_URL"] == "u2"
+
+
+def test_write_identity_says_so_when_the_checkout_has_no_template(tmp_path):
+    resolver_dir = tmp_path / "resolver"
+    resolver_dir.mkdir()
+    with pytest.raises(ConfigError) as exc:
+        identity.write_identity(resolver_dir, "x", url="u", api_key="k", user_id=1)
+    assert ".env.example" in str(exc.value)

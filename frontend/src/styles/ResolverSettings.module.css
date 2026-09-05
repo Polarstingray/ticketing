@@ -92,6 +92,36 @@
   flex-direction: column;
   gap: 2px;
 }
+/* Mint form: fields inline, button aligned to their baseline. */
+.enrollForm {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.enrollForm .field {
+  margin: 0;
+  flex: 1 1 200px;
+}
+
+/* The plaintext token, shown exactly once. Loud on purpose: there is no way
+   to get it back, so it should not look like ordinary output. */
+.mintedToken {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--accent, #6366f1);
+  border-radius: 6px;
+}
+.mintedToken code {
+  user-select: all;
+  word-break: break-all;
+  font-size: 0.9rem;
+}
+
 /* A station heading, shown only when workers report more than one host. */
 .stationHeading {
   padding: 0.5rem 0.75rem 0.25rem;
