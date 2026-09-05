@@ -204,6 +204,28 @@ def test_poke_shells_out_with_no_block(monkeypatch):
     assert calls == [["systemctl", "start", "--no-block", "stingray-resolver.service"]]
 
 
+def test_poke_addresses_the_user_manager(monkeypatch):
+    """`--systemctl-user` puts `--user` before the verb.
+
+    Order matters: `systemctl start --user` is parsed as a *unit named* --user by
+    older systemd, so the flag has to lead. Without it the poke silently targets
+    the system manager, which a non-root listener may not start — the sweep then
+    never runs and only the timer covers the identity.
+    """
+    calls = []
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr(listen.subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd) or Result())
+    Waker("stingray-resolver@claude-lite.service", systemctl_user=True).poke()
+
+    assert calls == [["systemctl", "--user", "start", "--no-block",
+                      "stingray-resolver@claude-lite.service"]]
+
+
 def test_poke_dry_run_starts_nothing(monkeypatch):
     monkeypatch.setattr(listen.subprocess, "run",
                         lambda *a, **kw: pytest.fail("dry run shelled out"))
@@ -233,7 +255,8 @@ def test_poke_survives_a_host_without_systemctl(monkeypatch):
 # --- reconnect --------------------------------------------------------------
 
 class FakeCfg:
-    stingray_url = "http://stingray.test"
+    # With the `/api` prefix, the way a real STINGRAY_URL is written.
+    stingray_url = "http://stingray.test/api"
     api_key = "sk_testkeytestkey"
     bot_user_id = BOT
 

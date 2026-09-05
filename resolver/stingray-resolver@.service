@@ -1,0 +1,49 @@
+# Stingray resolver — one sweep for a single identity, driven by
+# stingray-resolver@.timer and poked by stingray-resolver-listen@.service.
+#
+# The instance name is the identity: `stingray-resolver@gemini.service` runs
+# with RESOLVER_ENV_FILE=.env.gemini. That is how several resolvers share one
+# checkout — the same thing the `flock -n /tmp/stingray-resolver-<x>.lock` cron
+# lines were doing, except systemd serializes each *instance* on its own, so the
+# lock files stop being needed.
+#
+# The default identity has no suffix, so give it one with a symlink rather than
+# special-casing the template:
+#   ln -s .env .env.claude
+#
+# Install as a **user** unit (the agent CLIs need this account's credentials, and
+# a user unit needs no sudo and no polkit rule for the listener to start it):
+#   mkdir -p ~/.config/systemd/user
+#   sed "s#/opt/ticketing/resolver#$(pwd)#g" stingray-resolver@.service \
+#     > ~/.config/systemd/user/stingray-resolver@.service
+#   sed "s#/opt/ticketing/resolver#$(pwd)#g" stingray-resolver@.timer \
+#     > ~/.config/systemd/user/stingray-resolver@.timer
+#   systemctl --user daemon-reload
+#   loginctl enable-linger "$USER"        # so it survives logout and starts at boot
+#   systemctl --user enable --now stingray-resolver@claude-lite.timer
+#
+# A second checkout pointed at a different server installs the same files under
+# its own prefix, so the two never share a unit name or a job queue:
+#   sed -e "s#/opt/ticketing/resolver#$(pwd)#g" -e "s#stingray-resolver#stingray-ubvm#g" ...
+[Unit]
+Description=Stingray ticket resolver sweep (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ticketing/resolver
+# Config.load() reads this relative to WorkingDirectory and derives the
+# resolver's identity name from it.
+Environment=RESOLVER_ENV_FILE=.env.%i
+ExecStart=/opt/ticketing/resolver/.venv/bin/python /opt/ticketing/resolver/resolve_tickets.py
+# Don't let a wedged sweep run forever; the timer starts the next one.
+TimeoutStartSec=3600
+# Keep the log where cron put it, rather than only in the journal. A user unit's
+# output lands in the *system* journal, which an account outside `adm` /
+# `systemd-journal` cannot read at all — so without this the sweep runs and you
+# have nothing to look at. `sudo usermod -aG systemd-journal $USER` is the other
+# fix; this one needs no privileges and matches the file the cron line appended
+# to. Rotate it with logrotate; nothing here truncates.
+StandardOutput=append:/opt/ticketing/resolver/logs/resolver-%i.log
+StandardError=inherit
