@@ -53,7 +53,7 @@ import audit
 import commands
 import file_ticket
 import scaffold_followup
-from config import Config, station_name, RepoNotAllowed, RepoNotFound
+from config import Config, RepoNotAllowed, RepoNotFound, station_name
 from stingray import StingrayClient
 from stingray_client import stubs as stubs_mod
 
