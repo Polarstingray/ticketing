@@ -999,6 +999,13 @@ Auto-merge is never done — Claude only opens the PR; you approve and merge.
   phase allows broad `Bash`, so a sufficiently determined/confused agent could still
   `cd` elsewhere. For untrusted inputs, run the resolver as a least-privileged user
   (or in a container) whose filesystem write access is limited to the repo.
+- **Shared-venv tamper guard:** the implement prompt explicitly forbids invoking any
+  binary under `resolver/.venv` (the permanent installation shared by all cron bots).
+  As a technical backstop, `do_implement` hashes the `site-packages` directory before
+  and after each agent run; if the signature changes (indicating a `pip install` reached
+  outside the worktree), the ticket fails loudly with `reimplementable=True` and no
+  PR is opened. Recovery: run `resolver/setup.sh` to reinstall the shared venv before
+  other bots pick up new tickets.
 - **Read-only planning:** the plan phase grants only `Read/Glob/Grep` (no
   Edit/Write/Bash), so it cannot change anything; the implement phase gets the
   tools in `CLAUDE_IMPLEMENT_TOOLS`.

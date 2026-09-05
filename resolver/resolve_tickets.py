@@ -1988,6 +1988,51 @@ def _handle_escape(repo: Path, escaped: set[str], ticket: dict) -> bool:
     return True
 
 
+def _resolver_venv_signature() -> str:
+    """Return a stable hash of the resolver's own .venv site-packages directory.
+
+    Hashes (filename, mtime, size) for each top-level entry in site-packages so
+    any `pip install` or `-e` rewrite — which always creates/touches dist-info or
+    __editable__* files — changes the signature. Returns "" if .venv doesn't exist
+    (CI without an installed venv), which short-circuits the tamper check.
+    """
+    venv = HERE / ".venv"
+    if not venv.is_dir():
+        return ""
+    # Find site-packages (lib/pythonX.Y/site-packages on *nix)
+    site_pkgs = None
+    lib = venv / "lib"
+    if lib.is_dir():
+        for pydir in sorted(lib.iterdir()):
+            candidate = pydir / "site-packages"
+            if candidate.is_dir():
+                site_pkgs = candidate
+                break
+    if site_pkgs is None:
+        return ""
+    entries = []
+    for entry in sorted(site_pkgs.iterdir()):
+        try:
+            st = entry.stat()
+            entries.append(f"{entry.name}:{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            entries.append(f"{entry.name}:err")
+    h = hashlib.sha256("\n".join(entries).encode()).hexdigest()
+    return h
+
+
+def _handle_venv_tamper(ticket: dict) -> None:
+    """An implement run modified the resolver's shared .venv. Log a CRITICAL audit event."""
+    logger = audit.get_logger()
+    logger.critical("#%s: implement run MODIFIED the resolver's shared .venv — "
+                    "possible venv corruption by an in-ticket pip install", ticket["id"])
+    audit.audit_event(
+        logger, "phase",
+        f"#{ticket['id']}: CRITICAL — implement run modified resolver .venv "
+        "(venv tamper detected); run resolver/setup.sh to reinstall before trusting other bots",
+        level=logging.CRITICAL, category="implement")
+
+
 # --- prompts -------------------------------------------------------------
 # Path-like tokens in plan text: either something containing a slash and an
 # extension, or a bare filename with a known source extension.
@@ -2180,6 +2225,14 @@ def implement_prompt(ticket: dict, repo: Path, plan: str | None,
         "edit files outside it. The plan below has already been confined to this working",
         "directory, so any absolute path you find yourself reaching for is out of scope —",
         "resolve it to a path under your working directory instead of following it.",
+        "CRITICAL: never invoke any binary under the resolver's own permanent installation",
+        f"(anything under {HERE}, including {HERE / '.venv' / 'bin' / 'pip'} or",
+        f"{HERE / '.venv' / 'bin' / 'python'}). That is a SHARED installation used by",
+        "every cron bot on this machine, not this ticket's checkout — corrupting it takes",
+        "ALL bots down. For any Python/Node install or test step, always create a fresh,",
+        f"throwaway environment INSIDE this worktree (e.g. `python3 -m venv {repo}/.venv-test &&",
+        f"{repo}/.venv-test/bin/pip install -r requirements.txt`), never reference any",
+        "absolute venv path that lives outside your working directory.",
         "",
         "Constraints for this automated run (no human is watching the terminal,",
         "and the run is killed at a hard time limit):",
@@ -2611,11 +2664,26 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
         # Snapshot the MAIN checkout's tracked-file state so we can tell afterwards
         # whether the agent escaped the worktree and edited the real tree.
         dirty_before = _tracked_dirty(repo)
+        # Snapshot the resolver's own shared venv so we detect if the agent pip-installs
+        # into it (which would corrupt every other cron bot on the box).
+        venv_before = _resolver_venv_signature()
         ok, summary = run_agent_tracked(
             cfg, client, ticket,
             implement_prompt(ticket, wt, plan, reviewer_notes, main_repo=repo,
                              command=command),
             wt, "implement", log_path)
+        venv_after = _resolver_venv_signature()
+        if venv_before and venv_before != venv_after:
+            # Hard stop: the run modified the shared resolver venv. Abort WITHOUT
+            # publishing. The human must run resolver/setup.sh to rebuild before
+            # trusting any other bot's output.
+            _handle_venv_tamper(ticket)
+            fail(client, ticket,
+                 f"{agent_label} modified the resolver's shared .venv during this run; "
+                 "aborting without publishing to prevent venv corruption. "
+                 "Run `resolver/setup.sh` to reinstall the shared venv before other bots run.",
+                 reimplementable=True)
+            return
         escaped = _tracked_dirty(repo) - dirty_before
         if escaped:
             # Hard stop: the run reached outside its worktree and touched the real tree.
@@ -2660,8 +2728,17 @@ def do_implement(cfg: Config, client: StingrayClient, ticket: dict, repo: Path,
                         implement_prompt(ticket, wt, plan, reviewer_notes,
                                          main_repo=repo, verify_feedback=vout),
                         wt, "implement", rlog)
-                    # A repair run can escape the worktree too — re-check against the
-                    # pre-run snapshot and hard-fail just like the first run.
+                    # A repair run can tamper with the shared venv or escape the worktree
+                    # too — re-check both guards just like the first run.
+                    venv_after_repair = _resolver_venv_signature()
+                    if venv_before and venv_before != venv_after_repair:
+                        _handle_venv_tamper(ticket)
+                        fail(client, ticket,
+                             f"{agent_label} modified the resolver's shared .venv during "
+                             "a verification repair run; aborting without publishing. "
+                             "Run `resolver/setup.sh` to reinstall the shared venv.",
+                             reimplementable=True)
+                        return
                     escaped = _tracked_dirty(repo) - dirty_before
                     if escaped:
                         _handle_escape(repo, escaped, ticket)
