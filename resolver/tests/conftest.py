@@ -121,10 +121,13 @@ def fake_cfg(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _no_inherited_ticket_repo(monkeypatch):
-    """`process()` exports STINGRAY_TICKET_REPO so tickets the agent files name the
-    repo the run is working on. It is a real process env var, so without this a test
-    that drives process() leaks it into every later test that derives a repo tag."""
+    """`process()` and `do_implement()` export STINGRAY_TICKET_REPO/REV/BRANCH so
+    tickets the agent files name the repo/commit the run is working on. They are real
+    process env vars, so without this a test that drives either function leaks them
+    into every later test that derives those tags."""
     monkeypatch.delenv("STINGRAY_TICKET_REPO", raising=False)
+    monkeypatch.delenv("STINGRAY_TICKET_REV", raising=False)
+    monkeypatch.delenv("STINGRAY_TICKET_BRANCH", raising=False)
 
 
 @pytest.fixture(autouse=True)

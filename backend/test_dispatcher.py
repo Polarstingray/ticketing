@@ -57,7 +57,8 @@ def _no_dns(monkeypatch):
     would mark every delivery `skipped` and test nothing. The SSRF rules
     themselves are covered by test_webhooks.py.
     """
-    monkeypatch.setattr(dispatcher, "validate_webhook_url", lambda url: url)
+    monkeypatch.setattr(dispatcher, "validate_webhook_url",
+                        lambda url, **kwargs: url)
 
 
 def _make_webhook(db, user_id: int, **kwargs) -> Webhook:
@@ -573,6 +574,40 @@ def test_drain_once_runs_the_whole_pipeline(db, admin_id):
     )
     assert row is not None
     assert row.state == DeliveryState.succeeded.value
+
+
+def test_drain_once_skips_everything_when_paused(db, admin_id, monkeypatch):
+    """The admin-editable dispatcher_paused setting is a full pipeline pause —
+    claim/fan-out/deliver never run — distinct from DISPATCHER_ENABLED (which
+    decides whether run_dispatcher's task exists at all, boot-time only)."""
+    from schemas import SecuritySettingsValues
+
+    _quiesce(db)
+    ticket = _make_ticket(db, admin_id)
+    event = _make_event(db, ticket)
+    _make_webhook(db, admin_id, name="paused-test", url="https://paused.example/hook")
+    monkeypatch.setattr(
+        dispatcher, "get_security_settings",
+        lambda db: SecuritySettingsValues(dispatcher_paused=True),
+    )
+    called = {"handler": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["handler"] = True
+        return httpx.Response(200, text="ok")
+
+    async def drive():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await dispatcher.drain_once(client)
+
+    sent = asyncio.run(drive())
+
+    assert sent == 0
+    assert called["handler"] is False
+    db.expire_all()
+    # Nothing was even fanned out — the outbox row is untouched, not just unsent.
+    row = db.query(WebhookDelivery).filter(WebhookDelivery.event_id == event.id).first()
+    assert row is None
 
 
 def test_a_failing_delivery_does_not_abort_the_pass(db, admin_id, monkeypatch):

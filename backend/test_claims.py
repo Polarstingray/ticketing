@@ -13,7 +13,9 @@ import time
 
 import pytest
 
-from schemas import MIN_LEASE_TTL
+from database import SessionLocal
+from models import SecuritySettings
+from schemas import DEFAULT_LEASE_TTL, MIN_LEASE_TTL
 
 
 def _make_ticket(client, key, **fields) -> int:
@@ -215,3 +217,70 @@ def test_ttl_is_bounded(client, admin_key):
     tid = _make_ticket(client, admin_key)
     assert _claim(client, admin_key, tid, ttl_seconds=99_999).status_code == 422
     assert _claim(client, admin_key, tid, ttl_seconds=0).status_code == 422
+
+
+# --- admin-configured lease TTL policy window ---------------------------------
+# The schema's Field(ge=MIN_LEASE_TTL, le=MAX_LEASE_TTL) tested above is the
+# absolute hard rail; the security-settings panel lets an admin additionally
+# *tighten* the window inside it. That check lives in the claim route itself
+# (Pydantic Field bounds are fixed at import time and can't read a DB row).
+
+
+def _login(c, username: str, password: str):
+    r = c.post("/auth/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return c
+
+
+@pytest.fixture(autouse=True)
+def _reset_security_settings():
+    """This suite shares one DB and one global settings row with
+    test_security_settings.py/test_webhooks.py — reset it after every test
+    here so a narrowed policy window never leaks into an unrelated test's
+    claim() call elsewhere in the suite."""
+    yield
+    db = SessionLocal()
+    try:
+        row = db.query(SecuritySettings).filter(SecuritySettings.id == 1).one_or_none()
+        if row is not None:
+            row.settings = {}
+            db.commit()
+    finally:
+        db.close()
+
+
+def test_admin_narrowed_window_rejects_ttl_inside_hard_rail_but_outside_policy(
+    client, admin_key, new_client,
+):
+    admin = _login(new_client(), "admin", "admin")
+    r = admin.put("/security-settings", json={
+        "min_lease_ttl": 100, "max_lease_ttl": 200, "default_lease_ttl": 150,
+    })
+    assert r.status_code == 200, r.text
+
+    tid = _make_ticket(client, admin_key)
+    # 50 is well inside the schema's hard rail (MIN_LEASE_TTL..MAX_LEASE_TTL)
+    # but outside the admin-narrowed [100, 200] policy window.
+    res = _claim(client, admin_key, tid, ttl_seconds=50)
+    assert res.status_code == 422, res.text
+    assert "ttl_seconds must be between 100 and 200" in res.text
+
+    ok = _claim(client, admin_key, tid, ttl_seconds=150)
+    assert ok.status_code == 200, ok.text
+
+
+def test_omitted_ttl_uses_admin_configured_default(client, admin_key, new_client):
+    """A window that excludes the baked-in DEFAULT_LEASE_TTL (300) but
+    includes the admin-configured one (42) — if the route fell back to the
+    static default instead of reading the DB one, this claim would 422."""
+    assert not (MIN_LEASE_TTL <= DEFAULT_LEASE_TTL <= 100)  # sanity: 300 is outside [5, 100]
+    admin = _login(new_client(), "admin", "admin")
+    r = admin.put("/security-settings", json={
+        "min_lease_ttl": MIN_LEASE_TTL, "max_lease_ttl": 100, "default_lease_ttl": 42,
+    })
+    assert r.status_code == 200, r.text
+
+    tid = _make_ticket(client, admin_key)
+    res = _claim(client, admin_key, tid)  # no ttl_seconds in the body at all
+    assert res.status_code == 200, res.text
+    assert res.json()["token"]

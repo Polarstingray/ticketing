@@ -26,9 +26,9 @@ from sqlalchemy.orm import Session
 from auth import get_current_user, is_admin
 from database import get_db
 from models import DeliveryState, Ticket, User, Webhook, WebhookDelivery, utcnow
+from routers.security_settings import get_security_settings
 from routers.tickets import _visible_tickets
 from schemas import (
-    MAX_WEBHOOKS_PER_USER,
     PaginatedDeliveries,
     WebhookCreate,
     WebhookCreated,
@@ -38,6 +38,23 @@ from schemas import (
     WebhookUpdate,
 )
 from webhook_urls import validate_webhook_url
+
+
+def _validate_url_or_422(url: str, db: Session) -> str:
+    """validate_webhook_url, with the admin-configured exemption list/toggle
+    applied, turning a rejection into the 422 shape every other webhook
+    validation error already uses."""
+    settings = get_security_settings(db)
+    try:
+        return validate_webhook_url(
+            url,
+            allowed_hosts=frozenset(settings.webhook_allowed_hosts),
+            allow_insecure=settings.allow_insecure_webhooks,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -108,18 +125,20 @@ def create_webhook(
     user: User = Depends(get_current_user),
 ):
     """Create a webhook. The response is the only time its secret is shown."""
+    max_webhooks = get_security_settings(db).max_webhooks_per_user
     count = db.query(Webhook).filter(Webhook.user_id == user.id).count()
-    if count >= MAX_WEBHOOKS_PER_USER:
+    if count >= max_webhooks:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Too many webhooks (max {MAX_WEBHOOKS_PER_USER}); delete one first",
+            detail=f"Too many webhooks (max {max_webhooks}); delete one first",
         )
 
+    url = _validate_url_or_422(payload.url, db)
     secret = _new_secret()
     webhook = Webhook(
         user_id=user.id,
         name=payload.name,
-        url=payload.url,  # already SSRF-validated by the schema
+        url=url,
         event_types=[e.value for e in payload.event_types],
         tag_filter=payload.tag_filter,
         secret=secret,
@@ -152,9 +171,9 @@ def update_webhook(
     if payload.name is not None:
         webhook.name = payload.name
     if payload.url is not None:
-        # Re-checked here as well as in the schema: DNS moves, and this is the
-        # moment the stored target changes.
-        webhook.url = validate_webhook_url(payload.url)
+        # DNS moves, and the current admin exemption list may differ from
+        # what it was at create time, so this is validated fresh right here.
+        webhook.url = _validate_url_or_422(payload.url, db)
     if payload.event_types is not None:
         webhook.event_types = [e.value for e in payload.event_types]
     if payload.tag_filter is not None:
@@ -261,12 +280,7 @@ def redeliver(
 
     # DNS may have moved since the webhook was created, so the target is
     # re-validated before anything is queued against it.
-    try:
-        validate_webhook_url(webhook.url)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-        ) from exc
+    _validate_url_or_422(webhook.url, db)
 
     delivery.state = DeliveryState.pending.value
     delivery.next_attempt_at = utcnow()
