@@ -12,7 +12,7 @@ RESOLVER_DIR = Path(__file__).resolve().parent.parent
 if str(RESOLVER_DIR) not in sys.path:
     sys.path.insert(0, str(RESOLVER_DIR))
 
-from config import RepoNotFound
+from config import RepoNotFound  # noqa: E402
 
 BOT = 2
 
