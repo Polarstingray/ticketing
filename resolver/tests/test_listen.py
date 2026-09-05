@@ -226,6 +226,80 @@ def test_poke_addresses_the_user_manager(monkeypatch):
                       "stingray-resolver@claude-lite.service"]]
 
 
+class _FakeCfg:
+    stingray_url = "http://stingray.test/api"
+    api_key = "sk_test"
+    env_file = ".env.gemini"
+    name = "gemini"
+    agent = "opencode"
+    agent_model = "google/gemini-2.5-flash"
+    agent_implement_model = ""
+    bot_user_id = 3
+
+
+def _heartbeat(monkeypatch, sent, *, boom=False):
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def heartbeat(self, **fields):
+            if boom:
+                raise RuntimeError("server down")
+            sent.append(fields)
+            return {}
+
+    monkeypatch.setattr(listen, "StingrayClient", FakeClient)
+    return listen.Heartbeat(_FakeCfg(), "ubvm.home.lab",
+                            "stingray-resolver@gemini.service")
+
+
+def test_heartbeat_reports_the_station_and_its_own_cadence(monkeypatch):
+    """The listener is the process that is always up, so it owns liveness.
+
+    It must also say how often it checks in: a reader with only `last_seen_at`
+    cannot tell an idle resolver from a stopped one.
+    """
+    sent = []
+    hb = _heartbeat(monkeypatch, sent)
+    assert hb.beat() is True
+    assert sent[0]["station"] == "ubvm.home.lab"
+    assert sent[0]["heartbeat_seconds"] == int(listen.HEARTBEAT_SECONDS)
+    assert sent[0]["name"] == "gemini"
+
+
+def test_heartbeat_never_sends_effective_config(monkeypatch):
+    """That half of the row belongs to the sweep.
+
+    The server applies only the fields a caller sends, so an empty snapshot from
+    here would blank what the sweep reported.
+    """
+    sent = []
+    _heartbeat(monkeypatch, sent).beat()
+    assert "effective_config" not in sent[0]
+
+
+def test_a_failing_heartbeat_does_not_take_the_listener_down(monkeypatch):
+    """Liveness is a convenience for a human reading the roster.
+
+    A server that is down, a rotated key, or an older server with no such
+    endpoint must not stop the thing that actually wakes the resolver.
+    """
+    hb = _heartbeat(monkeypatch, [], boom=True)
+    assert hb.beat() is False      # no exception escapes
+    assert hb.beat() is False      # and it keeps trying
+
+
+def test_station_defaults_to_the_hostname(monkeypatch):
+    """Shared with the sweep via config, so both report the same host."""
+    import config
+
+    monkeypatch.delenv("RESOLVER_STATION", raising=False)
+    monkeypatch.setattr(config.socket, "gethostname", lambda: "ubvm.home.lab")
+    assert config.station_name() == "ubvm.home.lab"
+    monkeypatch.setenv("RESOLVER_STATION", "named-box")
+    assert config.station_name() == "named-box"
+
+
 def test_poke_dry_run_starts_nothing(monkeypatch):
     monkeypatch.setattr(listen.subprocess, "run",
                         lambda *a, **kw: pytest.fail("dry run shelled out"))
