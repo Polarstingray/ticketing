@@ -11,6 +11,7 @@ import FilterPanel from "../components/FilterPanel";
 import Tag from "../components/Tag";
 import {
   PRIORITY_LABELS,
+  STATUSES,
   STATUS_LABELS,
   TYPE_LABELS,
   formatDate,
@@ -237,8 +238,8 @@ export default function TicketList() {
     if (!selectedIds.size || bulkBusy) return;
     const body = { ids: [...selectedIds] };
     if (bulkStatus) body.status = bulkStatus;
-    if (bulkAssignee) body.assigned_to = Number(bulkAssignee);
-    if (!body.status && !body.assigned_to) return;
+    if (bulkAssignee !== "") body.assigned_to = bulkAssignee === "0" ? null : Number(bulkAssignee);
+    if (!body.status && !("assigned_to" in body)) return;
     setBulkBusy(true);
     try {
       const result = await api.bulkUpdateTickets(body);
@@ -403,8 +404,8 @@ export default function TicketList() {
               onChange={(e) => setBulkStatus(e.target.value)}
             >
               <option value="">— set status —</option>
-              {Object.entries({ open: "Open", in_progress: "In progress", resolved: "Resolved", closed: "Closed" }).map(([v, l]) => (
-                <option key={v} value={v}>{l}</option>
+              {STATUSES.map((s) => (
+                <option key={s} value={s}>{STATUS_LABELS[s]}</option>
               ))}
             </select>
             {users.length > 0 && (
@@ -468,7 +469,7 @@ export default function TicketList() {
                       type="checkbox"
                       aria-label={`Select ticket #${t.id}`}
                       checked={selectedIds.has(t.id)}
-                      onChange={() => {}}
+                      onChange={() => toggleSelect(t.id)}
                       onClick={(e) => e.stopPropagation()}
                     />
                   </div>
