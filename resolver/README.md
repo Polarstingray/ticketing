@@ -484,6 +484,66 @@ A dropped stream reconnects with backoff (2s, doubling, capped at 5min) and
 resumes from the last event id it saw, so an outage degrades to the timer's
 cadence rather than to a stalled resolver.
 
+### Several resolvers on one box
+
+The units above are single-instance and assume one resolver per checkout. When
+several identities share a checkout — `.env`, `.env.gemini`, `.env.open` — use
+the **templated** units instead, where the instance name is the identity:
+
+| Unit | Runs |
+|---|---|
+| `stingray-resolver@gemini.service` | one sweep with `RESOLVER_ENV_FILE=.env.gemini` |
+| `stingray-resolver@gemini.timer` | that sweep on a cadence |
+| `stingray-resolver-listen@gemini.service` | the stream for that bot, poking that sweep |
+
+systemd serializes each *instance* independently, which is exactly what a
+per-identity `flock -n /tmp/stingray-resolver-<x>.lock` was doing in cron — so
+the lock files stop being needed on the way across. The default identity has no
+suffix; give it one with a symlink (`ln -s .env .env.claude`) rather than
+special-casing the template.
+
+Install them as **user** units. The agent CLIs need the account's own
+credentials, and — the part that bites — a listener running as a normal user
+cannot `systemctl start` a *system* unit without a polkit rule, so the poke would
+fail silently and the identity would fall back to timer-only. Pass
+`--systemctl-user` (or set `RESOLVER_SYSTEMCTL_USER=1`) so the poke is addressed
+to the user manager; the shipped `stingray-resolver-listen@.service` already
+does.
+
+```bash
+mkdir -p ~/.config/systemd/user
+for u in stingray-resolver@.service stingray-resolver@.timer \
+         stingray-resolver-listen@.service; do
+  sed "s#/opt/ticketing/resolver#$(pwd)#g" "$u" > ~/.config/systemd/user/"$u"
+done
+systemctl --user daemon-reload
+loginctl enable-linger "$USER"          # survive logout, start at boot
+systemctl --user enable --now stingray-resolver@claude-lite.timer
+systemctl --user enable --now stingray-resolver-listen@claude-lite.service
+journalctl --user -u 'stingray-resolver-listen@claude-lite' -f
+```
+
+A second checkout pointed at a different server installs the same three files
+under its own prefix, so the two never share a unit name or a job queue:
+
+```bash
+sed -e "s#/opt/ticketing/resolver#$(pwd)#g" \
+    -e "s#stingray-resolver#stingray-ubvm#g" stingray-resolver@.service \
+  > ~/.config/systemd/user/stingray-ubvm@.service
+```
+
+Migrating off cron is one identity at a time: comment out its cron line, enable
+its timer, watch one sweep in the journal, then add the listener and drop the
+timer to 30min. Rollback is uncommenting the line and
+`systemctl --user disable --now` — the two paths are independent, and a
+redundant sweep costs one wasted round trip.
+
+Each listener holds its own connection, and the stream endpoint polls SQLite
+twice every 0.5s per connection, so N identities is 4N queries a second against
+the database. That is cheap but not free; a single listener on an **admin** key
+could route several bots to their units on one connection, at the cost of a
+broader key in a long-lived daemon.
+
 ## Daily digest (optional)
 
 Everything above is **reactive**: the resolver works whatever was assigned to its

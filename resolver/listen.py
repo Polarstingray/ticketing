@@ -169,10 +169,16 @@ class Waker:
     """
 
     def __init__(self, unit: str, dry_run: bool = False, once: bool = False,
-                 stop: Optional[threading.Event] = None):
+                 stop: Optional[threading.Event] = None, systemctl_user: bool = False):
         self.unit = unit
         self.dry_run = dry_run
         self.once = once
+        # Which systemd manager owns the sweep unit. A resolver installed under
+        # `systemctl --user` is the common case on a dev station: the agent CLIs
+        # need this account's credentials, and a user unit needs no polkit rule
+        # for a non-root listener to start it — but the poke then has to be
+        # addressed to the user manager, or it silently targets the system one.
+        self.systemctl_user = systemctl_user
         # Shared with the reader, so `--once` tears the whole daemon down rather
         # than leaving the connection held open by a thread with nothing to do.
         self._stop = stop or threading.Event()
@@ -209,24 +215,26 @@ class Waker:
 
     def poke(self) -> None:
         self.pokes += 1
+        scope = "--user " if self.systemctl_user else ""
         if self.dry_run:
-            log(f"listen: would start {self.unit} (dry run)")
+            log(f"listen: would start {scope}{self.unit} (dry run)")
             return
         # --no-block returns as soon as the job is queued. Without it this would
         # sit for the whole sweep, since the unit is Type=oneshot and `start`
         # waits for it; with it, systemd merges a start for an already-running
         # unit into the queued job, which is the debouncing this relies on.
-        cmd = ["systemctl", "start", "--no-block", self.unit]
+        cmd = ["systemctl"] + (["--user"] if self.systemctl_user else []) \
+            + ["start", "--no-block", self.unit]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         except FileNotFoundError:
             log("listen: systemctl not found — is this host running systemd?")
             return
         except subprocess.TimeoutExpired:
-            log(f"listen: `systemctl start {self.unit}` timed out")
+            log(f"listen: `systemctl {scope}start {self.unit}` timed out")
             return
         if result.returncode != 0:
-            log(f"listen: `systemctl start {self.unit}` failed rc={result.returncode}: "
+            log(f"listen: `systemctl {scope}start {self.unit}` failed rc={result.returncode}: "
                 f"{(result.stderr or '').strip()}")
         else:
             log(f"listen: poked {self.unit}")
@@ -242,7 +250,12 @@ def follow(cfg: Config, waker: Waker, stop: threading.Event,
     cursor is returned so the next attempt can resume where this one stopped
     rather than skipping the gap.
     """
-    url = f"{cfg.stingray_url}/api/events/stream"
+    # STINGRAY_URL already carries the `/api` prefix (config.py only strips the
+    # trailing slash, and every other consumer — StingrayClient, file_ticket's
+    # printed link — appends bare paths to it). Adding another one here made
+    # every connection 404 and back off forever, so the listener looked healthy
+    # in `systemctl status` while the resolver stayed timer-only.
+    url = f"{cfg.stingray_url}/events/stream"
     params = {"last_event_id": last_event_id} if last_event_id else {}
     headers = {"X-API-Key": cfg.api_key, "Accept": "text/event-stream"}
 
@@ -306,15 +319,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="log the pokes instead of starting anything")
     parser.add_argument("--once", action="store_true",
                         help="exit after the first poke (smoke test)")
+    parser.add_argument("--systemctl-user", action="store_true",
+                        default=os.environ.get("RESOLVER_SYSTEMCTL_USER", "") not in ("", "0"),
+                        help="poke the per-user systemd manager (`systemctl --user`) "
+                             "instead of the system one; required when the sweep is "
+                             "installed as a user unit")
     args = parser.parse_args(argv)
 
     cfg = Config.load()
     setup_logging(cfg)
     log(f"listen: following {cfg.stingray_url} as user {cfg.bot_user_id}, "
-        f"unit={args.unit}{' (dry run)' if args.dry_run else ''}")
+        f"unit={args.unit}{' (--user)' if args.systemctl_user else ''}"
+        f"{' (dry run)' if args.dry_run else ''}")
 
     stop = threading.Event()
-    waker = Waker(args.unit, dry_run=args.dry_run, once=args.once, stop=stop)
+    waker = Waker(args.unit, dry_run=args.dry_run, once=args.once, stop=stop,
+                  systemctl_user=args.systemctl_user)
     waker.start()
 
     def _shutdown(signum, _frame):
