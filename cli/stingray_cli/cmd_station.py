@@ -8,7 +8,6 @@ is one command instead of four.
 """
 from __future__ import annotations
 
-import argparse
 import socket
 import sys
 import time
