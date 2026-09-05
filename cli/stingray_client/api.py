@@ -22,6 +22,13 @@ import requests
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
+# What every version of the heartbeat endpoint has accepted. Anything outside
+# this set is dropped when an older server rejects the payload.
+_HEARTBEAT_LEGACY_FIELDS = frozenset(
+    {"label", "name", "agent", "model", "effective_config"}
+)
+
+
 def _status_of(exc: requests.HTTPError) -> int | None:
     """The status code an HTTPError carries, or None if it has no response."""
     return None if exc.response is None else exc.response.status_code
@@ -240,10 +247,31 @@ class StingrayClient:
     # --- resolver registry ----------------------------------------------
     def heartbeat(self, **fields: Any) -> dict:
         """Self-report this resolver's identity + observed state for the manager
-        registry (label, name, agent, model, effective_config). Authenticates as
-        the bot's own user; the server keys the row by that user id. Reuses the
-        retry/backoff/audit wrapper."""
-        return self._request("POST", "/resolvers/heartbeat", json=fields).json()
+        registry. Authenticates as the bot's own user; the server keys the row by
+        that user id. Reuses the retry/backoff/audit wrapper.
+
+        Send **only the fields you actually know**. Two processes report for one
+        worker — the sweep knows `effective_config`, the listener knows `station`
+        and `heartbeat_seconds` — and the server applies just what arrives, so
+        each keeps its own half of the row. Passing a field you have no value for
+        blanks whatever the other reporter wrote there.
+
+        A 422 is retried once without the fields an older server cannot know.
+        The endpoint forbids unknown keys on purpose, so that a snapshot can
+        never smuggle a secret — but the resolver and the backend are deployed
+        one at a time, and a worker upgraded first would otherwise 422 on every
+        beat and vanish from the roster until the server caught up. Degrading to
+        the fields that server does understand keeps liveness working across the
+        window."""
+        try:
+            return self._request("POST", "/resolvers/heartbeat", json=fields).json()
+        except requests.HTTPError as exc:
+            if _status_of(exc) != 422:
+                raise
+            legacy = {k: v for k, v in fields.items() if k in _HEARTBEAT_LEGACY_FIELDS}
+            if legacy == fields:
+                raise      # the server rejected something it does understand
+            return self._request("POST", "/resolvers/heartbeat", json=legacy).json()
 
     # --- resolver settings ----------------------------------------------
     def get_resolver_settings(self, bot_user_id: int | None = None) -> dict:

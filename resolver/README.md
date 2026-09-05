@@ -484,6 +484,30 @@ A dropped stream reconnects with backoff (2s, doubling, capped at 5min) and
 resumes from the last event id it saw, so an outage degrades to the timer's
 cadence rather than to a stalled resolver.
 
+### It also carries the liveness heartbeat
+
+The listener reports to `POST /resolvers/heartbeat` every five minutes, because
+it is the process that is always up. The sweep heartbeats too, but only *while
+it is sweeping* — so once timers moved to 30 minutes, a perfectly healthy
+resolver went quiet for half an hour at a time and the manager UI called it
+stale. A hardcoded staleness window cannot be right for both, so each worker now
+reports the cadence it promises (`heartbeat_seconds`, or 0 for "only when I
+sweep") and the reader sizes "too quiet" from that.
+
+It also reports its **station** — the host it runs on — so the roster can group
+workers by machine. Defaults to the hostname, which is what `stingray station
+init` defaults to as well, so the two agree without either reading the other's
+config; override with `RESOLVER_STATION` or `--station`. Turn the whole thing
+off with `--no-heartbeat`.
+
+The two reporters send different fields and the server applies only what
+arrives, so the sweep's config snapshot and the listener's liveness build one
+row instead of overwriting each other. A heartbeat that fails is logged once and
+otherwise ignored — liveness is a convenience for whoever reads the roster, and
+must never take down the thing that actually wakes the resolver. Against a
+server too old to know these fields the client retries once without them, so a
+staggered deploy loses nothing.
+
 ### Several resolvers on one box
 
 The units above are single-instance and assume one resolver per checkout. When

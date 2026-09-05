@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { api } from "../api";
 import styles from "../styles/ResolverSettings.module.css";
 
@@ -122,8 +122,16 @@ function fromForm(field, raw) {
 
 const ALL_FIELDS = SECTIONS.flatMap((s) => s.fields);
 
-// Freshness of a resolver's last heartbeat. Sweeps run ~every 10 min, so treat
-// anything within ~25 min as live, older as stale, and no heartbeat as unseen.
+// Freshness of a worker's last heartbeat, sized from the cadence it reports
+// rather than from a fixed number.
+//
+// A hardcoded window was wrong the moment sweep timers changed: a resolver that
+// only heartbeats while sweeping goes quiet for the whole interval, so moving
+// timers from 10 to 30 minutes made every healthy resolver display as stale. A
+// worker that reports `heartbeat_seconds` is checking in on that cadence, and
+// missing a few beats is the honest definition of "too quiet"; one that reports
+// 0 only speaks while it sweeps, and we have no cadence to go on, so the old
+// generous window stands for it.
 function relTime(ms) {
   const s = Math.round(ms / 1000);
   if (s < 90) return `${s}s ago`;
@@ -133,13 +141,42 @@ function relTime(ms) {
   if (h < 36) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
 }
-function freshness(lastSeen) {
+const SWEEP_ONLY_WINDOW_MS = 45 * 60 * 1000;
+const MISSED_BEATS_BEFORE_STALE = 3;
+
+export function staleAfter(heartbeatSeconds) {
+  if (!heartbeatSeconds || heartbeatSeconds <= 0) return SWEEP_ONLY_WINDOW_MS;
+  return heartbeatSeconds * MISSED_BEATS_BEFORE_STALE * 1000;
+}
+
+export function freshness(lastSeen, heartbeatSeconds) {
   if (!lastSeen) return { cls: "never", label: "never seen" };
   const age = Date.now() - new Date(lastSeen).getTime();
   // An unparseable timestamp yields NaN, which relTime would render as "NaN d
   // ago" — treat it as no heartbeat at all.
   if (Number.isNaN(age)) return { cls: "never", label: "never seen" };
-  return { cls: age < 25 * 60 * 1000 ? "live" : "stale", label: relTime(age) };
+  return {
+    cls: age < staleAfter(heartbeatSeconds) ? "live" : "stale",
+    label: relTime(age),
+  };
+}
+
+// Workers grouped by the host they run on, hosts in name order, with anything
+// that has never reported one last. A station is only a label a worker sends,
+// so this stays a display concern — nothing here assumes it is set.
+export function byStation(entries) {
+  const groups = new Map();
+  for (const e of entries) {
+    const key = e.station || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
+  }
+  return [...groups.entries()].sort(([a], [b]) => {
+    if (a === b) return 0;
+    if (!a) return 1;
+    if (!b) return -1;
+    return a.localeCompare(b);
+  });
 }
 
 // A few effective-config fields worth showing in the read-only "Currently
@@ -278,8 +315,15 @@ export default function ResolverSettings() {
                 <span className={styles.rosterName}>Global default</span>
                 <span className="muted">applies to every resolver</span>
               </button>
-              {roster.map((r) => {
-                const fr = freshness(r.last_seen_at);
+              {byStation(roster).map(([station, entries]) => (
+                <Fragment key={station || "unassigned"}>
+                  {byStation(roster).length > 1 && (
+                    <div className={styles.stationHeading}>
+                      {station || "no station reported"}
+                    </div>
+                  )}
+                  {entries.map((r) => {
+                const fr = freshness(r.last_seen_at, r.heartbeat_seconds);
                 return (
                   <button
                     type="button"
@@ -301,7 +345,9 @@ export default function ResolverSettings() {
                     </span>
                   </button>
                 );
-              })}
+                  })}
+                </Fragment>
+              ))}
             </div>
           </div>
 
@@ -320,7 +366,7 @@ export default function ResolverSettings() {
             ) : (
               <div className={styles.roster}>
                 {agents.map((a) => {
-                  const fr = freshness(a.last_seen_at);
+                  const fr = freshness(a.last_seen_at, a.heartbeat_seconds);
                   return (
                     <div
                       key={a.user_id}

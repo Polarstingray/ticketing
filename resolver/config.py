@@ -6,10 +6,25 @@ module is parsed manually so we don't need python-dotenv.
 from __future__ import annotations
 
 import os
+import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+
+def station_name() -> str:
+    """The host these resolvers run on. ``RESOLVER_STATION`` overrides.
+
+    Reported on every heartbeat so the manager can group workers by machine —
+    one server commonly has resolvers on several hosts, and the identity name
+    alone does not say which. A plain hostname by default, which is also what
+    ``stingray station init`` defaults to, so the two agree without either
+    reading the other's config. Deliberately not read from the station
+    inventory: that file belongs to the CLI, and a daemon must not depend on a
+    tool being installed.
+    """
+    return os.environ.get("RESOLVER_STATION", "").strip() or socket.gethostname()
 
 
 def _load_env_file(path: Path) -> None:
