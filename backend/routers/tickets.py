@@ -712,8 +712,33 @@ def release_ticket(
 ):
     """Give up a claim early, so the ticket is workable again without waiting out
     its TTL. Idempotent-ish: releasing a lease that already expired is a 404, not
-    an error the caller has to handle specially."""
-    ticket = _lease_ticket_or_404(ticket_id, db, user)
+    an error the caller has to handle specially.
+
+    Authorized by the **token**, not by ``can_modify_ticket`` the way ``claim``
+    is. The asymmetry is the point: gating a claim protects the queue, because a
+    member who could claim a ticket they cannot work would freeze it under its
+    real assignee. Releasing has no such hazard — handing a ticket back early can
+    only help whoever wants it next — and requiring modify rights here broke the
+    common case outright.
+
+    A worker's last act is usually to reassign the ticket to whoever asked for
+    the work, and only then release. By that point it is neither the creator nor
+    the assignee, so the permission check refused its own release; the client
+    reads 403/404 as "nothing to release" and moves on, and the ticket stays
+    locked for the rest of its TTL. Every hand-back leaked a claim for minutes,
+    which turned an immediate re-assignment into a wait for the next sweep.
+    ``_held_lease_or_error`` already proves ownership, and a secret token is
+    stronger evidence than a mutable assignment field.
+
+    The boundary is only lifted *for the holder*. A caller who does not present
+    the live token still goes through the ordinary check, so this endpoint can
+    never be used to probe for tickets someone else can see: a stranger gets the
+    same 404 they always did, not a 403 confirming the ticket exists and is
+    claimed."""
+    ticket = _get_ticket_or_404(ticket_id, db)
+    live = _live_lease(db, ticket_id)
+    if live is None or not secrets.compare_digest(live.token, payload.token):
+        _lease_ticket_or_404(ticket_id, db, user)
     lease = _held_lease_or_error(ticket_id, payload.token, db)
     db.delete(lease)
     _set_claim_mirror(ticket, False)
