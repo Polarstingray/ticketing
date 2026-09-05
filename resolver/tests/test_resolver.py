@@ -377,7 +377,6 @@ def test_do_implement_fails_early_if_base_branch_not_pushed(fake_cfg, monkeypatc
     # immediately (before the agent runs) with a clear message and reimplementable=True.
     repo = tmp_path / "repo"
     repo.mkdir()
-    wt = tmp_path / "wt"
 
     monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
     monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
