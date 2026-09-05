@@ -202,6 +202,26 @@ export function SettingsIcon(props) {
   );
 }
 
+export function ShieldIcon(props) {
+  return (
+    <Icon viewBox="0 0 24 24" fill="none" {...props}>
+      <path
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        d="M12 2.5l7.5 3v5.5c0 5-3.2 8.9-7.5 10.5-4.3-1.6-7.5-5.5-7.5-10.5V5.5l7.5-3z"
+      />
+      <path
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9 12l2 2 4-4.5"
+      />
+    </Icon>
+  );
+}
+
 export function HookIcon(props) {
   return (
     <Icon viewBox="0 0 474.899 474.899" {...props}>

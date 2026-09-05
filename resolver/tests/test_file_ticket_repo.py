@@ -103,3 +103,67 @@ def test_no_repo_still_opts_out(worktree, monkeypatch):
     monkeypatch.setenv("STINGRAY_TICKET_REPO", "ticketing")
     payload = file_ticket.build_payload(_args(wt, no_repo=True))
     assert _repo_tags(payload) == []
+
+
+# --- rev:/branch: auto-derivation (ticket #135) ---------------------------
+
+def _rev_tags(payload):
+    return [t for t in payload["tags"] if t.startswith("rev:")]
+
+
+def _branch_tags(payload):
+    return [t for t in payload["tags"] if t.startswith("branch:")]
+
+
+def test_rev_and_branch_inherited_from_env(worktree, monkeypatch):
+    """Inside a sweep STINGRAY_TICKET_REV/BRANCH are exported and should be picked up."""
+    _repo, wt = worktree
+    monkeypatch.setenv("STINGRAY_TICKET_REPO", "ticketing")
+    monkeypatch.setenv("STINGRAY_TICKET_REV", "abc123deadbeef")
+    monkeypatch.setenv("STINGRAY_TICKET_BRANCH", "claude/ticket-42")
+    payload = file_ticket.build_payload(_args(wt))
+    assert _rev_tags(payload) == ["rev:abc123deadbeef"]
+    assert _branch_tags(payload) == ["branch:claude/ticket-42"]
+
+
+def test_explicit_rev_branch_overridden_by_env_inside_sweep(worktree, monkeypatch):
+    """Inside a sweep the env var wins; an explicit --rev/--branch is ignored (same
+    logic as --repo)."""
+    _repo, wt = worktree
+    monkeypatch.setenv("STINGRAY_TICKET_REPO", "ticketing")
+    monkeypatch.setenv("STINGRAY_TICKET_REV", "envsha")
+    monkeypatch.setenv("STINGRAY_TICKET_BRANCH", "env-branch")
+    payload = file_ticket.build_payload(_args(wt, rev="explicit-sha", branch="explicit-branch"))
+    assert _rev_tags(payload) == ["rev:envsha"]
+    assert _branch_tags(payload) == ["branch:env-branch"]
+
+
+def test_explicit_rev_branch_wins_outside_sweep(worktree, monkeypatch):
+    """No env var: --rev/--branch are used as-is."""
+    _repo, wt = worktree
+    monkeypatch.delenv("STINGRAY_TICKET_REV", raising=False)
+    monkeypatch.delenv("STINGRAY_TICKET_BRANCH", raising=False)
+    payload = file_ticket.build_payload(_args(wt, rev="mysha", branch="feature"))
+    assert _rev_tags(payload) == ["rev:mysha"]
+    assert _branch_tags(payload) == ["branch:feature"]
+
+
+def test_no_repo_suppresses_auto_rev_branch(worktree, monkeypatch):
+    """--no-repo opts out of all auto-derivation including rev:/branch:."""
+    _repo, wt = worktree
+    monkeypatch.setenv("STINGRAY_TICKET_REPO", "ticketing")
+    monkeypatch.setenv("STINGRAY_TICKET_REV", "abc123")
+    monkeypatch.setenv("STINGRAY_TICKET_BRANCH", "claude/ticket-42")
+    payload = file_ticket.build_payload(_args(wt, no_repo=True))
+    assert _rev_tags(payload) == []
+    assert _branch_tags(payload) == []
+
+
+def test_blank_rev_env_does_not_tag(worktree, monkeypatch):
+    """An empty STINGRAY_TICKET_REV (e.g. rev-parse failed) does not add a rev: tag."""
+    _repo, wt = worktree
+    monkeypatch.setenv("STINGRAY_TICKET_REPO", "ticketing")
+    monkeypatch.setenv("STINGRAY_TICKET_REV", "   ")
+    monkeypatch.delenv("STINGRAY_TICKET_BRANCH", raising=False)
+    payload = file_ticket.build_payload(_args(wt))
+    assert _rev_tags(payload) == []

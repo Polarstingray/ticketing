@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
-import { MenuIcon, RobotIcon, SettingsIcon, UserIcon, UsersIcon, HookIcon } from "./icons";
+import {
+  MenuIcon,
+  RobotIcon,
+  SettingsIcon,
+  ShieldIcon,
+  UserIcon,
+  UsersIcon,
+  HookIcon,
+} from "./icons";
 import styles from "../styles/Sidebar.module.css";
 
 export default function Sidebar() {
@@ -72,6 +80,12 @@ export default function Sidebar() {
           <NavLink to="/admin/resolver-settings" className={linkClass} title="Resolvers">
             <RobotIcon size={18} />
             <span className={styles.label}>Resolvers</span>
+          </NavLink>
+        )}
+        {user?.role === "admin" && (
+          <NavLink to="/admin/security-settings" className={linkClass} title="Security">
+            <ShieldIcon size={18} />
+            <span className={styles.label}>Security</span>
           </NavLink>
         )}
         <NavLink to="/profile" className={linkClass} title="Profile">
