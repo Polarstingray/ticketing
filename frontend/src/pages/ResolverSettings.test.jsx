@@ -11,6 +11,8 @@ vi.mock("../api", () => ({
     listEnrollments: vi.fn(),
     createEnrollment: vi.fn(),
     revokeEnrollment: vi.fn(),
+    listApiKeys: vi.fn(),
+    revokeApiKey: vi.fn(),
     getResolverSettings: vi.fn(),
     updateResolverSettings: vi.fn(),
   },
@@ -202,5 +204,94 @@ describe("station enrolment", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("Models")).toBeInTheDocument());
     expect(screen.queryByText("boom")).not.toBeInTheDocument();
+  });
+});
+
+function resolverRow(overrides = {}) {
+  return {
+    bot_user_id: 7,
+    username: "station-test",
+    display_name: "Station test bot",
+    is_bot: true,
+    has_settings: false,
+    name: "station-test",
+    label: ".env.station-test",
+    agent: "claude",
+    model: "",
+    last_seen_at: null,
+    effective_config: null,
+    station: null,
+    heartbeat_seconds: 0,
+    ...overrides,
+  };
+}
+
+function apiKey(overrides = {}) {
+  return {
+    id: 3,
+    name: "resolver",
+    key_prefix: "sk_abcdefgh",
+    created_at: new Date().toISOString(),
+    last_used_at: null,
+    expires_at: null,
+    revoked: false,
+    scopes: [],
+    ...overrides,
+  };
+}
+
+describe("revoking a resolver bot's access", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listResolvers.mockResolvedValue([resolverRow()]);
+    api.listAgents.mockResolvedValue([]);
+    api.getResolverSettings.mockResolvedValue(settings());
+    api.listEnrollments.mockResolvedValue([]);
+    api.listApiKeys.mockResolvedValue([apiKey()]);
+  });
+
+  it("offers revoke on a live key once a resolver is selected", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText("station-test"));
+
+    expect(await screen.findByText("sk_abcdefgh…")).toBeInTheDocument();
+    expect(api.listApiKeys).toHaveBeenCalledWith(7);
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+  });
+
+  it("shows a revoked key as spent rather than revocable again", async () => {
+    api.listApiKeys.mockResolvedValue([apiKey({ revoked: true })]);
+    renderPage();
+    fireEvent.click(await screen.findByText("station-test"));
+
+    expect(await screen.findByText("revoked")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  it("sends a redeemed enrolment to the bot's keys instead of a dead revoke", async () => {
+    // The 409 from the API says "revoke the bot's API key instead"; before this
+    // the row said `bot #7` and named an action the UI did not offer anywhere.
+    api.listEnrollments.mockResolvedValue([
+      {
+        id: 2, username: "station-test", token_prefix: "st_bbbbbbb",
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        redeemed_at: new Date().toISOString(), redeemed_user_id: 7,
+        station: "ubvm.home.lab",
+      },
+    ]);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /bot #7/ }));
+    expect(await screen.findByText("sk_abcdefgh…")).toBeInTheDocument();
+  });
+
+  it("reports a key listing failure without blanking the page", async () => {
+    api.listApiKeys.mockRejectedValue(new Error("nope"));
+    renderPage();
+    fireEvent.click(await screen.findByText("station-test"));
+
+    expect(await screen.findByText("nope")).toBeInTheDocument();
+    expect(screen.getByText("Models")).toBeInTheDocument();
   });
 });
