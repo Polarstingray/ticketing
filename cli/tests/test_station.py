@@ -199,6 +199,48 @@ def test_render_leaves_the_default_family_alone(tmp_path):
     assert out == "Wants=stingray-resolver@%i.timer\n"
 
 
+# --- resolver status summary ------------------------------------------------
+
+def _unit(active="inactive", enabled="disabled", loaded=True):
+    return units.UnitState(name="x", loaded=loaded, active=active, enabled=enabled)
+
+
+def test_summary_running():
+    from stingray_cli.station.status import ResolverStatus
+    st = ResolverStatus(
+        resolver=_resolver(), timer=_unit("active", "enabled"),
+        listener=_unit("active", "enabled"), sweep=_unit(),
+    )
+    assert st.summary == "running"
+
+
+def test_summary_stopped_when_both_installed_but_neither_running():
+    from stingray_cli.station.status import ResolverStatus
+    st = ResolverStatus(
+        resolver=_resolver(), timer=_unit("inactive", "enabled"),
+        listener=_unit("inactive", "enabled"), sweep=_unit(),
+    )
+    assert st.summary == "stopped"
+
+
+def test_summary_partial_when_one_unit_missing():
+    from stingray_cli.station.status import ResolverStatus
+    st = ResolverStatus(
+        resolver=_resolver(), timer=_unit("active", "enabled"),
+        listener=_unit("inactive", "disabled"), sweep=_unit(),
+    )
+    assert st.summary == "partial"
+
+
+def test_summary_not_installed_when_neither_unit_present():
+    from stingray_cli.station.status import ResolverStatus
+    st = ResolverStatus(
+        resolver=_resolver(), timer=_unit("inactive", "disabled"),
+        listener=_unit("inactive", "disabled"), sweep=_unit(),
+    )
+    assert st.summary == "not installed"
+
+
 class _Completed:
     returncode = 0
     stdout = ""
