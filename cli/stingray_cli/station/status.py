@@ -74,10 +74,10 @@ class ResolverStatus:
 
     @property
     def summary(self) -> str:
-        if not self.managed:
-            return "not installed"
         if self.running:
             return "running" if self.connected is not False else "running (stream down)"
+        if self.managed:
+            return "stopped"
         if self.timer.installed or self.listener.installed:
             return "partial"
         return "not installed"
