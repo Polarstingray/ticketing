@@ -372,6 +372,43 @@ def test_do_implement_hard_fails_on_venv_tamper(fake_cfg, monkeypatch, tmp_path)
     assert ".venv" in failed["msg"]
 
 
+def test_do_implement_fails_early_if_base_branch_not_pushed(fake_cfg, monkeypatch, tmp_path):
+    # An implement run that targets an unpushed local base branch must fail
+    # immediately (before the agent runs) with a clear message and reimplementable=True.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    monkeypatch.setattr(rt, "set_state", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "has_origin", lambda repo_arg: True)
+    monkeypatch.setattr(rt, "run", lambda cmd, **kw: (0, ""))  # git fetch succeeds
+    monkeypatch.setattr(rt, "resolve_base", lambda repo_arg, ticket, **kw: ("HEAD", "cli/station", ""))
+    # ref_exists returns False for origin/cli/station (not pushed), True for other refs
+    def fake_ref_exists(repo_arg, ref):
+        return ref != "origin/cli/station"
+    monkeypatch.setattr(rt, "ref_exists", fake_ref_exists)
+
+    # These must NOT be called — the guard fires before them
+    monkeypatch.setattr(rt, "prepare_worktree",
+                        lambda repo_arg, tid, base: pytest.fail("must not call prepare_worktree"))
+    monkeypatch.setattr(rt, "run_agent_tracked",
+                        lambda *a, **k: pytest.fail("must not run agent"))
+
+    failed = {}
+    monkeypatch.setattr(rt, "fail",
+                        lambda client, ticket, msg, **k: failed.update(msg=msg, kw=k))
+
+    client = FakeClient()
+    ticket = {"id": 7, "title": "t", "description": "d", "tags": [], "created_by": 3}
+    rt.do_implement(fake_cfg, client, ticket, repo, plan="do stuff")
+
+    # Verify fail() was called with the right message and reimplementable=True
+    assert "not pushed" in failed["msg"]
+    assert "cli/station" in failed["msg"]
+    assert "git push origin" in failed["msg"]
+    assert failed["kw"].get("reimplementable") is True
+
+
 def test_implement_prompt_warns_about_resolver_venv(tmp_path):
     prompt = rt.implement_prompt(
         {"id": 1, "title": "t", "description": "d"}, tmp_path, plan="do stuff")
