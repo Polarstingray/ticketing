@@ -3493,3 +3493,93 @@ def test_a_succeeded_phase_posts_no_tail(monkeypatch, tmp_path):
     _, fields = client.runs[0]
     assert fields["status"] == "succeeded"
     assert fields["log_tail"] == ""
+
+
+def test_sweep_skipped_claim_returns_skipped_count(monkeypatch):
+    """When acquire_lease returns (False, None), sweep should count it as skipped."""
+    def fake_acquire_lease(cfg, ticket_id):
+        return False, None
+
+    monkeypatch.setattr(rt, "acquire_lease", fake_acquire_lease)
+    monkeypatch.setattr(rt, "process", lambda *a, **k: None)
+
+    cfg = SimpleNamespace(bot_user_id=BOT)
+    client = FakeClient(tickets=[
+        {"id": 1, "status": "open", "assigned_to": BOT},
+    ])
+    processed, skipped = rt.sweep(cfg, client, dry_run=False, only=None, max_tickets=0)
+    assert processed == 0
+    assert skipped == 1
+
+
+def test_repoke_after_lease_ttl_calls_systemd_run(monkeypatch, caplog):
+    """_repoke_after_lease_ttl should call systemd-run with correct arguments."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rt._repoke_after_lease_ttl(1)
+
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert "systemd-run" in cmd
+    assert "--on-active" in cmd
+    assert str(rt.LEASE_TTL_SECONDS) in cmd
+    assert "systemctl" in cmd
+    assert "start" in cmd
+    assert "stingray-resolver.service" in cmd
+
+
+def test_repoke_uses_resolver_unit_env(monkeypatch, caplog):
+    """_repoke_after_lease_ttl should respect RESOLVER_UNIT environment variable."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("RESOLVER_UNIT", "custom.service")
+    rt._repoke_after_lease_ttl(1)
+
+    assert len(calls) == 1
+    assert "custom.service" in calls[0]
+
+
+def test_repoke_uses_systemctl_user_flag(monkeypatch, caplog):
+    """_repoke_after_lease_ttl should use --user flag when RESOLVER_SYSTEMCTL_USER is set."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("RESOLVER_SYSTEMCTL_USER", "1")
+    rt._repoke_after_lease_ttl(1)
+
+    assert len(calls) == 1
+    assert "--user" in calls[0]
+
+
+def test_repoke_survives_systemctl_missing(monkeypatch):
+    """_repoke_after_lease_ttl should not crash if systemd-run is missing."""
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("systemd-run not found")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # Should not raise an exception
+    rt._repoke_after_lease_ttl(1)
+
+
+def test_repoke_survives_systemctl_failure(monkeypatch):
+    """_repoke_after_lease_ttl should not crash on subprocess failure."""
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=1, stderr="error message", stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # Should not raise an exception
+    rt._repoke_after_lease_ttl(1)

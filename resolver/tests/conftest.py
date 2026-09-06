@@ -57,9 +57,13 @@ class FakeClient:
 
     def iter_tickets(self, **filters):
         tag = filters.get("tag")
+        assigned_to = filters.get("assigned_to")
         for t in self._tickets.values():
-            if tag is None or tag in (t.get("tags") or []):
-                yield t
+            if tag is not None and tag not in (t.get("tags") or []):
+                continue
+            if assigned_to is not None and t.get("assigned_to") != assigned_to:
+                continue
+            yield t
 
 
 @pytest.fixture
