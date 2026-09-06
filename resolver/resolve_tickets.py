@@ -3781,22 +3781,39 @@ def give_up(client: StingrayClient, ticket: dict, failures: int) -> None:
           failures=failures)
 
 
+def _repoke_after_lease_ttl(skipped: int) -> None:
+    """Schedule a one-shot re-sweep so a skipped-claim ticket isn't stalled until the timer."""
+    unit = os.environ.get("RESOLVER_UNIT", "stingray-resolver.service")
+    use_user = os.environ.get("RESOLVER_SYSTEMCTL_USER", "") not in ("", "0")
+    scope = ["--user"] if use_user else []
+    delay = str(LEASE_TTL_SECONDS)
+    cmd = ["systemd-run"] + scope + ["--on-active", delay, "systemctl"] + scope + ["start", unit]
+    log(f"skipped {skipped} claimed ticket(s); scheduling re-sweep in {delay}s")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            log(f"could not schedule re-sweep: {(result.stderr or '').strip()}")
+    except Exception as e:  # noqa: BLE001
+        log(f"could not schedule re-sweep ({type(e).__name__}): {e}")
+
+
 def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
-          max_tickets: int = 0) -> int:
-    """Process the bot's queue; return how many tickets were processed (used by
-    main() to drop the log files of an empty sweep)."""
+          max_tickets: int = 0) -> tuple[int, int]:
+    """Process the bot's queue; return (how many tickets were processed, how many
+    were skipped due to a live lease). Used by main() to drop the log files of an
+    empty sweep and to re-poke when a claim race was lost."""
     if only is not None:
         ticket = client.get_ticket(only)
         may_process, lease = (True, None) if dry_run else acquire_lease(cfg, only)
         if not may_process:
             log(f"#{only}: already claimed by another worker; not processing")
-            return 0
+            return 0, 0
         try:
             process(cfg, client, ticket, dry_run)
         finally:
             if lease is not None:
                 lease.release()
-        return 1
+        return 1, 0
     # Anything currently assigned to the bot is ours to act on, regardless of
     # status (after /approve the human reassigns but leaves status=in_review).
     # Terminal statuses are skipped so we never re-plan a finished ticket.
@@ -3806,6 +3823,7 @@ def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
                if t.get("status") not in ("resolved", "closed")]
     tickets.sort(key=lambda t: t.get("id", 0))
     processed = 0
+    skipped_claims = 0
     for ticket in tickets:
         if max_tickets and processed >= max_tickets:
             log(f"reached max-tickets={max_tickets}; {len(tickets) - processed} left for next sweep")
@@ -3817,6 +3835,7 @@ def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
         may_process, lease = (True, None) if dry_run else acquire_lease(cfg, ticket["id"])
         if not may_process:
             log(f"#{ticket['id']}: already claimed by another worker, skipping")
+            skipped_claims += 1
             continue
         processed += 1
         try:
@@ -3836,7 +3855,7 @@ def sweep(cfg: Config, client: StingrayClient, dry_run: bool, only: int | None,
             if lease is not None:
                 lease.release()
             audit.set_ticket(None)
-    return processed
+    return processed, skipped_claims
 
 
 # Non-secret resolver tunables the server-side settings API may override at sweep
@@ -3963,8 +3982,10 @@ def main() -> None:
     max_tickets = args.max_tickets if args.max_tickets is not None else cfg.max_tickets_per_sweep
     log(f"sweep start (agent {runner.name}, bot user {cfg.bot_user_id}, "
         f"root {cfg.projects_root}, max_tickets={max_tickets or 'unlimited'})")
-    processed = sweep(cfg, client, args.dry_run, args.ticket, max_tickets)
+    processed, skipped_claims = sweep(cfg, client, args.dry_run, args.ticket, max_tickets)
     log("sweep done")
+    if skipped_claims and not args.dry_run:
+        _repoke_after_lease_ttl(skipped_claims)
     # An empty sweep did nothing worth a trace — drop its own log/audit pair so
     # ~288 idle sweeps/day don't bury the dir in near-empty files. A sweep that
     # errored propagates past here, keeping its log.

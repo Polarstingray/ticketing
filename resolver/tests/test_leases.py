@@ -74,8 +74,9 @@ def recorded_process(monkeypatch):
 
 
 def _ticket(tid: int) -> dict:
+    from conftest import BOT
     return {"id": tid, "title": f"t{tid}", "status": "open", "tags": [],
-            "created_by": 9, "type": "task", "description": ""}
+            "created_by": 9, "type": "task", "description": "", "assigned_to": BOT}
 
 
 # --- set_state -----------------------------------------------------------
@@ -117,7 +118,9 @@ def test_sweep_claims_processes_and_releases(fake_cfg, lease_client,
     fake = lease_client(grants={7: "tok-7"})
     client = FakeClient(tickets=[_ticket(7)])
 
-    assert rt.sweep(fake_cfg, client, dry_run=False, only=None) == 1
+    processed, skipped = rt.sweep(fake_cfg, client, dry_run=False, only=None)
+    assert processed == 1
+    assert skipped == 0
     assert recorded_process == [7]
     assert fake.claimed == [7]
     # Released on the way out, so the ticket is workable again immediately
@@ -134,12 +137,13 @@ def test_sweep_skips_a_ticket_another_worker_holds(fake_cfg, lease_client,
     fake = lease_client(grants={9: "tok-9"})
     client = FakeClient(tickets=[_ticket(8), _ticket(9)])
 
-    processed = rt.sweep(fake_cfg, client, dry_run=False, only=None)
+    processed, skipped = rt.sweep(fake_cfg, client, dry_run=False, only=None)
 
     assert recorded_process == [9]
     # A skipped ticket isn't "processed" — nothing was done with it, so it must
     # not eat a slot in a bounded sweep either.
     assert processed == 1
+    assert skipped == 1
     assert fake.released == [(9, "tok-9")]
 
 
@@ -150,7 +154,9 @@ def test_a_skipped_ticket_does_not_consume_max_tickets(fake_cfg, lease_client,
     lease_client(grants={11: "tok-11"})  # 10 contended, 11 free
     client = FakeClient(tickets=[_ticket(10), _ticket(11)])
 
-    assert rt.sweep(fake_cfg, client, dry_run=False, only=None, max_tickets=1) == 1
+    processed, skipped = rt.sweep(fake_cfg, client, dry_run=False, only=None, max_tickets=1)
+    assert processed == 1
+    assert skipped == 1
     assert recorded_process == [11]
 
 
@@ -164,7 +170,9 @@ def test_sweep_proceeds_unleased_when_the_server_has_no_lease_api(
     fake = lease_client(raise_on_claim=requests.HTTPError("404"))
     client = FakeClient(tickets=[_ticket(12)])
 
-    assert rt.sweep(fake_cfg, client, dry_run=False, only=None) == 1
+    processed, skipped = rt.sweep(fake_cfg, client, dry_run=False, only=None)
+    assert processed == 1
+    assert skipped == 0
     assert recorded_process == [12]
     assert fake.released == []
     assert rt.lease_token_for(12) is None
@@ -208,7 +216,9 @@ def test_single_ticket_run_claims_too(fake_cfg, lease_client, recorded_process):
     fake = lease_client(grants={15: "tok-15"})
     client = FakeClient(tickets=[_ticket(15)])
 
-    assert rt.sweep(fake_cfg, client, dry_run=False, only=15) == 1
+    processed, skipped = rt.sweep(fake_cfg, client, dry_run=False, only=15)
+    assert processed == 1
+    assert skipped == 0
     assert recorded_process == [15]
     assert fake.released == [(15, "tok-15")]
 
@@ -220,7 +230,9 @@ def test_single_ticket_run_yields_to_the_holder(fake_cfg, lease_client,
     lease_client(grants={})
     client = FakeClient(tickets=[_ticket(16)])
 
-    assert rt.sweep(fake_cfg, client, dry_run=False, only=16) == 0
+    processed, skipped = rt.sweep(fake_cfg, client, dry_run=False, only=16)
+    assert processed == 0
+    assert skipped == 0
     assert recorded_process == []
 
 
