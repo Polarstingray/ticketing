@@ -14,7 +14,12 @@ import argparse
 import sys
 
 from stingray_cli import (
-    cmd_auth, cmd_explore, cmd_file, cmd_review, cmd_scaffold, cmd_station,
+    cmd_auth,
+    cmd_explore,
+    cmd_file,
+    cmd_review,
+    cmd_scaffold,
+    cmd_station,
 )
 from stingray_cli.config import ConfigError
 from stingray_cli.gitctx import GitError
