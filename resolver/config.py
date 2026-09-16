@@ -515,7 +515,7 @@ class Config:
             # below would also catch them). Relative slash-separated subpaths like
             # "school/csci4511/project" are allowed.
             if name.startswith("/") or name in ("..", "."):
-                raise RepoNotAllowed(f"repo name {name!r} must be a plain directory name under PROJECTS_ROOT")
+                raise RepoNotAllowed(f"repo name {name!r} must be a relative path within PROJECTS_ROOT (no leading slashes or absolute paths)")
             candidate = self.projects_root / name
 
         resolved = candidate.expanduser().resolve()
