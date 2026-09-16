@@ -510,9 +510,11 @@ class Config:
         if name in self.repo_map:
             candidate = Path(self.repo_map[name])
         else:
-            # A bare name is always taken relative to the allowlist root; a name
-            # containing path separators is rejected outright.
-            if "/" in name or name in ("..", "."):
+            # A bare name is always taken relative to the allowlist root; absolute
+            # paths are rejected outright as an early gate (though the allowlist check
+            # below would also catch them). Relative slash-separated subpaths like
+            # "school/csci4511/project" are allowed.
+            if name.startswith("/") or name in ("..", "."):
                 raise RepoNotAllowed(f"repo name {name!r} must be a plain directory name under PROJECTS_ROOT")
             candidate = self.projects_root / name
 
