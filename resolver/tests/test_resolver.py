@@ -20,6 +20,7 @@ import file_ticket as ft
 import logs as logviewer
 import resolve_tickets as rt
 import stingray
+from config import Config, RepoNotAllowed, RepoNotFound
 from conftest import BOT, FakeClient
 
 
@@ -3583,3 +3584,363 @@ def test_repoke_survives_systemctl_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     # Should not raise an exception
     rt._repoke_after_lease_ttl(1)
+
+
+# --- Config.resolve_repo: nested path support ---------------------------
+def test_resolve_repo_nested_path_succeeds(tmp_path):
+    """Nested relative paths like 'school/csci4511/project' should resolve."""
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    nested_repo = projects_root / "school" / "csci4511" / "project"
+    nested_repo.mkdir(parents=True)
+    (nested_repo / ".git").mkdir()
+
+    cfg = Config(
+        stingray_url="http://test",
+        api_key="test-key",
+        bot_user_id=2,
+        env_file=".env",
+        name="test",
+        agent="claude",
+        projects_root=projects_root,
+        repo_map={},
+        default_repo="",
+        agent_bin="claude",
+        agent_model="opus",
+        agent_plan_model="",
+        agent_implement_model="",
+        agent_review_model="",
+        agent_implement_model_easy="",
+        agent_implement_model_hard="",
+        agent_fallback_model="",
+        agent_fallback_models=[],
+        implement_tools="",
+        agent_timeout=1800,
+        agent_implement_timeout=2400,
+        agent_plan_review_timeout=600,
+        opencode_plan_agent="plan",
+        opencode_build_agent="build",
+        patch_fallback=False,
+        stingray_max_retries=3,
+        max_attempts=3,
+        max_tickets_per_sweep=0,
+        git_net_timeout=300,
+        log_retention_days=14,
+        log_archive_after_days=1,
+        cron_log=None,
+        cron_log_max_bytes=5000000,
+        git_author_name="Test",
+        git_author_email="test@example.com",
+        audit_output_tail_bytes=4096,
+        escalate_to_user_id=0,
+        escalate_priorities=[],
+        consolidate_review_user_id=4,
+        review_api_url="",
+        review_api_key="",
+        review_api_model="",
+        critique_api_url="",
+        critique_api_key="",
+        critique_api_model="",
+        critique_max_revisions=1,
+        verify_command="",
+        verify_timeout=900,
+        verify_max_retries=1,
+        sandbox_command="",
+        quota_backoff_minutes=60,
+        allow_delegation=False,
+        workers=[],
+        max_delegations=10,
+        digest_admin_key="",
+        digest_api_url="",
+        digest_api_key="",
+        digest_api_model="",
+    )
+
+    result = cfg.resolve_repo("school/csci4511/project")
+    assert result == nested_repo
+
+
+def test_resolve_repo_absolute_path_rejected(tmp_path):
+    """Absolute paths like '/etc/passwd' should be rejected."""
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    cfg = Config(
+        stingray_url="http://test",
+        api_key="test-key",
+        bot_user_id=2,
+        env_file=".env",
+        name="test",
+        agent="claude",
+        projects_root=projects_root,
+        repo_map={},
+        default_repo="",
+        agent_bin="claude",
+        agent_model="opus",
+        agent_plan_model="",
+        agent_implement_model="",
+        agent_review_model="",
+        agent_implement_model_easy="",
+        agent_implement_model_hard="",
+        agent_fallback_model="",
+        agent_fallback_models=[],
+        implement_tools="",
+        agent_timeout=1800,
+        agent_implement_timeout=2400,
+        agent_plan_review_timeout=600,
+        opencode_plan_agent="plan",
+        opencode_build_agent="build",
+        patch_fallback=False,
+        stingray_max_retries=3,
+        max_attempts=3,
+        max_tickets_per_sweep=0,
+        git_net_timeout=300,
+        log_retention_days=14,
+        log_archive_after_days=1,
+        cron_log=None,
+        cron_log_max_bytes=5000000,
+        git_author_name="Test",
+        git_author_email="test@example.com",
+        audit_output_tail_bytes=4096,
+        escalate_to_user_id=0,
+        escalate_priorities=[],
+        consolidate_review_user_id=4,
+        review_api_url="",
+        review_api_key="",
+        review_api_model="",
+        critique_api_url="",
+        critique_api_key="",
+        critique_api_model="",
+        critique_max_revisions=1,
+        verify_command="",
+        verify_timeout=900,
+        verify_max_retries=1,
+        sandbox_command="",
+        quota_backoff_minutes=60,
+        allow_delegation=False,
+        workers=[],
+        max_delegations=10,
+        digest_admin_key="",
+        digest_api_url="",
+        digest_api_key="",
+        digest_api_model="",
+    )
+
+    with pytest.raises(RepoNotAllowed):
+        cfg.resolve_repo("/etc/passwd")
+
+
+def test_resolve_repo_traversal_via_dotdot_rejected(tmp_path):
+    """Traversal via '..' should be rejected by the allowlist check."""
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+
+    cfg = Config(
+        stingray_url="http://test",
+        api_key="test-key",
+        bot_user_id=2,
+        env_file=".env",
+        name="test",
+        agent="claude",
+        projects_root=projects_root,
+        repo_map={},
+        default_repo="",
+        agent_bin="claude",
+        agent_model="opus",
+        agent_plan_model="",
+        agent_implement_model="",
+        agent_review_model="",
+        agent_implement_model_easy="",
+        agent_implement_model_hard="",
+        agent_fallback_model="",
+        agent_fallback_models=[],
+        implement_tools="",
+        agent_timeout=1800,
+        agent_implement_timeout=2400,
+        agent_plan_review_timeout=600,
+        opencode_plan_agent="plan",
+        opencode_build_agent="build",
+        patch_fallback=False,
+        stingray_max_retries=3,
+        max_attempts=3,
+        max_tickets_per_sweep=0,
+        git_net_timeout=300,
+        log_retention_days=14,
+        log_archive_after_days=1,
+        cron_log=None,
+        cron_log_max_bytes=5000000,
+        git_author_name="Test",
+        git_author_email="test@example.com",
+        audit_output_tail_bytes=4096,
+        escalate_to_user_id=0,
+        escalate_priorities=[],
+        consolidate_review_user_id=4,
+        review_api_url="",
+        review_api_key="",
+        review_api_model="",
+        critique_api_url="",
+        critique_api_key="",
+        critique_api_model="",
+        critique_max_revisions=1,
+        verify_command="",
+        verify_timeout=900,
+        verify_max_retries=1,
+        sandbox_command="",
+        quota_backoff_minutes=60,
+        allow_delegation=False,
+        workers=[],
+        max_delegations=10,
+        digest_admin_key="",
+        digest_api_url="",
+        digest_api_key="",
+        digest_api_model="",
+    )
+
+    with pytest.raises(RepoNotAllowed):
+        cfg.resolve_repo("../outside")
+
+
+def test_resolve_repo_deeply_nested_path_succeeds(tmp_path):
+    """Deeply nested paths like 'a/b/c/d' should resolve."""
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    deeply_nested = projects_root / "a" / "b" / "c" / "d"
+    deeply_nested.mkdir(parents=True)
+    (deeply_nested / ".git").mkdir()
+
+    cfg = Config(
+        stingray_url="http://test",
+        api_key="test-key",
+        bot_user_id=2,
+        env_file=".env",
+        name="test",
+        agent="claude",
+        projects_root=projects_root,
+        repo_map={},
+        default_repo="",
+        agent_bin="claude",
+        agent_model="opus",
+        agent_plan_model="",
+        agent_implement_model="",
+        agent_review_model="",
+        agent_implement_model_easy="",
+        agent_implement_model_hard="",
+        agent_fallback_model="",
+        agent_fallback_models=[],
+        implement_tools="",
+        agent_timeout=1800,
+        agent_implement_timeout=2400,
+        agent_plan_review_timeout=600,
+        opencode_plan_agent="plan",
+        opencode_build_agent="build",
+        patch_fallback=False,
+        stingray_max_retries=3,
+        max_attempts=3,
+        max_tickets_per_sweep=0,
+        git_net_timeout=300,
+        log_retention_days=14,
+        log_archive_after_days=1,
+        cron_log=None,
+        cron_log_max_bytes=5000000,
+        git_author_name="Test",
+        git_author_email="test@example.com",
+        audit_output_tail_bytes=4096,
+        escalate_to_user_id=0,
+        escalate_priorities=[],
+        consolidate_review_user_id=4,
+        review_api_url="",
+        review_api_key="",
+        review_api_model="",
+        critique_api_url="",
+        critique_api_key="",
+        critique_api_model="",
+        critique_max_revisions=1,
+        verify_command="",
+        verify_timeout=900,
+        verify_max_retries=1,
+        sandbox_command="",
+        quota_backoff_minutes=60,
+        allow_delegation=False,
+        workers=[],
+        max_delegations=10,
+        digest_admin_key="",
+        digest_api_url="",
+        digest_api_key="",
+        digest_api_model="",
+    )
+
+    result = cfg.resolve_repo("a/b/c/d")
+    assert result == deeply_nested
+
+
+def test_resolve_repo_nested_not_found(tmp_path):
+    """Nested paths that don't exist should raise RepoNotFound."""
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    cfg = Config(
+        stingray_url="http://test",
+        api_key="test-key",
+        bot_user_id=2,
+        env_file=".env",
+        name="test",
+        agent="claude",
+        projects_root=projects_root,
+        repo_map={},
+        default_repo="",
+        agent_bin="claude",
+        agent_model="opus",
+        agent_plan_model="",
+        agent_implement_model="",
+        agent_review_model="",
+        agent_implement_model_easy="",
+        agent_implement_model_hard="",
+        agent_fallback_model="",
+        agent_fallback_models=[],
+        implement_tools="",
+        agent_timeout=1800,
+        agent_implement_timeout=2400,
+        agent_plan_review_timeout=600,
+        opencode_plan_agent="plan",
+        opencode_build_agent="build",
+        patch_fallback=False,
+        stingray_max_retries=3,
+        max_attempts=3,
+        max_tickets_per_sweep=0,
+        git_net_timeout=300,
+        log_retention_days=14,
+        log_archive_after_days=1,
+        cron_log=None,
+        cron_log_max_bytes=5000000,
+        git_author_name="Test",
+        git_author_email="test@example.com",
+        audit_output_tail_bytes=4096,
+        escalate_to_user_id=0,
+        escalate_priorities=[],
+        consolidate_review_user_id=4,
+        review_api_url="",
+        review_api_key="",
+        review_api_model="",
+        critique_api_url="",
+        critique_api_key="",
+        critique_api_model="",
+        critique_max_revisions=1,
+        verify_command="",
+        verify_timeout=900,
+        verify_max_retries=1,
+        sandbox_command="",
+        quota_backoff_minutes=60,
+        allow_delegation=False,
+        workers=[],
+        max_delegations=10,
+        digest_admin_key="",
+        digest_api_url="",
+        digest_api_key="",
+        digest_api_model="",
+    )
+
+    with pytest.raises(RepoNotFound):
+        cfg.resolve_repo("school/csci4511/nonexistent")
